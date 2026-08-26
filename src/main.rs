@@ -1,3 +1,6 @@
+mod utils;
+
+use crate::utils::generated_text_output::create_generated_text_output;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::DType;
@@ -16,29 +19,30 @@ use log::error;
 use log::info;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Duration;
 use std::time::Instant;
 use tokenizers::Tokenizer;
 
 struct InferenceSettings {
+    /// Hugging Face model repository to download and load.
     model_id: String,
+    /// Model repository revision, such as a branch, tag, or commit hash.
     model_revision: String,
+    /// User text inserted into the model's chat template.
     prompt: String,
+    /// Maximum number of tokens the model may generate before stopping.
     max_new_tokens: usize,
+    /// Penalty applied to previously seen tokens; `1.0` disables it.
     repeat_penalty: f32,
+    /// Number of recent tokens considered when applying the repetition penalty.
     repeat_last_n: usize,
+    /// Whether generated text is printed incrementally instead of buffered.
+    stream_output: bool,
 }
 
 struct ModelFiles {
     tokenizer: PathBuf,
     config: PathBuf,
     weights: PathBuf,
-}
-
-struct GenerationResult {
-    text: String,
-    token_count: usize,
-    elapsed_time: Duration,
 }
 
 fn main() {
@@ -57,6 +61,7 @@ fn main() {
         max_new_tokens: 1024,
         repeat_penalty: 1.1,
         repeat_last_n: 64,
+        stream_output: true,
     };
 
     if let Err(err) = run(&settings) {
@@ -74,11 +79,7 @@ fn run(settings: &InferenceSettings) -> Result<()> {
     let tokenizer = load_tokenizer(&files.tokenizer)?;
     let config = load_model_config(&files.config)?;
     let mut model = load_model(&config, &files.weights, dtype, &device)?;
-
-    let result = generate_text(settings, &mut model, &tokenizer, &device)?;
-    log_generation_result(&result);
-
-    Ok(())
+    generate_text(settings, &mut model, &tokenizer, &device)
 }
 
 fn initialize_logging() {
@@ -141,7 +142,7 @@ fn generate_text(
     model: &mut ModelForCausalLM,
     tokenizer: &Tokenizer,
     device: &Device,
-) -> Result<GenerationResult> {
+) -> Result<()> {
     let model_prompt = format_chat_prompt(&settings.prompt);
     let encoding = tokenizer
         .encode(model_prompt, true)
@@ -154,8 +155,11 @@ fn generate_text(
         .filter_map(|token| tokenizer.token_to_id(token))
         .collect();
     let mut logits_processor = LogitsProcessor::new(0, None, None);
-    let generation_started = Instant::now();
+    let mut token_stream = tokenizer.decode_stream(true);
+    let mut generated_text_output = create_generated_text_output(settings.stream_output);
 
+    let generation_started = Instant::now();
+    generated_text_output.start();
     for step in 0..settings.max_new_tokens {
         // Feed the full prompt once, then one token at a time. Qwen's Candle
         // implementation retains the KV cache between these calls.
@@ -173,18 +177,25 @@ fn generate_text(
             break;
         }
         tokens.push(next_token);
+        if let Some(fragment) = token_stream
+            .step(next_token)
+            .map_err(anyhow::Error::msg)
+            .context("failed to decode generated token")?
+        {
+            generated_text_output.push_fragment(&fragment)?;
+        }
     }
+    generated_text_output.finish()?;
 
-    let completion = tokenizer
-        .decode(&tokens[prompt_token_count..], true)
-        .map_err(anyhow::Error::msg)
-        .context("failed to decode generated tokens")?;
+    let token_count = tokens.len() - prompt_token_count;
+    let elapsed_time = generation_started.elapsed();
+    let tokens_per_second = token_count as f64 / elapsed_time.as_secs_f64();
+    info!(
+        "Generated {token_count} tokens in {elapsed_time:.2?} \
+         ({tokens_per_second:.2} tokens/s)"
+    );
 
-    Ok(GenerationResult {
-        text: completion,
-        token_count: tokens.len() - prompt_token_count,
-        elapsed_time: generation_started.elapsed(),
-    })
+    Ok(())
 }
 
 fn format_chat_prompt(prompt: &str) -> String {
@@ -201,22 +212,15 @@ fn log_inference_config(settings: &InferenceSettings, device: &Device, dtype: DT
          Prompt: {}\n\
          Maximum new tokens: {}\n\
          Decoding: greedy\n\
-         Repetition penalty: {} (last {} tokens)",
+         Repetition penalty: {} (last {} tokens)\n\
+         Stream output: {}",
         settings.model_id,
         settings.model_revision,
         settings.prompt,
         settings.max_new_tokens,
         settings.repeat_penalty,
-        settings.repeat_last_n
-    );
-}
-
-fn log_generation_result(result: &GenerationResult) {
-    let tokens_per_second = result.token_count as f64 / result.elapsed_time.as_secs_f64();
-    info!("Output:\n{}", result.text);
-    info!(
-        "Generated {} tokens in {:.2?} ({tokens_per_second:.2} tokens/s)",
-        result.token_count, result.elapsed_time
+        settings.repeat_last_n,
+        settings.stream_output
     );
 }
 
