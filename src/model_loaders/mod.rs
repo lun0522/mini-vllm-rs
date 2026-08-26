@@ -1,0 +1,34 @@
+pub(crate) mod loaded_model;
+mod qwen2;
+
+use anyhow::bail;
+use anyhow::Result;
+use candle_core::DType;
+use candle_core::Device;
+use candle_core::Tensor;
+use std::path::Path;
+
+/// Common inference operations implemented by each supported model architecture.
+pub(crate) trait CausalLanguageModel {
+    fn forward(&mut self, input: &Tensor, start_position: usize) -> candle_core::Result<Tensor>;
+
+    fn clear_kv_cache(&mut self);
+}
+
+pub(crate) fn load_model_backend(
+    model_type: &str,
+    config: &[u8],
+    weights_path: &Path,
+    dtype: DType,
+    device: &Device,
+) -> Result<Box<dyn CausalLanguageModel>> {
+    match model_type {
+        "qwen2" => Ok(Box::new(qwen2::Qwen2Backend::new(
+            config,
+            weights_path,
+            dtype,
+            device,
+        )?)),
+        unsupported => bail!("unsupported model architecture: {unsupported}"),
+    }
+}

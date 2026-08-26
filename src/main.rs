@@ -1,26 +1,19 @@
+mod model_loaders;
 mod utils;
 
+use crate::model_loaders::loaded_model::LoadedModel;
 use crate::utils::generated_text_output::create_generated_text_output;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::DType;
 use candle_core::Device;
 use candle_core::Tensor;
-use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
-use candle_transformers::models::qwen2::Config;
-use candle_transformers::models::qwen2::ModelForCausalLM;
 use candle_transformers::utils::apply_repeat_penalty;
 use env_logger::Env;
-use hf_hub::api::sync::Api;
-use hf_hub::Repo;
-use hf_hub::RepoType;
 use log::error;
 use log::info;
-use std::path::Path;
-use std::path::PathBuf;
 use std::time::Instant;
-use tokenizers::Tokenizer;
 
 struct InferenceSettings {
     /// Hugging Face model repository to download and load.
@@ -37,12 +30,6 @@ struct InferenceSettings {
     repeat_last_n: usize,
     /// Whether generated text is printed incrementally instead of buffered.
     stream_output: bool,
-}
-
-struct ModelFiles {
-    tokenizer: PathBuf,
-    config: PathBuf,
-    weights: PathBuf,
 }
 
 fn main() {
@@ -64,22 +51,21 @@ fn main() {
         stream_output: true,
     };
 
-    if let Err(err) = run(&settings) {
+    if let Err(err) = run_inference(&settings) {
         error!("{err:#}");
         std::process::exit(1);
     }
 }
 
-fn run(settings: &InferenceSettings) -> Result<()> {
+fn run_inference(settings: &InferenceSettings) -> Result<()> {
     let device = get_inference_device()?;
-    let dtype = get_inference_dtype(&device);
-    log_inference_config(settings, &device, dtype);
-
-    let files = download_model_files(settings)?;
-    let tokenizer = load_tokenizer(&files.tokenizer)?;
-    let config = load_model_config(&files.config)?;
-    let mut model = load_model(&config, &files.weights, dtype, &device)?;
-    generate_text(settings, &mut model, &tokenizer, &device)
+    let mut loaded_model = LoadedModel::new(
+        settings.model_id.as_str(),
+        settings.model_revision.as_str(),
+        device,
+    )?;
+    log_inference_config(settings, loaded_model.device(), loaded_model.dtype());
+    generate_text(settings, &mut loaded_model)
 }
 
 fn initialize_logging() {
@@ -88,61 +74,8 @@ fn initialize_logging() {
         .init();
 }
 
-fn download_model_files(settings: &InferenceSettings) -> Result<ModelFiles> {
-    // hf-hub stores downloads in its standard local cache, so subsequent runs
-    // reuse these files rather than downloading the model again.
-    let api = Api::new().context("failed to create the Hugging Face Hub client")?;
-    let repo = api.repo(Repo::with_revision(
-        settings.model_id.clone(),
-        RepoType::Model,
-        settings.model_revision.clone(),
-    ));
-
-    Ok(ModelFiles {
-        tokenizer: repo
-            .get("tokenizer.json")
-            .context("failed to download tokenizer.json")?,
-        config: repo
-            .get("config.json")
-            .context("failed to download config.json")?,
-        weights: repo
-            .get("model.safetensors")
-            .context("failed to download model.safetensors")?,
-    })
-}
-
-fn load_tokenizer(path: &Path) -> Result<Tokenizer> {
-    Tokenizer::from_file(path)
-        .map_err(anyhow::Error::msg)
-        .context("failed to load the tokenizer")
-}
-
-fn load_model_config(path: &Path) -> Result<Config> {
-    let config_bytes = std::fs::read(path).context("failed to read the model config")?;
-    serde_json::from_slice(&config_bytes).context("failed to parse the model config")
-}
-
-fn load_model(
-    config: &Config,
-    weights_path: &Path,
-    dtype: DType,
-    device: &Device,
-) -> Result<ModelForCausalLM> {
-    // SAFETY: The weights are immutable files in the Hugging Face cache, and this
-    // process never modifies or truncates them while the memory-mapped model exists.
-    let vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(&[weights_path], dtype, device)
-            .context("failed to memory-map the model weights")?
-    };
-    ModelForCausalLM::new(config, vb).context("failed to load the model")
-}
-
-fn generate_text(
-    settings: &InferenceSettings,
-    model: &mut ModelForCausalLM,
-    tokenizer: &Tokenizer,
-    device: &Device,
-) -> Result<()> {
+fn generate_text(settings: &InferenceSettings, loaded_model: &mut LoadedModel) -> Result<()> {
+    let (model, tokenizer, device) = loaded_model.start_inference();
     let model_prompt = format_chat_prompt(&settings.prompt);
     let encoding = tokenizer
         .encode(model_prompt, true)
@@ -222,16 +155,6 @@ fn log_inference_config(settings: &InferenceSettings, device: &Device, dtype: DT
         settings.repeat_last_n,
         settings.stream_output
     );
-}
-
-fn get_inference_dtype(device: &Device) -> DType {
-    // The checkpoint stores BF16 tensors. Candle converts them to F32 on CPU,
-    // while Metal can run them as BF16 to save memory and improve throughput.
-    if device.is_metal() {
-        DType::BF16
-    } else {
-        DType::F32
-    }
 }
 
 fn get_inference_device() -> Result<Device> {

@@ -7,7 +7,12 @@ autoregressive inference with [Candle](https://github.com/huggingface/candle).
 The example uses `Qwen/Qwen2.5-0.5B-Instruct`, a compact instruction-tuned text
 model whose Qwen2 architecture is supported directly by `candle-transformers`.
 Model files are downloaded on the first run and reused from the Hugging Face
-cache afterward.
+cache afterward. The initialized model, tokenizer, device, and data type are
+owned by a reusable `LoadedModel`, so additional inference calls do not reload
+the checkpoint. Model-specific Candle code is isolated behind a common causal
+language-model backend interface; Qwen2 is the first registered backend, and
+other supported architectures can be added without changing inference control
+flow.
 
 ## Run
 
