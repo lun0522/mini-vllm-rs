@@ -1,0 +1,25 @@
+[package]
+name = "mini-vllm-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A small Candle-based LLM inference project"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+candle-core = "0.8.4"
+candle-nn = "0.8.4"
+candle-transformers = "0.8.4"
+env_logger = "0.11"
+hf-hub = "0.4.1"
+log = "0.4"
+serde_json = "1.0"
+tokenizers = { version = "0.21.0", default-features = false, features = ["onig"] }
+
+[features]
+default = []
+metal = ["candle-core/metal", "candle-nn/metal"]
+
+[profile.release]
+lto = "thin"
