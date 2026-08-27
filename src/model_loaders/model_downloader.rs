@@ -4,7 +4,9 @@ use hf_hub::api::sync::Api;
 use hf_hub::api::sync::ApiRepo;
 use hf_hub::Repo;
 use hf_hub::RepoType;
+use log::info;
 use std::path::PathBuf;
+use std::time::Instant;
 
 /// Downloads the files required to load a model into the Hugging Face disk cache.
 pub(crate) struct ModelDownloader {
@@ -21,6 +23,7 @@ impl ModelDownloader {
     /// This is safe to call multiple times because files already in the Hugging Face
     /// cache are reused instead of downloaded again.
     pub(crate) fn download(&self) -> Result<ModelFiles> {
+        let started = Instant::now();
         // hf-hub stores downloads in its standard local cache, so subsequent runs
         // reuse these files rather than downloading the model again.
         let api = Api::new().context("failed to create the Hugging Face Hub client")?;
@@ -40,11 +43,16 @@ impl ModelDownloader {
             )
         })?;
 
-        Ok(ModelFiles {
+        let model_files = ModelFiles {
             tokenizer: self.download_required_file(&repo, "tokenizer.json")?,
             config,
             weights: self.download_required_file(&repo, "model.safetensors")?,
-        })
+        };
+        info!(
+            "Prepared model files (downloaded or reused from cache) in {:.2?}",
+            started.elapsed()
+        );
+        Ok(model_files)
     }
 
     fn download_required_file(&self, repo: &ApiRepo, filename: &str) -> Result<PathBuf> {

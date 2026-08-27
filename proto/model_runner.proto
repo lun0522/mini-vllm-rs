@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package model_runner;
+
+message ModelRunnerCommand {
+  oneof command {
+    GenerateText generate_text = 1;
+  }
+}
+
+message GenerateText {
+  string prompt = 1;
+  uint64 max_new_tokens = 2;
+  float repeat_penalty = 3;
+  uint64 repeat_last_n = 4;
+  bool stream_output = 5;
+}
