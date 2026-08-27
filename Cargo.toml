@@ -14,13 +14,19 @@ candle-nn = "0.8.4"
 candle-transformers = "0.8.4"
 env_logger = "0.11"
 hf-hub = "0.4.1"
+hyper-util = { version = "0.1", features = ["tokio"] }
 log = "0.4"
 prost = "0.13"
 serde_json = "1.0"
+tempfile = "3.0"
+tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 tokenizers = { version = "0.21.0", default-features = false, features = ["onig"] }
+tonic = "0.12"
+tower = { version = "0.4", features = ["util"] }
 
 [build-dependencies]
-prost-build = "0.13"
+tonic-build = "0.12"
 
 [features]
 default = []

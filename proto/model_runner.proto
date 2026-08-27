@@ -2,11 +2,18 @@ syntax = "proto3";
 
 package model_runner;
 
+service ModelRunnerService {
+  // Executes a command in the model runner process.
+  rpc HandleCommand(ModelRunnerCommand) returns (CommandResult);
+}
+
 message ModelRunnerCommand {
   // The operation for the model runner to execute.
   oneof command {
     // Generates text using the loaded model.
     GenerateText generate_text = 1;
+    // Gracefully stops the model runner process.
+    Shutdown shutdown = 2;
   }
 }
 
@@ -22,3 +29,9 @@ message GenerateText {
   // Whether generated text is printed incrementally instead of buffered.
   bool stream_output = 5;
 }
+
+// Requests a graceful shutdown of the model runner process.
+message Shutdown {}
+
+// Indicates that a model runner command completed successfully.
+message CommandResult {}

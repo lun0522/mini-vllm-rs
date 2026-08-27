@@ -4,8 +4,8 @@ mod proto;
 mod utils;
 
 use crate::model_loaders::model_downloader::ModelDownloader;
-use crate::model_loaders::model_downloader::ModelFiles;
-use crate::model_runner::ModelRunner;
+use crate::model_runner::process::ModelRunnerProcess;
+use crate::model_runner::server;
 use crate::proto::model_runner_command;
 use crate::proto::GenerateText;
 use crate::proto::ModelRunnerCommand;
@@ -14,11 +14,10 @@ use argh::FromArgs;
 use env_logger::Env;
 use log::error;
 use log::info;
-use prost::Message;
 
 /// runs text generation with a model from Hugging Face
 #[derive(FromArgs)]
-struct CliArgs {
+struct MainProcessArgs {
     /// model repository to load; supported examples are
     /// HuggingFaceTB/SmolLM2-360M-Instruct and Qwen/Qwen2.5-0.5B-Instruct;
     /// defaults to Qwen/Qwen2.5-0.5B-Instruct
@@ -38,10 +37,24 @@ fn default_model_revision() -> String {
     "main".to_owned()
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     initialize_logging();
 
-    let args: CliArgs = argh::from_env();
+    let result = if std::env::var_os(server::PROCESS_ENVIRONMENT_VARIABLE).is_some() {
+        let args: server::ModelRunnerProcessArgs = argh::from_env();
+        server::run(args).await
+    } else {
+        let args: MainProcessArgs = argh::from_env();
+        run_main_process(args).await
+    };
+    if let Err(err) = result {
+        error!("{err:#}");
+        std::process::exit(1);
+    }
+}
+
+async fn run_main_process(args: MainProcessArgs) -> Result<()> {
     let generate_text = GenerateText {
         prompt: concat!(
             "Explain in detail how continuous batching improves throughput in an LLM ",
@@ -64,13 +77,13 @@ fn main() {
         args.model_id, args.model_revision
     );
     let model_downloader = ModelDownloader::new(args.model_id, args.model_revision);
-    let result = model_downloader
-        .download()
-        .and_then(|model_files| run_inference(&model_files, generate_text));
-    if let Err(err) = result {
-        error!("{err:#}");
-        std::process::exit(1);
-    }
+    let model_files = model_downloader.download()?;
+    let model_runner_process = ModelRunnerProcess::start(&model_files).await?;
+
+    let inference_result = run_inference(&model_runner_process, generate_text).await;
+    let shutdown_result = model_runner_process.shutdown().await;
+    inference_result?;
+    shutdown_result
 }
 
 fn initialize_logging() {
@@ -79,10 +92,12 @@ fn initialize_logging() {
         .init();
 }
 
-fn run_inference(model_files: &ModelFiles, generate_text: GenerateText) -> Result<()> {
-    let mut model_runner = ModelRunner::new(model_files)?;
+async fn run_inference(
+    model_runner_process: &ModelRunnerProcess,
+    generate_text: GenerateText,
+) -> Result<()> {
     let command = ModelRunnerCommand {
         command: Some(model_runner_command::Command::GenerateText(generate_text)),
     };
-    model_runner.handle_command(&command.encode_to_vec())
+    model_runner_process.handle_command(command).await
 }

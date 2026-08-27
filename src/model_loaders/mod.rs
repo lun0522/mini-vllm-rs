@@ -11,7 +11,7 @@ use candle_core::Tensor;
 use std::path::Path;
 
 /// Common inference operations implemented by each supported model architecture.
-pub(crate) trait CausalLanguageModel {
+pub(crate) trait CausalLanguageModel: Send {
     /// Returns next-token logits shaped `(batch_size, 1, vocabulary_size)`.
     fn forward(&mut self, input: &Tensor, start_position: usize) -> candle_core::Result<Tensor>;
 

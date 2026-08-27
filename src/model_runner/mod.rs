@@ -1,8 +1,9 @@
+pub(crate) mod process;
+pub(crate) mod server;
+
 use crate::model_loaders::loaded_model::LoadedModel;
 use crate::model_loaders::model_downloader::ModelFiles;
-use crate::proto::model_runner_command;
 use crate::proto::GenerateText;
-use crate::proto::ModelRunnerCommand;
 use crate::utils::generated_text_output::create_generated_text_output;
 use anyhow::Context;
 use anyhow::Result;
@@ -12,7 +13,6 @@ use candle_core::Tensor;
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::utils::apply_repeat_penalty;
 use log::info;
-use prost::Message;
 use std::time::Instant;
 
 /// Owns a loaded model and executes commands received in protobuf format.
@@ -32,19 +32,7 @@ impl ModelRunner {
         Ok(Self { loaded_model })
     }
 
-    /// Decodes and executes one protobuf-encoded command.
-    pub(crate) fn handle_command(&mut self, encoded_command: &[u8]) -> Result<()> {
-        let command = ModelRunnerCommand::decode(encoded_command)
-            .context("failed to decode model runner command")?
-            .command
-            .context("model runner command does not contain a command")?;
-
-        match command {
-            model_runner_command::Command::GenerateText(command) => self.generate_text(&command),
-        }
-    }
-
-    fn generate_text(&mut self, command: &GenerateText) -> Result<()> {
+    pub(crate) fn generate_text(&mut self, command: &GenerateText) -> Result<()> {
         let max_new_tokens = usize::try_from(command.max_new_tokens)
             .context("max_new_tokens does not fit in usize")?;
         let repeat_last_n = usize::try_from(command.repeat_last_n)

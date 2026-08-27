@@ -15,7 +15,38 @@ additional inference calls do not reload the checkpoint. Model-specific Candle
 code is isolated behind a common causal language-model backend interface. Both
 Llama models such as SmolLM2 and Qwen2 models such as
 `Qwen/Qwen2.5-0.5B-Instruct` use that interface without changing inference
-control flow.
+control flow. The main process downloads the model and starts a separate model
+runner process with local file paths. Commands cross that process boundary as
+Protocol Buffers messages over tonic and a Unix domain socket, so the model
+runner does not need internet access.
+
+## Process architecture
+
+During inference, the program uses two operating-system processes. Both run the
+same executable, but an internal environment marker selects the model-runner
+mode for the child process.
+
+```text
+main process
+ ├─ parses the public model ID and revision arguments
+ ├─ downloads model artifacts or reuses the Hugging Face cache
+ ├─ creates a temporary Unix domain socket
+ ├─ starts and connects to the model runner process
+ ├─ sends protobuf commands through tonic
+ └─ requests and waits for graceful model runner shutdown
+
+model runner process
+ ├─ parses local model-file and socket arguments
+ ├─ loads the model from disk without accessing the internet
+ ├─ starts the tonic Unix domain socket server
+ ├─ keeps the model loaded while handling commands
+ └─ exits after receiving the Shutdown command
+```
+
+The main process owns downloading and application control. The model runner
+owns the initialized model, tokenizer, inference device, and mutable inference
+state. This boundary allows multiple inference commands to reuse one loaded
+model and leaves room for future scheduling or event-streaming protocols.
 
 ## Run
 
@@ -74,6 +105,7 @@ future may use different licenses or require accepting additional usage terms.
 
 ## Project direction
 
-Inference currently lives in a single Rust binary. Server-side scheduling and
-continuous batching can be added in Rust as the project grows; Python clients
-and load generators can live alongside it without changing the Cargo layout.
+Inference runs in a dedicated worker process spawned from the Rust binary.
+Server-side scheduling and continuous batching can be added in Rust as the
+project grows; Python clients and load generators can live alongside it without
+changing the Cargo layout.
