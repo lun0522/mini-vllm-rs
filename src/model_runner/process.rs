@@ -16,6 +16,10 @@ use tonic::transport::Channel;
 use tonic::transport::Endpoint;
 use tower::service_fn;
 
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(300);
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
+const CONNECTION_RETRY_DELAY: Duration = Duration::from_millis(100);
+
 /// Owns the worker process, RPC client, and Unix domain socket lifetime.
 pub(crate) struct ModelRunnerProcess {
     rpc_client: ModelRunnerServiceClient<Channel>,
@@ -27,8 +31,10 @@ impl ModelRunnerProcess {
     pub(crate) async fn start(model_files: &ModelFiles) -> Result<Self> {
         let (socket_directory, socket_path) = create_socket()?;
         let mut child_process = spawn(model_files, &socket_path)?;
+        let startup_started = tokio::time::Instant::now();
+        let mut last_connection_error = None;
 
-        for _ in 0..100 {
+        while startup_started.elapsed() < STARTUP_TIMEOUT {
             let process_status = match child_process.try_wait() {
                 Ok(process_status) => process_status,
                 Err(error) => {
@@ -42,24 +48,31 @@ impl ModelRunnerProcess {
 
             let connector_path = socket_path.to_owned();
             let channel = Endpoint::from_static("http://localhost")
-                .connect_timeout(Duration::from_millis(100))
+                .connect_timeout(CONNECTION_TIMEOUT)
                 .connect_with_connector(service_fn(move |_| {
                     let connector_path = connector_path.clone();
                     async move { UnixStream::connect(connector_path).await.map(TokioIo::new) }
                 }))
                 .await;
-            if let Ok(channel) = channel {
-                return Ok(Self {
-                    rpc_client: ModelRunnerServiceClient::new(channel),
-                    child_process,
-                    _socket_directory: socket_directory,
-                });
+            match channel {
+                Ok(channel) => {
+                    return Ok(Self {
+                        rpc_client: ModelRunnerServiceClient::new(channel),
+                        child_process,
+                        _socket_directory: socket_directory,
+                    });
+                }
+                Err(error) => last_connection_error = Some(error.to_string()),
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(CONNECTION_RETRY_DELAY).await;
         }
 
         stop(&mut child_process)?;
-        anyhow::bail!("timed out waiting for the model runner Unix domain socket")
+        anyhow::bail!(
+            "timed out after {STARTUP_TIMEOUT:?} waiting for the model runner Unix domain \
+             socket. Last connection error: {}",
+            last_connection_error.as_deref().unwrap_or("none")
+        )
     }
 
     pub(crate) async fn handle_command(&self, command: ModelRunnerCommand) -> Result<()> {

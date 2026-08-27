@@ -39,14 +39,16 @@ model runner process
  ├─ parses local model-file and socket arguments
  ├─ loads the model from disk without accessing the internet
  ├─ starts the tonic Unix domain socket server
- ├─ keeps the model loaded while handling commands
+ ├─ queues inference requests from tonic handlers
+ ├─ runs a dedicated inference thread that owns the loaded model
  └─ exits after receiving the Shutdown command
 ```
 
 The main process owns downloading and application control. The model runner
 owns the initialized model, tokenizer, inference device, and mutable inference
-state. This boundary allows multiple inference commands to reuse one loaded
-model and leaves room for future scheduling or event-streaming protocols.
+state on its inference thread. This boundary allows multiple inference commands
+to reuse one loaded model. The request queue can later feed a continuous-batching
+scheduler or multiple device-specific workers without changing the RPC layer.
 
 ## Run
 
