@@ -38,6 +38,12 @@ model with `--model-id`:
 cargo run --release -- --model-id HuggingFaceTB/SmolLM2-360M-Instruct
 ```
 
+Select a branch, tag, or commit with `--model-revision`; it defaults to `main`:
+
+```shell
+cargo run --release -- --model-revision <revision>
+```
+
 The remaining inference settings are currently initialized in `main()`. They
 ask the model to explain continuous batching in detail, using a ChatML-style
 prompt, greedy decoding with a repetition penalty, and a limit of 1,024 new tokens.

@@ -3,15 +3,22 @@ syntax = "proto3";
 package model_runner;
 
 message ModelRunnerCommand {
+  // The operation for the model runner to execute.
   oneof command {
+    // Generates text using the loaded model.
     GenerateText generate_text = 1;
   }
 }
 
 message GenerateText {
+  // User text inserted into the model's chat template.
   string prompt = 1;
+  // Maximum number of tokens the model may generate before stopping.
   uint64 max_new_tokens = 2;
+  // Penalty applied to previously seen tokens; 1.0 disables it.
   float repeat_penalty = 3;
+  // Number of recent tokens considered when applying the repetition penalty.
   uint64 repeat_last_n = 4;
+  // Whether generated text is printed incrementally instead of buffered.
   bool stream_output = 5;
 }
