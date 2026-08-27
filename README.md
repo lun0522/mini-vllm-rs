@@ -8,12 +8,14 @@ The example uses `HuggingFaceTB/SmolLM2-360M-Instruct`, a compact
 instruction-tuned text model whose Llama architecture is supported directly by
 `candle-transformers`.
 Model files are downloaded on the first run and reused from the Hugging Face
-cache afterward. The initialized model, tokenizer, device, and data type are
-owned by a reusable `LoadedModel`, so additional inference calls do not reload
-the checkpoint. Model-specific Candle code is isolated behind a common causal
-language-model backend interface. Both Llama models such as SmolLM2 and Qwen2
-models such as `Qwen/Qwen2.5-0.5B-Instruct` use that interface without changing
-inference control flow.
+cache afterward. A `ModelDownloader` owns that disk-acquisition step, while
+`LoadedModel` only loads the resulting local files. The initialized model,
+tokenizer, device, and data type are owned by a reusable `LoadedModel`, so
+additional inference calls do not reload the checkpoint. Model-specific Candle
+code is isolated behind a common causal language-model backend interface. Both
+Llama models such as SmolLM2 and Qwen2 models such as
+`Qwen/Qwen2.5-0.5B-Instruct` use that interface without changing inference
+control flow.
 
 ## Run
 

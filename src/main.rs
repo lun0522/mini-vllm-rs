@@ -2,6 +2,7 @@ mod model_loaders;
 mod utils;
 
 use crate::model_loaders::loaded_model::LoadedModel;
+use crate::model_loaders::model_downloader::ModelDownloader;
 use crate::utils::generated_text_output::create_generated_text_output;
 use anyhow::Context;
 use anyhow::Result;
@@ -75,11 +76,10 @@ fn main() {
 
 fn run_inference(settings: &InferenceSettings) -> Result<()> {
     let device = get_inference_device()?;
-    let mut loaded_model = LoadedModel::new(
-        settings.model_id.as_str(),
-        settings.model_revision.as_str(),
-        device,
-    )?;
+    let model_files =
+        ModelDownloader::new(settings.model_id.clone(), settings.model_revision.clone())
+            .download()?;
+    let mut loaded_model = LoadedModel::new(&model_files, device)?;
     log_inference_config(settings, loaded_model.device(), loaded_model.dtype());
     generate_text(settings, &mut loaded_model)
 }

@@ -1,16 +1,12 @@
 use crate::model_loaders::load_model_backend;
+use crate::model_loaders::model_downloader::ModelFiles;
 use crate::model_loaders::CausalLanguageModel;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::DType;
 use candle_core::Device;
-use hf_hub::api::sync::Api;
-use hf_hub::api::sync::ApiRepo;
-use hf_hub::Repo;
-use hf_hub::RepoType;
 use serde_json::Value;
 use std::path::Path;
-use std::path::PathBuf;
 use tokenizers::Tokenizer;
 
 /// Owns a fully initialized model and the resources reused by each inference.
@@ -22,9 +18,8 @@ pub(crate) struct LoadedModel {
 }
 
 impl LoadedModel {
-    /// Downloads cached model files and initializes a supported model backend once.
-    pub(crate) fn new(model_id: &str, revision: &str, device: Device) -> Result<Self> {
-        let model_files = download_model_files(model_id, revision)?;
+    /// Loads model artifacts from disk and initializes a supported model backend once.
+    pub(crate) fn new(model_files: &ModelFiles, device: Device) -> Result<Self> {
         let tokenizer = load_tokenizer(&model_files.tokenizer)?;
         let model_config = load_model_config(&model_files.config)?;
         let model_type = get_model_type(&model_config)?;
@@ -62,12 +57,6 @@ impl LoadedModel {
     }
 }
 
-struct ModelFiles {
-    tokenizer: PathBuf,
-    config: PathBuf,
-    weights: PathBuf,
-}
-
 fn load_tokenizer(path: &Path) -> Result<Tokenizer> {
     Tokenizer::from_file(path)
         .map_err(anyhow::Error::msg)
@@ -95,38 +84,4 @@ fn get_inference_dtype(device: &Device) -> DType {
     } else {
         DType::F32
     }
-}
-
-fn download_model_files(model_id: &str, revision: &str) -> Result<ModelFiles> {
-    // hf-hub stores downloads in its standard local cache, so subsequent runs
-    // reuse these files rather than downloading the model again.
-    let api = Api::new().context("failed to create the Hugging Face Hub client")?;
-    let repo = api.repo(Repo::with_revision(
-        model_id.to_owned(),
-        RepoType::Model,
-        revision.to_owned(),
-    ));
-    let config = repo.get("config.json").map_err(|error| {
-        anyhow::anyhow!(
-            "could not access Hugging Face model '{model_id}' at revision '{revision}'. \
-             Check that --model-id and the revision are correct. If the repository is \
-             private or gated, authenticate by setting HF_TOKEN. Hugging Face response: \
-             {error}"
-        )
-    })?;
-
-    Ok(ModelFiles {
-        tokenizer: download_required_model_file(&repo, model_id, "tokenizer.json")?,
-        config,
-        weights: download_required_model_file(&repo, model_id, "model.safetensors")?,
-    })
-}
-
-fn download_required_model_file(repo: &ApiRepo, model_id: &str, filename: &str) -> Result<PathBuf> {
-    repo.get(filename).map_err(|error| {
-        anyhow::anyhow!(
-            "model '{model_id}' does not provide the required file '{filename}', or the file \
-             could not be downloaded. Hugging Face response: {error}"
-        )
-    })
 }

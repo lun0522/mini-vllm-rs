@@ -1,5 +1,6 @@
 mod llama;
 pub(crate) mod loaded_model;
+pub(crate) mod model_downloader;
 mod qwen2;
 
 use anyhow::bail;
