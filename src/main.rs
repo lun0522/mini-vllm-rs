@@ -5,6 +5,7 @@ use crate::model_loaders::loaded_model::LoadedModel;
 use crate::utils::generated_text_output::create_generated_text_output;
 use anyhow::Context;
 use anyhow::Result;
+use argh::FromArgs;
 use candle_core::DType;
 use candle_core::Device;
 use candle_core::Tensor;
@@ -14,6 +15,20 @@ use env_logger::Env;
 use log::error;
 use log::info;
 use std::time::Instant;
+
+/// runs text generation with a model from Hugging Face
+#[derive(FromArgs)]
+struct CliArgs {
+    /// model repository to load; supported examples are
+    /// HuggingFaceTB/SmolLM2-360M-Instruct and Qwen/Qwen2.5-0.5B-Instruct;
+    /// defaults to Qwen/Qwen2.5-0.5B-Instruct
+    #[argh(option, default = "default_model_id()")]
+    model_id: String,
+}
+
+fn default_model_id() -> String {
+    "Qwen/Qwen2.5-0.5B-Instruct".to_owned()
+}
 
 struct InferenceSettings {
     /// Hugging Face model repository to download and load.
@@ -35,8 +50,9 @@ struct InferenceSettings {
 fn main() {
     initialize_logging();
 
+    let args: CliArgs = argh::from_env();
     let settings = InferenceSettings {
-        model_id: "Qwen/Qwen2.5-0.5B-Instruct".to_owned(),
+        model_id: args.model_id,
         model_revision: "main".to_owned(),
         prompt: concat!(
             "Explain in detail how continuous batching improves throughput in an LLM ",

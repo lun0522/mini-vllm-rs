@@ -5,6 +5,7 @@ use anyhow::Result;
 use candle_core::DType;
 use candle_core::Device;
 use hf_hub::api::sync::Api;
+use hf_hub::api::sync::ApiRepo;
 use hf_hub::Repo;
 use hf_hub::RepoType;
 use serde_json::Value;
@@ -105,16 +106,27 @@ fn download_model_files(model_id: &str, revision: &str) -> Result<ModelFiles> {
         RepoType::Model,
         revision.to_owned(),
     ));
+    let config = repo.get("config.json").map_err(|error| {
+        anyhow::anyhow!(
+            "could not access Hugging Face model '{model_id}' at revision '{revision}'. \
+             Check that --model-id and the revision are correct. If the repository is \
+             private or gated, authenticate by setting HF_TOKEN. Hugging Face response: \
+             {error}"
+        )
+    })?;
 
     Ok(ModelFiles {
-        tokenizer: repo
-            .get("tokenizer.json")
-            .context("failed to download tokenizer.json")?,
-        config: repo
-            .get("config.json")
-            .context("failed to download config.json")?,
-        weights: repo
-            .get("model.safetensors")
-            .context("failed to download model.safetensors")?,
+        tokenizer: download_required_model_file(&repo, model_id, "tokenizer.json")?,
+        config,
+        weights: download_required_model_file(&repo, model_id, "model.safetensors")?,
+    })
+}
+
+fn download_required_model_file(repo: &ApiRepo, model_id: &str, filename: &str) -> Result<PathBuf> {
+    repo.get(filename).map_err(|error| {
+        anyhow::anyhow!(
+            "model '{model_id}' does not provide the required file '{filename}', or the file \
+             could not be downloaded. Hugging Face response: {error}"
+        )
     })
 }

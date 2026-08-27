@@ -29,17 +29,24 @@ Apple Silicon with Metal acceleration:
 cargo run --release --features metal
 ```
 
-The inference settings are currently initialized in `main()`. They select the
-model to explain continuous batching in detail, using a ChatML-style prompt,
-greedy decoding with a repetition penalty, and a limit of 1,024 new tokens.
+The default model is `Qwen/Qwen2.5-0.5B-Instruct`. Select another supported
+model with `--model-id`:
+
+```shell
+cargo run --release -- --model-id HuggingFaceTB/SmolLM2-360M-Instruct
+```
+
+The remaining inference settings are currently initialized in `main()`. They
+ask the model to explain continuous batching in detail, using a ChatML-style
+prompt, greedy decoding with a repetition penalty, and a limit of 1,024 new tokens.
 Generation stops early when the model emits a chat end token. The program logs
 the effective model, revision, device, data type, and prompt, streams generated
 text to the console token by token, then logs elapsed time and throughput. Set
 `stream_output` to `false` in the inference settings to buffer and log the
 complete response only after generation finishes.
 Informational logs are enabled by default and can be filtered with `RUST_LOG`
-(for example, `RUST_LOG=warn cargo run --release`). Expect the first run to
-download less than 1 GB of model data.
+(for example, set `RUST_LOG=warn`). Expect the first run to download less than
+1 GB of model data.
 
 ## Model licenses
 

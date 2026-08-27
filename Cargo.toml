@@ -8,6 +8,7 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1.0"
+argh = "0.1"
 candle-core = "0.8.4"
 candle-nn = "0.8.4"
 candle-transformers = "0.8.4"
