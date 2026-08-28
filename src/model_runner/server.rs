@@ -6,12 +6,12 @@ use crate::proto::model_runner_service_server::ModelRunnerServiceServer;
 use crate::proto::CommandResult;
 use crate::proto::GenerateText;
 use crate::proto::ModelRunnerCommand;
+use crate::utils::rpc_shutdown::RpcShutdown;
 use anyhow::Context;
 use anyhow::Result;
 use argh::FromArgs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -60,10 +60,10 @@ async fn run_server(model_files: &ModelFiles, socket_path: &Path) -> Result<()> 
         .name("inference-worker".to_owned())
         .spawn(move || run_inference_loop(model_runner, inference_receiver))
         .context("failed to start the model runner inference thread")?;
-    let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+    let (shutdown, shutdown_receiver) = RpcShutdown::channel();
     let service = ModelRunnerRpcService {
         inference_sender,
-        shutdown_sender: Mutex::new(Some(shutdown_sender)),
+        shutdown,
     };
 
     let server_result = tonic::transport::Server::builder()
@@ -81,7 +81,7 @@ async fn run_server(model_files: &ModelFiles, socket_path: &Path) -> Result<()> 
 
 struct ModelRunnerRpcService {
     inference_sender: mpsc::Sender<InferenceRequest>,
-    shutdown_sender: Mutex<Option<oneshot::Sender<()>>>,
+    shutdown: RpcShutdown,
 }
 
 struct InferenceRequest {
@@ -114,15 +114,7 @@ impl ModelRunnerService for ModelRunnerRpcService {
         let generate_text = match command {
             model_runner_command::Command::GenerateText(generate_text) => generate_text,
             model_runner_command::Command::Shutdown(_) => {
-                let shutdown_sender = self
-                    .shutdown_sender
-                    .lock()
-                    .map_err(|_| Status::internal("shutdown sender lock is poisoned"))?
-                    .take()
-                    .ok_or_else(|| Status::failed_precondition("shutdown was already requested"))?;
-                shutdown_sender
-                    .send(())
-                    .map_err(|_| Status::internal("model runner shutdown receiver was dropped"))?;
+                self.shutdown.trigger()?;
                 return Ok(Response::new(CommandResult {}));
             }
         };

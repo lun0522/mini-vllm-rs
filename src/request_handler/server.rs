@@ -6,23 +6,19 @@ use crate::proto::CommandResult;
 use crate::proto::GenerateText;
 use crate::proto::ModelRunnerCommand;
 use crate::proto::Shutdown;
+use crate::utils::domain_socket;
+use crate::utils::rpc_shutdown::RpcShutdown;
 use anyhow::Context;
 use anyhow::Result;
 use argh::FromArgs;
-use hyper_util::rt::TokioIo;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use tokio::net::UnixListener;
-use tokio::net::UnixStream;
-use tokio::sync::oneshot;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Channel;
-use tonic::transport::Endpoint;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
-use tower::service_fn;
 
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_REQUEST_HANDLER";
 
@@ -43,12 +39,7 @@ pub(crate) async fn run(args: RequestHandlerProcessArgs) -> Result<()> {
 }
 
 async fn connect_to_model_runner(socket_path: &Path) -> Result<ModelRunnerServiceClient<Channel>> {
-    let connector_path = socket_path.to_owned();
-    let channel = Endpoint::from_static("http://localhost")
-        .connect_with_connector(service_fn(move |_| {
-            let connector_path = connector_path.clone();
-            async move { UnixStream::connect(connector_path).await.map(TokioIo::new) }
-        }))
+    let channel = domain_socket::connect(socket_path)
         .await
         .context("failed to connect the request handler to the model runner")?;
     Ok(ModelRunnerServiceClient::new(channel))
@@ -62,10 +53,10 @@ async fn run_server(
     // that the request handler is ready to forward requests.
     let listener = UnixListener::bind(socket_path)
         .context("failed to bind the request handler Unix domain socket")?;
-    let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+    let (shutdown, shutdown_receiver) = RpcShutdown::channel();
     let service = RequestHandlerRpcService {
         model_runner_client,
-        shutdown_sender: Mutex::new(Some(shutdown_sender)),
+        shutdown,
     };
 
     tonic::transport::Server::builder()
@@ -79,7 +70,7 @@ async fn run_server(
 
 struct RequestHandlerRpcService {
     model_runner_client: ModelRunnerServiceClient<Channel>,
-    shutdown_sender: Mutex<Option<oneshot::Sender<()>>>,
+    shutdown: RpcShutdown,
 }
 
 #[tonic::async_trait]
@@ -104,15 +95,7 @@ impl RequestHandlerService for RequestHandlerRpcService {
         &self,
         _request: Request<Shutdown>,
     ) -> Result<Response<CommandResult>, Status> {
-        let shutdown_sender = self
-            .shutdown_sender
-            .lock()
-            .map_err(|_| Status::internal("shutdown sender lock is poisoned"))?
-            .take()
-            .ok_or_else(|| Status::failed_precondition("shutdown was already requested"))?;
-        shutdown_sender
-            .send(())
-            .map_err(|_| Status::internal("request handler shutdown receiver was dropped"))?;
+        self.shutdown.trigger()?;
         Ok(Response::new(CommandResult {}))
     }
 }
