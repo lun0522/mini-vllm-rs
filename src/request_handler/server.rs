@@ -1,10 +1,9 @@
-use crate::proto::model_runner_command;
 use crate::proto::model_runner_service_client::ModelRunnerServiceClient;
 use crate::proto::request_handler::request_handler_service_server::RequestHandlerService;
 use crate::proto::request_handler::request_handler_service_server::RequestHandlerServiceServer;
 use crate::proto::CommandResult;
 use crate::proto::GenerateText;
-use crate::proto::ModelRunnerCommand;
+use crate::proto::GenerateTextEvent;
 use crate::proto::Shutdown;
 use crate::utils::domain_socket;
 use crate::utils::rpc_shutdown::RpcShutdown;
@@ -75,19 +74,16 @@ struct RequestHandlerRpcService {
 
 #[tonic::async_trait]
 impl RequestHandlerService for RequestHandlerRpcService {
+    type GenerateTextStream = tonic::Streaming<GenerateTextEvent>;
+
     async fn generate_text(
         &self,
         request: Request<GenerateText>,
-    ) -> Result<Response<CommandResult>, Status> {
+    ) -> Result<Response<Self::GenerateTextStream>, Status> {
         let mut model_runner_client = self.model_runner_client.clone();
         let response = model_runner_client
-            .handle_command(ModelRunnerCommand {
-                command: Some(model_runner_command::Command::GenerateText(
-                    request.into_inner(),
-                )),
-            })
-            .await
-            .map_err(|error| Status::internal(format!("model runner request failed: {error}")))?;
+            .generate_text(request.into_inner())
+            .await?;
         Ok(Response::new(response.into_inner()))
     }
 

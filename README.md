@@ -39,6 +39,7 @@ request handler process
  ├─ listens for local tonic requests on the public Unix domain socket
  ├─ accepts concurrent GenerateText requests
  ├─ forwards inference requests to the model runner
+ ├─ proxies generated-text and statistics streams back to requesters
  └─ exits after receiving its Shutdown RPC
 
 model runner process
@@ -47,6 +48,7 @@ model runner process
  ├─ starts the tonic Unix domain socket server
  ├─ queues inference requests from tonic handlers
  ├─ runs a dedicated inference thread that owns the loaded model
+ ├─ streams generated text followed by final generation statistics
  └─ exits after receiving the Shutdown command
 ```
 
@@ -56,6 +58,11 @@ initialized model, tokenizer, inference device, and mutable inference state on
 its inference thread. This boundary allows multiple inference commands to reuse
 one loaded model. The request queue can later feed a continuous-batching
 scheduler or multiple device-specific workers without changing the RPC layer.
+Generated text follows the reverse path over tonic: the model runner emits
+events to the request handler, which proxies them to the requesting client.
+Successful streams end with token counts and prefill/decode durations in
+milliseconds. The processes between the model and client do not print or
+aggregate streamed text.
 
 ## Run
 
@@ -102,10 +109,12 @@ The built-in example settings are currently initialized in `main()`. They
 ask the model to explain continuous batching in detail, using a ChatML-style
 prompt, greedy decoding with a repetition penalty, and a limit of 1,024 new tokens.
 Generation stops early when the model emits a chat end token. The program logs
-the effective model, revision, device, data type, and prompt, streams generated
-text to the console token by token, then logs elapsed time and throughput. Set
-`stream_output` to `false` in the inference settings to buffer and log the
-complete response only after generation finishes.
+the effective model, revision, device, data type, and prompt. The model runner
+streams generated-text events through the request handler, and the main process
+uses `GeneratedTextOutput` to print the example token by token. The final event
+reports input/output token counts and prefill/decode durations. Set
+`stream_output` to `false` in the inference settings to make the model runner
+buffer the response and send it as one text event before the statistics event.
 Informational logs are enabled by default and can be filtered with `RUST_LOG`
 (for example, set `RUST_LOG=warn`). Expect the first run to download less than
 1 GB of model data.

@@ -3,6 +3,8 @@ syntax = "proto3";
 package model_runner;
 
 service ModelRunnerService {
+  // Generates text and returns output events followed by final statistics.
+  rpc GenerateText(.model_runner.GenerateText) returns (stream GenerateTextEvent);
   // Executes a command in the model runner process.
   rpc HandleCommand(ModelRunnerCommand) returns (CommandResult);
 }
@@ -10,10 +12,8 @@ service ModelRunnerService {
 message ModelRunnerCommand {
   // The operation for the model runner to execute.
   oneof command {
-    // Generates text using the loaded model.
-    GenerateText generate_text = 1;
     // Gracefully stops the model runner process.
-    Shutdown shutdown = 2;
+    Shutdown shutdown = 1;
   }
 }
 
@@ -26,8 +26,29 @@ message GenerateText {
   float repeat_penalty = 3;
   // Number of recent tokens considered when applying the repetition penalty.
   uint64 repeat_last_n = 4;
-  // Whether generated text is printed incrementally instead of buffered.
+  // Whether text events contain incremental fragments or one buffered response.
   bool stream_output = 5;
+}
+
+message GenerateTextEvent {
+  // The next item produced by text generation.
+  oneof event {
+    // A decoded fragment, or the complete response when streaming is disabled.
+    string text = 1;
+    // Generation statistics; always the final event on successful completion.
+    TextGenerationStats stats = 2;
+  }
+}
+
+message TextGenerationStats {
+  // Number of tokens in the encoded, formatted input prompt.
+  uint64 input_token_count = 1;
+  // Number of generated tokens, excluding the terminal end-of-sequence token.
+  uint64 output_token_count = 2;
+  // Prefill time in milliseconds.
+  uint64 prefill_duration_milliseconds = 3;
+  // Decode time in milliseconds.
+  uint64 decode_duration_milliseconds = 4;
 }
 
 // Requests a graceful shutdown of the model runner process.

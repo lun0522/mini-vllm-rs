@@ -1,6 +1,6 @@
 use crate::proto::request_handler::request_handler_service_client::RequestHandlerServiceClient;
-use crate::proto::CommandResult;
 use crate::proto::GenerateText;
+use crate::proto::GenerateTextEvent;
 use crate::proto::Shutdown;
 use crate::request_handler::server;
 use crate::utils::child_process::ChildProcess;
@@ -64,7 +64,10 @@ impl RequestHandlerProcess {
         })
     }
 
-    pub(crate) async fn generate_text(&self, request: GenerateText) -> Result<CommandResult> {
+    pub(crate) async fn generate_text(
+        &self,
+        request: GenerateText,
+    ) -> Result<tonic::Streaming<GenerateTextEvent>> {
         let mut rpc_client = self.rpc_client.clone();
         Ok(rpc_client
             .generate_text(request)

@@ -4,7 +4,7 @@ pub(crate) mod server;
 use crate::model_loaders::loaded_model::LoadedModel;
 use crate::model_loaders::model_downloader::ModelFiles;
 use crate::proto::GenerateText;
-use crate::utils::generated_text_output::create_generated_text_output;
+use crate::proto::TextGenerationStats;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::DType;
@@ -32,7 +32,12 @@ impl ModelRunner {
         Ok(Self { loaded_model })
     }
 
-    pub(crate) fn generate_text(&mut self, command: &GenerateText) -> Result<()> {
+    pub(crate) fn generate_text(
+        &mut self,
+        command: &GenerateText,
+        mut push_fragment: impl FnMut(&str) -> Result<()>,
+        mut is_cancelled: impl FnMut() -> bool,
+    ) -> Result<TextGenerationStats> {
         let max_new_tokens = usize::try_from(command.max_new_tokens)
             .context("max_new_tokens does not fit in usize")?;
         let repeat_last_n = usize::try_from(command.repeat_last_n)
@@ -51,11 +56,13 @@ impl ModelRunner {
             .collect();
         let mut logits_processor = LogitsProcessor::new(0, None, None);
         let mut token_stream = tokenizer.decode_stream(true);
-        let mut generated_text_output = create_generated_text_output(command.stream_output);
 
         let generation_started = Instant::now();
-        generated_text_output.start();
+        let mut prefill_finished = None;
         for step in 0..max_new_tokens {
+            if is_cancelled() {
+                anyhow::bail!("generation request was cancelled");
+            }
             // Feed the full prompt once, then one token at a time. The model backend
             // retains the KV cache between these calls.
             let context_size = if step == 0 { tokens.len() } else { 1 };
@@ -69,6 +76,9 @@ impl ModelRunner {
             let next_token = logits_processor.sample(&logits)?;
 
             if eos_tokens.contains(&next_token) {
+                if step == 0 {
+                    prefill_finished = Some(Instant::now());
+                }
                 break;
             }
             tokens.push(next_token);
@@ -77,24 +87,37 @@ impl ModelRunner {
                 .map_err(anyhow::Error::msg)
                 .context("failed to decode generated token")?
             {
-                generated_text_output.push_fragment(&fragment)?;
+                push_fragment(&fragment)?;
+            }
+            if step == 0 {
+                prefill_finished = Some(Instant::now());
             }
         }
-        generated_text_output.finish()?;
 
-        let token_count = tokens.len() - prompt_token_count;
-        let elapsed_time = generation_started.elapsed();
-        let tokens_per_second = token_count as f64 / elapsed_time.as_secs_f64();
-        info!(
-            "Generated {token_count} tokens in {elapsed_time:.2?} \
-             ({tokens_per_second:.2} tokens/s)"
-        );
+        let decode_finished = Instant::now();
+        let prefill_finished = prefill_finished.unwrap_or(decode_finished);
+        let output_token_count = tokens.len() - prompt_token_count;
 
-        Ok(())
+        Ok(TextGenerationStats {
+            input_token_count: u64::try_from(prompt_token_count)
+                .context("input token count does not fit in u64")?,
+            output_token_count: u64::try_from(output_token_count)
+                .context("output token count does not fit in u64")?,
+            prefill_duration_milliseconds: Self::duration_milliseconds(
+                prefill_finished.duration_since(generation_started),
+            ),
+            decode_duration_milliseconds: Self::duration_milliseconds(
+                decode_finished.duration_since(prefill_finished),
+            ),
+        })
     }
 
     fn format_chat_prompt(prompt: &str) -> String {
         format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
+    }
+
+    fn duration_milliseconds(duration: std::time::Duration) -> u64 {
+        u64::try_from(duration.as_millis()).unwrap_or_default()
     }
 
     fn get_inference_device() -> Result<Device> {

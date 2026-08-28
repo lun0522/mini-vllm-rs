@@ -1,10 +1,12 @@
 use crate::model_loaders::model_downloader::ModelFiles;
 use crate::model_runner::ModelRunner;
+use crate::proto::generate_text_event;
 use crate::proto::model_runner_command;
 use crate::proto::model_runner_service_server::ModelRunnerService;
 use crate::proto::model_runner_service_server::ModelRunnerServiceServer;
 use crate::proto::CommandResult;
 use crate::proto::GenerateText;
+use crate::proto::GenerateTextEvent;
 use crate::proto::ModelRunnerCommand;
 use crate::utils::rpc_shutdown::RpcShutdown;
 use anyhow::Context;
@@ -14,7 +16,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
-use tokio::sync::oneshot;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::Request;
 use tonic::Response;
@@ -22,6 +24,7 @@ use tonic::Status;
 
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_MODEL_RUNNER";
 const INFERENCE_QUEUE_CAPACITY: usize = 32;
+const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
 
 /// Runs model inference using files already available on disk.
 #[derive(FromArgs)]
@@ -86,7 +89,7 @@ struct ModelRunnerRpcService {
 
 struct InferenceRequest {
     generate_text: GenerateText,
-    result_sender: oneshot::Sender<Result<()>>,
+    event_sender: mpsc::Sender<Result<GenerateTextEvent, Status>>,
 }
 
 fn run_inference_loop(
@@ -96,13 +99,79 @@ fn run_inference_loop(
     // A single thread owns one model today. This queue can later feed a batching
     // scheduler or route requests to multiple device-specific inference workers.
     while let Some(request) = inference_receiver.blocking_recv() {
-        let result = model_runner.generate_text(&request.generate_text);
-        let _ = request.result_sender.send(result);
+        let mut buffered_text = String::new();
+        let stream_output = request.generate_text.stream_output;
+        let result = model_runner.generate_text(
+            &request.generate_text,
+            |fragment| {
+                if stream_output {
+                    send_event(
+                        &request.event_sender,
+                        generate_text_event::Event::Text(fragment.to_owned()),
+                    )
+                } else {
+                    buffered_text.push_str(fragment);
+                    Ok(())
+                }
+            },
+            || request.event_sender.is_closed(),
+        );
+
+        match result {
+            Ok(stats) => {
+                if !stream_output
+                    && send_event(
+                        &request.event_sender,
+                        generate_text_event::Event::Text(buffered_text),
+                    )
+                    .is_err()
+                {
+                    continue;
+                }
+                let _ = send_event(
+                    &request.event_sender,
+                    generate_text_event::Event::Stats(stats),
+                );
+            }
+            Err(error) => {
+                let _ = request
+                    .event_sender
+                    .blocking_send(Err(Status::internal(format!(
+                        "model runner generation failed: {error:#}"
+                    ))));
+            }
+        }
     }
+}
+
+fn send_event(
+    event_sender: &mpsc::Sender<Result<GenerateTextEvent, Status>>,
+    event: generate_text_event::Event,
+) -> Result<()> {
+    event_sender
+        .blocking_send(Ok(GenerateTextEvent { event: Some(event) }))
+        .context("generation response stream was dropped")
 }
 
 #[tonic::async_trait]
 impl ModelRunnerService for ModelRunnerRpcService {
+    type GenerateTextStream = ReceiverStream<Result<GenerateTextEvent, Status>>;
+
+    async fn generate_text(
+        &self,
+        request: Request<GenerateText>,
+    ) -> Result<Response<Self::GenerateTextStream>, Status> {
+        let (event_sender, event_receiver) = mpsc::channel(GENERATION_EVENT_QUEUE_CAPACITY);
+        self.inference_sender
+            .send(InferenceRequest {
+                generate_text: request.into_inner(),
+                event_sender,
+            })
+            .await
+            .map_err(|_| Status::unavailable("model runner inference thread stopped"))?;
+        Ok(Response::new(ReceiverStream::new(event_receiver)))
+    }
+
     async fn handle_command(
         &self,
         request: Request<ModelRunnerCommand>,
@@ -111,27 +180,9 @@ impl ModelRunnerService for ModelRunnerRpcService {
             .into_inner()
             .command
             .ok_or_else(|| Status::invalid_argument("model runner command is empty"))?;
-        let generate_text = match command {
-            model_runner_command::Command::GenerateText(generate_text) => generate_text,
-            model_runner_command::Command::Shutdown(_) => {
-                self.shutdown.trigger()?;
-                return Ok(Response::new(CommandResult {}));
-            }
-        };
-
-        let (result_sender, result_receiver) = oneshot::channel();
-        self.inference_sender
-            .send(InferenceRequest {
-                generate_text,
-                result_sender,
-            })
-            .await
-            .map_err(|_| Status::unavailable("model runner inference thread stopped"))?;
-        result_receiver
-            .await
-            .map_err(|_| Status::internal("model runner inference response was dropped"))?
-            .map_err(|error| Status::internal(format!("model runner command failed: {error:#}")))?;
-
+        match command {
+            model_runner_command::Command::Shutdown(_) => self.shutdown.trigger()?,
+        }
         Ok(Response::new(CommandResult {}))
     }
 }
