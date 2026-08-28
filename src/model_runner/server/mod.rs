@@ -1,22 +1,15 @@
 use crate::model_loaders::model_downloader::ModelArtifacts;
-use crate::model_runner::ModelRunner;
-use crate::proto::generate_text_event;
 use crate::proto::model_runner_command;
 use crate::proto::model_runner_service_server::ModelRunnerService;
 use crate::proto::model_runner_service_server::ModelRunnerServiceServer;
 use crate::proto::CommandResult;
 use crate::proto::GenerateText;
 use crate::proto::GenerateTextEvent;
-use crate::proto::ModelPaths;
 use crate::proto::ModelRunnerCommand;
 use crate::utils::rpc_shutdown::RpcShutdown;
-use crate::utils::textproto::parse_textproto;
 use anyhow::Context;
 use anyhow::Result;
-use argh::FromArgs;
 use std::path::Path;
-use std::path::PathBuf;
-use std::str::FromStr;
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -25,34 +18,18 @@ use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 
+mod cli;
+mod inference_worker;
+mod text_generation;
+
+use cli::create_model_artifacts;
+pub(crate) use cli::ModelRunnerProcessArgs;
+use inference_worker::InferenceRequest;
+use inference_worker::ModelRunner;
+
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_MODEL_RUNNER";
 const INFERENCE_QUEUE_CAPACITY: usize = 32;
 const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
-
-/// Runs model inference using files already available on disk.
-#[derive(FromArgs)]
-pub(crate) struct ModelRunnerProcessArgs {
-    /// textproto paths for the main GGUF model and tokenizer
-    #[argh(option)]
-    model: ModelPaths,
-    /// textproto paths for the draft GGUF model and tokenizer
-    #[argh(option)]
-    draft_model: Option<ModelPaths>,
-    /// number of tokens proposed by the draft model per speculative decoding step
-    #[argh(option)]
-    draft_token_count: usize,
-    /// unix domain socket path used by the model runner worker
-    #[argh(option)]
-    socket_path: PathBuf,
-}
-
-impl FromStr for ModelPaths {
-    type Err = String;
-
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        parse_textproto(value, "model_runner.ModelPaths")
-    }
-}
 
 pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
     let model_artifacts = create_model_artifacts(args.model, "main")?;
@@ -67,16 +44,6 @@ pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
         &args.socket_path,
     )
     .await
-}
-
-fn create_model_artifacts(paths: ModelPaths, model_name: &str) -> Result<ModelArtifacts> {
-    if paths.tokenizer_path.is_empty() || paths.gguf_path.is_empty() {
-        anyhow::bail!("{model_name} model tokenizer_path and gguf_path must not be empty");
-    }
-    Ok(ModelArtifacts {
-        tokenizer: PathBuf::from(paths.tokenizer_path),
-        gguf: PathBuf::from(paths.gguf_path),
-    })
 }
 
 async fn run_server(
@@ -97,7 +64,7 @@ async fn run_server(
     let (inference_sender, inference_receiver) = mpsc::channel(INFERENCE_QUEUE_CAPACITY);
     let inference_thread = std::thread::Builder::new()
         .name("inference-worker".to_owned())
-        .spawn(move || run_inference_loop(model_runner, inference_receiver))
+        .spawn(move || inference_worker::run(model_runner, inference_receiver))
         .context("failed to start the model runner inference thread")?;
     let (shutdown, shutdown_receiver) = RpcShutdown::channel();
     let service = ModelRunnerRpcService {
@@ -121,72 +88,6 @@ async fn run_server(
 struct ModelRunnerRpcService {
     inference_sender: mpsc::Sender<InferenceRequest>,
     shutdown: RpcShutdown,
-}
-
-struct InferenceRequest {
-    generate_text: GenerateText,
-    event_sender: mpsc::Sender<Result<GenerateTextEvent, Status>>,
-}
-
-fn run_inference_loop(
-    mut model_runner: ModelRunner,
-    mut inference_receiver: mpsc::Receiver<InferenceRequest>,
-) {
-    // A single thread owns one model today. This queue can later feed a batching
-    // scheduler or route requests to multiple device-specific inference workers.
-    while let Some(request) = inference_receiver.blocking_recv() {
-        let mut buffered_text = String::new();
-        let stream_output = request.generate_text.stream_output;
-        let result = model_runner.generate_text(
-            &request.generate_text,
-            |fragment| {
-                if stream_output {
-                    send_event(
-                        &request.event_sender,
-                        generate_text_event::Event::Text(fragment.to_owned()),
-                    )
-                } else {
-                    buffered_text.push_str(fragment);
-                    Ok(())
-                }
-            },
-            || request.event_sender.is_closed(),
-        );
-
-        match result {
-            Ok(stats) => {
-                if !stream_output
-                    && send_event(
-                        &request.event_sender,
-                        generate_text_event::Event::Text(buffered_text),
-                    )
-                    .is_err()
-                {
-                    continue;
-                }
-                let _ = send_event(
-                    &request.event_sender,
-                    generate_text_event::Event::Stats(stats),
-                );
-            }
-            Err(error) => {
-                let _ = request
-                    .event_sender
-                    .blocking_send(Err(Status::internal(format!(
-                        "model runner generation failed: {error:#}"
-                    ))));
-            }
-        }
-    }
-}
-
-fn send_event(
-    event_sender: &mpsc::Sender<Result<GenerateTextEvent, Status>>,
-    event: generate_text_event::Event,
-) -> Result<()> {
-    event_sender
-        .blocking_send(Ok(GenerateTextEvent { event: Some(event) }))
-        .context("generation response stream was dropped")
 }
 
 #[tonic::async_trait]

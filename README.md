@@ -59,6 +59,9 @@ Successful streams end with token counts and prefill/decode durations in
 milliseconds. The processes between the model and client do not print or
 aggregate streamed text.
 
+See [Model runner architecture](src/model_runner/README.md) for file
+responsibilities and inference-request flow diagrams.
+
 ## Run
 
 CPU (portable, but slower):
@@ -119,7 +122,7 @@ startup, pass `--run-example`:
 cargo run --release -- --run-example
 ```
 
-The built-in example settings are currently initialized in `main()`. They
+The built-in example settings are initialized in `main_process/example.rs`. They
 ask the model to explain continuous batching in detail, using a ChatML-style
 architecture-appropriate chat prompt, greedy decoding with a repetition penalty,
 and a limit of 1,024 new tokens.
