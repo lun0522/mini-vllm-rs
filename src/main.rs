@@ -38,6 +38,15 @@ struct MainProcessArgs {
     /// defaults to main
     #[argh(option, default = "default_model_revision()")]
     model_revision: String,
+    /// draft model repository used for speculative decoding; disabled by default
+    #[argh(option, default = "String::new()")]
+    draft_model_id: String,
+    /// draft model repository revision; defaults to main
+    #[argh(option, default = "default_model_revision()")]
+    draft_model_revision: String,
+    /// number of tokens proposed by the draft model per speculative decoding step
+    #[argh(option, default = "4")]
+    draft_token_count: usize,
     /// unix domain socket exposed to local inference clients
     #[argh(option, default = "default_request_socket()")]
     request_socket: PathBuf,
@@ -83,16 +92,34 @@ async fn run_main_process(args: MainProcessArgs) -> Result<()> {
         "Server configuration:\n\
          Model: {}\n\
          Revision: {}\n\
+         Draft model: {}\n\
+         Draft revision: {}\n\
+         Draft token count: {}\n\
          Request socket: {}\n\
          Run example: {}",
         args.model_id,
         args.model_revision,
+        if args.draft_model_id.is_empty() {
+            "disabled"
+        } else {
+            &args.draft_model_id
+        },
+        args.draft_model_revision,
+        args.draft_token_count,
         args.request_socket.display(),
         args.run_example
     );
     let model_downloader = ModelDownloader::new(args.model_id, args.model_revision);
     let model_files = model_downloader.download()?;
-    let model_runner_process = ModelRunnerProcess::start(&model_files).await?;
+    let draft_model_files = if args.draft_model_id.is_empty() {
+        None
+    } else {
+        let draft_model_downloader =
+            ModelDownloader::new(args.draft_model_id, args.draft_model_revision);
+        Some(draft_model_downloader.download()?)
+    };
+    let model_runner_process =
+        ModelRunnerProcess::start(&model_files, draft_model_files, args.draft_token_count).await?;
     let request_handler_process =
         match RequestHandlerProcess::start(model_runner_process.socket_path(), args.request_socket)
             .await

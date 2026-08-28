@@ -38,24 +38,63 @@ pub(crate) struct ModelRunnerProcessArgs {
     /// local model weights path used by the model runner worker
     #[argh(option)]
     weights_path: PathBuf,
+    /// local draft tokenizer path used by the model runner worker
+    #[argh(option)]
+    draft_tokenizer_path: Option<PathBuf>,
+    /// local draft model configuration path used by the model runner worker
+    #[argh(option)]
+    draft_config_path: Option<PathBuf>,
+    /// local draft model weights path used by the model runner worker
+    #[argh(option)]
+    draft_weights_path: Option<PathBuf>,
+    /// number of tokens proposed by the draft model per speculative decoding step
+    #[argh(option)]
+    draft_token_count: usize,
     /// unix domain socket path used by the model runner worker
     #[argh(option)]
     socket_path: PathBuf,
 }
 
 pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
+    let draft_model_files = match (
+        args.draft_tokenizer_path,
+        args.draft_config_path,
+        args.draft_weights_path,
+    ) {
+        (Some(tokenizer), Some(config), Some(weights)) => Some(ModelFiles {
+            tokenizer,
+            config,
+            weights,
+        }),
+        (None, None, None) => None,
+        _ => anyhow::bail!(
+            "draft model tokenizer, configuration, and weights paths must be provided together"
+        ),
+    };
     let model_files = ModelFiles {
         tokenizer: args.tokenizer_path,
         config: args.config_path,
         weights: args.weights_path,
     };
-    run_server(&model_files, &args.socket_path).await
+    run_server(
+        &model_files,
+        draft_model_files,
+        args.draft_token_count,
+        &args.socket_path,
+    )
+    .await
 }
 
-async fn run_server(model_files: &ModelFiles, socket_path: &Path) -> Result<()> {
+async fn run_server(
+    model_files: &ModelFiles,
+    draft_model_files: Option<ModelFiles>,
+    draft_token_count: usize,
+    socket_path: &Path,
+) -> Result<()> {
     // Bind only after model initialization succeeds so the socket itself is a
     // readiness signal for the parent process.
-    let model_runner = ModelRunner::new(model_files)?;
+    let model_runner =
+        ModelRunner::new(model_files, draft_model_files.as_ref(), draft_token_count)?;
     let listener = UnixListener::bind(socket_path)
         .context("failed to bind the model runner Unix domain socket")?;
     let (inference_sender, inference_receiver) = mpsc::channel(INFERENCE_QUEUE_CAPACITY);

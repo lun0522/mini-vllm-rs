@@ -91,6 +91,21 @@ Select a branch, tag, or commit with `--model-revision`; it defaults to `main`:
 cargo run --release -- --model-revision <revision>
 ```
 
+The optional `--draft-model-id` and `--draft-model-revision` arguments prepare
+a second model for future speculative decoding. The draft model ID defaults to
+an empty string, which disables the draft model, and its revision defaults to
+`main`. `--draft-token-count` controls how many tokens it will propose per step
+and defaults to `4`:
+
+```shell
+cargo run --release -- --draft-model-id <model-id> --draft-model-revision <revision> \
+  --draft-token-count 4
+```
+
+The draft model tokenizer, configuration, and weights are downloaded by the
+main process and passed to the model runner. The model runner does not load or
+use the draft model yet.
+
 The request handler listens on `/tmp/mini-vllm-rs.sock` by default. Select a
 different local Unix domain socket with `--request-socket`:
 

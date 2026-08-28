@@ -18,18 +18,39 @@ use std::time::Instant;
 /// Owns a loaded model and executes commands received in protobuf format.
 pub(crate) struct ModelRunner {
     loaded_model: LoadedModel,
+    // TODO: Use the loaded draft model and draft token count for speculative decoding.
+    #[expect(dead_code, reason = "speculative decoding is not implemented yet")]
+    loaded_draft_model: Option<LoadedModel>,
+    #[expect(dead_code, reason = "speculative decoding is not implemented yet")]
+    draft_token_count: usize,
 }
 
 impl ModelRunner {
-    pub(crate) fn new(model_files: &ModelFiles) -> Result<Self> {
+    pub(crate) fn new(
+        model_files: &ModelFiles,
+        draft_model_files: Option<&ModelFiles>,
+        draft_token_count: usize,
+    ) -> Result<Self> {
         let device = Self::get_inference_device()?;
         let loaded_model = LoadedModel::new(model_files, device)?;
+        let loaded_draft_model = draft_model_files
+            .map(|draft_model_files| {
+                let mut loaded_draft_model =
+                    LoadedModel::new(draft_model_files, loaded_model.device().clone())?;
+                loaded_draft_model.substitute_tokenizer(&loaded_model);
+                Ok::<_, anyhow::Error>(loaded_draft_model)
+            })
+            .transpose()?;
         info!(
             "Selected inference device {:?} with data type {:?}",
             loaded_model.device(),
             loaded_model.dtype()
         );
-        Ok(Self { loaded_model })
+        Ok(Self {
+            loaded_model,
+            loaded_draft_model,
+            draft_token_count,
+        })
     }
 
     pub(crate) fn generate_text(

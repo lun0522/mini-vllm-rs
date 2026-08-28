@@ -25,9 +25,18 @@ pub(crate) struct ModelRunnerProcess {
 }
 
 impl ModelRunnerProcess {
-    pub(crate) async fn start(model_files: &ModelFiles) -> Result<Self> {
+    pub(crate) async fn start(
+        model_files: &ModelFiles,
+        draft_model_files: Option<ModelFiles>,
+        draft_token_count: usize,
+    ) -> Result<Self> {
         let (socket_directory, socket_path) = create_socket()?;
-        let mut child_process = spawn(model_files, &socket_path)?;
+        let mut child_process = spawn(
+            model_files,
+            draft_model_files.as_ref(),
+            draft_token_count,
+            &socket_path,
+        )?;
         let channel =
             domain_socket::wait_for_server(&mut child_process, &socket_path, STARTUP_TIMEOUT)
                 .await?;
@@ -62,9 +71,15 @@ impl ModelRunnerProcess {
     }
 }
 
-fn spawn(model_files: &ModelFiles, socket_path: &Path) -> Result<ChildProcess> {
+fn spawn(
+    model_files: &ModelFiles,
+    draft_model_files: Option<&ModelFiles>,
+    draft_token_count: usize,
+    socket_path: &Path,
+) -> Result<ChildProcess> {
     let executable = std::env::current_exe().context("failed to locate the current executable")?;
-    let child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .process_group(0)
         .env(server::PROCESS_ENVIRONMENT_VARIABLE, "1")
         .arg("--tokenizer-path")
@@ -73,6 +88,18 @@ fn spawn(model_files: &ModelFiles, socket_path: &Path) -> Result<ChildProcess> {
         .arg(&model_files.config)
         .arg("--weights-path")
         .arg(&model_files.weights)
+        .arg("--draft-token-count")
+        .arg(draft_token_count.to_string());
+    if let Some(draft_model_files) = draft_model_files {
+        command
+            .arg("--draft-tokenizer-path")
+            .arg(&draft_model_files.tokenizer)
+            .arg("--draft-config-path")
+            .arg(&draft_model_files.config)
+            .arg("--draft-weights-path")
+            .arg(&draft_model_files.weights);
+    }
+    let child = command
         .arg("--socket-path")
         .arg(socket_path)
         .spawn()

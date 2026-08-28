@@ -48,6 +48,13 @@ impl LoadedModel {
         self.dtype
     }
 
+    /// Replaces this model's tokenizer with the tokenizer from another loaded model.
+    /// This is only used for a speculative-decoding draft model, which must share
+    /// the main model's tokenizer.
+    pub(crate) fn substitute_tokenizer(&mut self, tokenizer_source: &LoadedModel) {
+        self.tokenizer.clone_from(&tokenizer_source.tokenizer);
+    }
+
     /// Clears request-specific KV-cache state and returns reusable inference resources.
     pub(crate) fn start_inference(
         &mut self,
