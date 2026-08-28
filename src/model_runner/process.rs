@@ -6,6 +6,7 @@ use crate::proto::Shutdown;
 use anyhow::Context;
 use anyhow::Result;
 use hyper_util::rt::TokioIo;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
@@ -24,6 +25,7 @@ const CONNECTION_RETRY_DELAY: Duration = Duration::from_millis(100);
 pub(crate) struct ModelRunnerProcess {
     rpc_client: ModelRunnerServiceClient<Channel>,
     child_process: Child,
+    socket_path: PathBuf,
     _socket_directory: tempfile::TempDir,
 }
 
@@ -59,6 +61,7 @@ impl ModelRunnerProcess {
                     return Ok(Self {
                         rpc_client: ModelRunnerServiceClient::new(channel),
                         child_process,
+                        socket_path,
                         _socket_directory: socket_directory,
                     });
                 }
@@ -75,13 +78,8 @@ impl ModelRunnerProcess {
         )
     }
 
-    pub(crate) async fn handle_command(&self, command: ModelRunnerCommand) -> Result<()> {
-        let mut rpc_client = self.rpc_client.clone();
-        rpc_client
-            .handle_command(command)
-            .await
-            .context("model runner command failed")?;
-        Ok(())
+    pub(crate) fn socket_path(&self) -> &Path {
+        &self.socket_path
     }
 
     pub(crate) async fn shutdown(mut self) -> Result<()> {
@@ -114,6 +112,7 @@ impl Drop for ModelRunnerProcess {
 fn spawn(model_files: &ModelFiles, socket_path: &Path) -> Result<Child> {
     let executable = std::env::current_exe().context("failed to locate the current executable")?;
     Command::new(executable)
+        .process_group(0)
         .env(server::PROCESS_ENVIRONMENT_VARIABLE, "1")
         .arg("--tokenizer-path")
         .arg(&model_files.tokenizer)

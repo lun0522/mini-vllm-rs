@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package request_handler;
+
+import "model_runner.proto";
+
+service RequestHandlerService {
+  // Forwards a text-generation request to the model runner process.
+  rpc GenerateText(model_runner.GenerateText) returns (model_runner.CommandResult);
+  // Gracefully stops the request handler process.
+  rpc Shutdown(model_runner.Shutdown) returns (model_runner.CommandResult);
+}
