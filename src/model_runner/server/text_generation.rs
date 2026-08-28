@@ -31,6 +31,7 @@ impl GenerationParameters {
 
 pub(super) fn generate_text(
     loaded_model: &mut LoadedModel,
+    tokenizer: &Tokenizer,
     command: &GenerateText,
     mut push_fragment: impl FnMut(&str) -> Result<()>,
     mut is_cancelled: impl FnMut() -> bool,
@@ -38,7 +39,7 @@ pub(super) fn generate_text(
     let parameters = GenerationParameters::from_command(command)?;
     let model_prompt = loaded_model.format_chat_prompt(&command.prompt);
     let end_of_sequence_tokens = loaded_model.end_of_sequence_tokens();
-    let (model, tokenizer, device) = loaded_model.start_inference();
+    let (model, device) = loaded_model.start_inference();
     let mut tokens = tokenize_prompt(tokenizer, model_prompt)?;
     let prompt_token_count = tokens.len();
     let eos_tokens = resolve_end_of_sequence_tokens(tokenizer, end_of_sequence_tokens);

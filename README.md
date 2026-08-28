@@ -105,8 +105,10 @@ cargo run --release -- \
   --draft-token-count 4
 ```
 
-The draft GGUF and tokenizer are downloaded by the main process and loaded by
-the model runner. Speculative decoding itself is not implemented yet.
+The draft GGUF and tokenizer are downloaded by the main process. At startup,
+the model runner verifies that the draft tokenizer has the same token-to-ID
+mapping as the target tokenizer, then discards the draft tokenizer and uses only
+the target tokenizer. Speculative decoding itself is not implemented yet.
 
 The request handler listens on `/tmp/mini-vllm-rs.sock` by default. Select a
 different local Unix domain socket with `--request-socket`:

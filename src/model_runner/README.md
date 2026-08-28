@@ -12,12 +12,14 @@ flowchart LR
     subgraph Worker[Model runner process]
         Server["server/mod.rs<br/>tonic service and request queues"]
         Cli["server/cli.rs<br/>Worker arguments and artifact paths"]
+        Tokenizer["server/tokenizer.rs<br/>Tokenizer loading and compatibility"]
         InferenceWorker["server/inference_worker.rs<br/>Inference thread and model ownership"]
         TextGeneration["server/text_generation.rs<br/>Autoregressive decoding loop"]
     end
 
     Client -->|"Spawns with local paths and socket"| Cli
     Cli --> Server
+    InferenceWorker --> Tokenizer
     Server -->|"Bounded request channel"| InferenceWorker
     InferenceWorker --> TextGeneration
 ```
@@ -25,8 +27,12 @@ flowchart LR
 - `client.rs` creates the socket, starts the worker, waits for readiness, and
   sends the shutdown command.
 - `server/cli.rs` parses local model paths into `ModelArtifacts`.
+- `server/tokenizer.rs` loads tokenizers and validates that target and draft
+  vocabularies use identical token-to-ID mappings.
 - `server/inference_worker.rs` owns the model, tokenizer, device, and KV-cache
   state on its dedicated thread.
+- When a draft model is configured, the worker validates its tokenizer against
+  the target tokenizer and then retains only the target tokenizer.
 - The worker binds its socket after loading the model, so the socket signals
   readiness.
 - `client.rs` manages the worker lifecycle; it does not forward inference

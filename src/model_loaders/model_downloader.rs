@@ -1,3 +1,4 @@
+use crate::model_loaders::ModelRole;
 use crate::proto::ModelConfig;
 use anyhow::Context;
 use anyhow::Result;
@@ -12,12 +13,13 @@ use std::time::Instant;
 /// Downloads a quantized GGUF model and its tokenizer into the Hugging Face disk cache.
 pub(crate) struct ModelDownloader {
     model: ModelConfig,
+    role: ModelRole,
 }
 
 impl ModelDownloader {
-    pub(crate) fn new(model: ModelConfig) -> Result<Self> {
+    pub(crate) fn new(model: ModelConfig, role: ModelRole) -> Result<Self> {
         model.validate()?;
-        Ok(Self { model })
+        Ok(Self { model, role })
     }
 
     /// Ensures the GGUF and tokenizer are present on disk and returns their paths.
@@ -39,7 +41,8 @@ impl ModelDownloader {
             tokenizer: self.download_tokenizer(&tokenizer_repo)?,
         };
         info!(
-            "Prepared GGUF model artifacts (downloaded or reused from cache) in {:.2?}",
+            "Prepared {} GGUF model artifacts (downloaded or reused from cache) in {:.2?}",
+            self.role,
             started.elapsed()
         );
         Ok(model_artifacts)

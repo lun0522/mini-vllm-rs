@@ -1,5 +1,6 @@
 use crate::model_loaders::loaded_model::LoadedModel;
 use crate::model_loaders::model_downloader::ModelArtifacts;
+use crate::model_loaders::ModelRole;
 use crate::proto::generate_text_event;
 use crate::proto::GenerateText;
 use crate::proto::GenerateTextEvent;
@@ -8,14 +9,18 @@ use anyhow::Context;
 use anyhow::Result;
 use candle_core::Device;
 use log::info;
+use tokenizers::Tokenizer;
 use tokio::sync::mpsc;
 use tonic::Status;
 
 use super::text_generation;
+use super::tokenizer::load_tokenizer;
+use super::tokenizer::validate_tokenizer_compatibility;
 
 /// Owns the loaded models and executes requests on the inference thread.
 pub(super) struct ModelRunner {
     loaded_model: LoadedModel,
+    tokenizer: Tokenizer,
     // TODO: Use the loaded draft model and draft token count for speculative decoding.
     #[expect(dead_code, reason = "speculative decoding is not implemented yet")]
     loaded_draft_model: Option<LoadedModel>,
@@ -30,13 +35,26 @@ impl ModelRunner {
         draft_token_count: usize,
     ) -> Result<Self> {
         let device = Self::get_inference_device()?;
-        let loaded_model = LoadedModel::new(model_artifacts, device)?;
+        let tokenizer = load_tokenizer(&model_artifacts.tokenizer)
+            .context("failed to load the target model tokenizer")?;
+        if let Some(draft_model_artifacts) = draft_model_artifacts {
+            let draft_tokenizer = load_tokenizer(&draft_model_artifacts.tokenizer)
+                .context("failed to load the draft model tokenizer")?;
+            validate_tokenizer_compatibility(&tokenizer, &draft_tokenizer)?;
+            // Inference uses the target tokenizer after compatibility is confirmed,
+            // so the draft tokenizer is no longer needed.
+            drop(draft_tokenizer);
+        }
+        let loaded_model =
+            LoadedModel::new(model_artifacts, device, &tokenizer, ModelRole::Target)?;
         let loaded_draft_model = draft_model_artifacts
             .map(|draft_model_artifacts| {
-                let mut loaded_draft_model =
-                    LoadedModel::new(draft_model_artifacts, loaded_model.device().clone())?;
-                loaded_draft_model.substitute_tokenizer(&loaded_model);
-                Ok::<_, anyhow::Error>(loaded_draft_model)
+                LoadedModel::new(
+                    draft_model_artifacts,
+                    loaded_model.device().clone(),
+                    &tokenizer,
+                    ModelRole::Draft,
+                )
             })
             .transpose()?;
         info!(
@@ -45,6 +63,7 @@ impl ModelRunner {
         );
         Ok(Self {
             loaded_model,
+            tokenizer,
             loaded_draft_model,
             draft_token_count,
         })
@@ -56,7 +75,13 @@ impl ModelRunner {
         push_fragment: impl FnMut(&str) -> Result<()>,
         is_cancelled: impl FnMut() -> bool,
     ) -> Result<TextGenerationStats> {
-        text_generation::generate_text(&mut self.loaded_model, command, push_fragment, is_cancelled)
+        text_generation::generate_text(
+            &mut self.loaded_model,
+            &self.tokenizer,
+            command,
+            push_fragment,
+            is_cancelled,
+        )
     }
 
     fn get_inference_device() -> Result<Device> {

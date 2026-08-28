@@ -3,14 +3,8 @@ pub(crate) mod loaded_model;
 pub(crate) mod model_downloader;
 mod qwen2;
 
-use anyhow::bail;
-use anyhow::Context;
-use anyhow::Result;
-use candle_core::quantized::gguf_file;
-use candle_core::Device;
 use candle_core::Tensor;
-use std::fs::File;
-use std::path::Path;
+use std::fmt;
 
 /// Common inference operations implemented by each supported model architecture.
 pub(crate) trait CausalLanguageModel: Send {
@@ -19,6 +13,20 @@ pub(crate) trait CausalLanguageModel: Send {
 
     /// Removes the KV-cache state left by the previous inference request.
     fn clear_kv_cache(&mut self);
+}
+
+pub(crate) enum ModelRole {
+    Target,
+    Draft,
+}
+
+impl fmt::Display for ModelRole {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Target => formatter.write_str("target"),
+            Self::Draft => formatter.write_str("draft"),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -45,32 +53,5 @@ impl ModelArchitecture {
             Self::Llama => &["<|eot_id|>", "<|end_of_text|>"],
             Self::Qwen2 => &["<|im_end|>", "<|endoftext|>"],
         }
-    }
-}
-
-pub(crate) fn load_model_backend(
-    gguf_path: &Path,
-    device: &Device,
-) -> Result<(Box<dyn CausalLanguageModel>, ModelArchitecture)> {
-    let mut gguf_file = File::open(gguf_path).context("failed to open the GGUF model")?;
-    let content =
-        gguf_file::Content::read(&mut gguf_file).context("failed to read GGUF metadata")?;
-    let architecture = content
-        .metadata
-        .get("general.architecture")
-        .context("GGUF metadata does not contain general.architecture")?
-        .to_string()
-        .context("GGUF general.architecture is not a string")?
-        .clone();
-    match architecture.as_str() {
-        "llama" => Ok((
-            Box::new(llama::LlamaBackend::new(content, &mut gguf_file, device)?),
-            ModelArchitecture::Llama,
-        )),
-        "qwen2" => Ok((
-            Box::new(qwen2::Qwen2Backend::new(content, &mut gguf_file, device)?),
-            ModelArchitecture::Qwen2,
-        )),
-        unsupported => bail!("unsupported model architecture: {unsupported}"),
     }
 }

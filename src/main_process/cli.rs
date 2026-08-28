@@ -10,7 +10,7 @@ const DEFAULT_DRAFT_TOKEN_COUNT: usize = 4;
 /// Runs text generation with a model from Hugging Face.
 #[derive(FromArgs)]
 pub(crate) struct MainProcessArgs {
-    /// textproto configuration for the main GGUF model
+    /// textproto configuration for the target GGUF model
     #[argh(option, default = "default_model_config()")]
     pub(crate) model: ModelConfig,
     /// textproto configuration for the speculative-decoding draft model

@@ -1,4 +1,5 @@
 use crate::model_loaders::model_downloader::ModelArtifacts;
+use crate::model_loaders::ModelRole;
 use crate::proto::ModelPaths;
 use crate::utils::textproto::parse_textproto;
 use anyhow::Result;
@@ -9,7 +10,7 @@ use std::str::FromStr;
 /// Runs model inference using files already available on disk.
 #[derive(FromArgs)]
 pub(crate) struct ModelRunnerProcessArgs {
-    /// textproto paths for the main GGUF model and tokenizer
+    /// textproto paths for the target GGUF model and tokenizer
     #[argh(option)]
     pub(super) model: ModelPaths,
     /// textproto paths for the draft GGUF model and tokenizer
@@ -33,10 +34,10 @@ impl FromStr for ModelPaths {
 
 pub(super) fn create_model_artifacts(
     paths: ModelPaths,
-    model_name: &str,
+    model_role: ModelRole,
 ) -> Result<ModelArtifacts> {
     if paths.tokenizer_path.is_empty() || paths.gguf_path.is_empty() {
-        anyhow::bail!("{model_name} model tokenizer_path and gguf_path must not be empty");
+        anyhow::bail!("{model_role} model tokenizer_path and gguf_path must not be empty");
     }
     Ok(ModelArtifacts {
         tokenizer: PathBuf::from(paths.tokenizer_path),

@@ -8,6 +8,7 @@ mod utils;
 use crate::main_process::cli::MainProcessArgs;
 use crate::main_process::example::run_example;
 use crate::model_loaders::model_downloader::ModelDownloader;
+use crate::model_loaders::ModelRole;
 use crate::model_runner::client::ModelRunnerProcess;
 use crate::model_runner::server as model_runner_server;
 use crate::request_handler::process::RequestHandlerProcess;
@@ -40,11 +41,11 @@ async fn main() {
 
 async fn run_main_process(args: MainProcessArgs) -> Result<()> {
     info!("Server configuration:\n{args}");
-    let model_downloader = ModelDownloader::new(args.model)?;
+    let model_downloader = ModelDownloader::new(args.model, ModelRole::Target)?;
     let model_artifacts = model_downloader.download()?;
     let draft_model_artifacts = args
         .draft_model
-        .map(ModelDownloader::new)
+        .map(|model| ModelDownloader::new(model, ModelRole::Draft))
         .transpose()?
         .map(|downloader| downloader.download())
         .transpose()?;

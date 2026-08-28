@@ -1,4 +1,5 @@
 use crate::model_loaders::model_downloader::ModelArtifacts;
+use crate::model_loaders::ModelRole;
 use crate::proto::model_runner_command;
 use crate::proto::model_runner_service_server::ModelRunnerService;
 use crate::proto::model_runner_service_server::ModelRunnerServiceServer;
@@ -21,6 +22,7 @@ use tonic::Status;
 mod cli;
 mod inference_worker;
 mod text_generation;
+mod tokenizer;
 
 use cli::create_model_artifacts;
 pub(crate) use cli::ModelRunnerProcessArgs;
@@ -32,10 +34,10 @@ const INFERENCE_QUEUE_CAPACITY: usize = 32;
 const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
 
 pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
-    let model_artifacts = create_model_artifacts(args.model, "main")?;
+    let model_artifacts = create_model_artifacts(args.model, ModelRole::Target)?;
     let draft_model_artifacts = args
         .draft_model
-        .map(|paths| create_model_artifacts(paths, "draft"))
+        .map(|paths| create_model_artifacts(paths, ModelRole::Draft))
         .transpose()?;
     run_server(
         &model_artifacts,
