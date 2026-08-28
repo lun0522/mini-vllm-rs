@@ -9,19 +9,19 @@ license = "MIT"
 [dependencies]
 anyhow = "1.0"
 argh = "0.1"
-candle-core = "0.8.4"
-candle-nn = "0.8.4"
-candle-transformers = "0.8.4"
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
+candle-transformers = "0.11.0"
 env_logger = "0.11"
 hf-hub = "0.4.1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 log = "0.4"
 prost = "0.13"
-serde_json = "1.0"
+prost-reflect = { version = "0.14.7", features = ["text-format"] }
 tempfile = "3.0"
 tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-tokenizers = { version = "0.21.0", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.22.0", default-features = false, features = ["onig"] }
 tonic = "0.12"
 tower = { version = "0.4", features = ["util"] }
 

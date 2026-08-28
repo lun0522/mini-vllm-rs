@@ -10,11 +10,13 @@ use crate::model_runner::server as model_runner_server;
 use crate::proto::generate_text_event;
 use crate::proto::GenerateText;
 use crate::proto::GenerateTextEvent;
+use crate::proto::ModelConfig;
 use crate::proto::TextGenerationStats;
 use crate::request_handler::process::RequestHandlerProcess;
 use crate::request_handler::server as request_handler_server;
 use crate::utils::generated_text_output::create_generated_text_output;
 use crate::utils::generated_text_output::GeneratedTextOutput;
+use crate::utils::textproto::parse_textproto;
 use anyhow::Context;
 use anyhow::Result;
 use argh::FromArgs;
@@ -25,27 +27,21 @@ use log::warn;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::str::FromStr;
+
+const DEFAULT_DRAFT_TOKEN_COUNT: usize = 4;
 
 /// runs text generation with a model from Hugging Face
 #[derive(FromArgs)]
 struct MainProcessArgs {
-    /// model repository to load; supported examples are
-    /// HuggingFaceTB/SmolLM2-360M-Instruct and Qwen/Qwen2.5-0.5B-Instruct;
-    /// defaults to Qwen/Qwen2.5-0.5B-Instruct
-    #[argh(option, default = "default_model_id()")]
-    model_id: String,
-    /// model repository revision, such as a branch, tag, or commit hash;
-    /// defaults to main
-    #[argh(option, default = "default_model_revision()")]
-    model_revision: String,
-    /// draft model repository used for speculative decoding; disabled by default
-    #[argh(option, default = "String::new()")]
-    draft_model_id: String,
-    /// draft model repository revision; defaults to main
-    #[argh(option, default = "default_model_revision()")]
-    draft_model_revision: String,
+    /// textproto configuration for the main GGUF model
+    #[argh(option, default = "default_model_config()")]
+    model: ModelConfig,
+    /// textproto configuration for the speculative-decoding draft model
+    #[argh(option)]
+    draft_model: Option<ModelConfig>,
     /// number of tokens proposed by the draft model per speculative decoding step
-    #[argh(option, default = "4")]
+    #[argh(option, default = "DEFAULT_DRAFT_TOKEN_COUNT")]
     draft_token_count: usize,
     /// unix domain socket exposed to local inference clients
     #[argh(option, default = "default_request_socket()")]
@@ -55,12 +51,36 @@ struct MainProcessArgs {
     run_example: bool,
 }
 
-fn default_model_id() -> String {
-    "Qwen/Qwen2.5-0.5B-Instruct".to_owned()
+fn default_model_config() -> ModelConfig {
+    ModelConfig {
+        model_id: "bartowski/Qwen2.5-7B-Instruct-GGUF".to_owned(),
+        model_filename: "Qwen2.5-7B-Instruct-Q4_K_M.gguf".to_owned(),
+        tokenizer_id: "Qwen/Qwen2.5-7B-Instruct".to_owned(),
+        model_revision: "main".to_owned(),
+    }
 }
 
-fn default_model_revision() -> String {
-    "main".to_owned()
+impl FromStr for ModelConfig {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        parse_textproto(value, "model_config.ModelConfig")
+    }
+}
+
+fn validate_args(mut args: MainProcessArgs) -> MainProcessArgs {
+    if args.model.model_revision.is_empty() {
+        args.model.model_revision = "main".to_owned();
+    }
+    if let Some(draft_model) = args.draft_model.as_mut() {
+        if draft_model.model_revision.is_empty() {
+            draft_model.model_revision = "main".to_owned();
+        }
+        if args.draft_token_count == 0 {
+            args.draft_token_count = DEFAULT_DRAFT_TOKEN_COUNT;
+        }
+    }
+    args
 }
 
 fn default_request_socket() -> PathBuf {
@@ -78,7 +98,7 @@ async fn main() {
         let args: request_handler_server::RequestHandlerProcessArgs = argh::from_env();
         request_handler_server::run(args).await
     } else {
-        let args: MainProcessArgs = argh::from_env();
+        let args: MainProcessArgs = validate_args(argh::from_env());
         run_main_process(args).await
     };
     if let Err(err) = result {
@@ -88,38 +108,52 @@ async fn main() {
 }
 
 async fn run_main_process(args: MainProcessArgs) -> Result<()> {
+    let draft_model_config = match args.draft_model.as_ref() {
+        Some(model) => format!(
+            "Draft model: {}\n\
+             Draft GGUF file: {}\n\
+             Draft tokenizer: {}\n\
+             Draft revision: {}\n\
+             Draft token count: {}",
+            model.model_id,
+            model.model_filename,
+            model.tokenizer_id,
+            model.model_revision,
+            args.draft_token_count,
+        ),
+        None => "Draft model: disabled".to_owned(),
+    };
     info!(
         "Server configuration:\n\
          Model: {}\n\
+         GGUF file: {}\n\
+         Tokenizer: {}\n\
          Revision: {}\n\
-         Draft model: {}\n\
-         Draft revision: {}\n\
-         Draft token count: {}\n\
+         {}\n\
          Request socket: {}\n\
          Run example: {}",
-        args.model_id,
-        args.model_revision,
-        if args.draft_model_id.is_empty() {
-            "disabled"
-        } else {
-            &args.draft_model_id
-        },
-        args.draft_model_revision,
-        args.draft_token_count,
+        args.model.model_id,
+        args.model.model_filename,
+        args.model.tokenizer_id,
+        args.model.model_revision,
+        draft_model_config,
         args.request_socket.display(),
         args.run_example
     );
-    let model_downloader = ModelDownloader::new(args.model_id, args.model_revision);
-    let model_files = model_downloader.download()?;
-    let draft_model_files = if args.draft_model_id.is_empty() {
-        None
-    } else {
-        let draft_model_downloader =
-            ModelDownloader::new(args.draft_model_id, args.draft_model_revision);
-        Some(draft_model_downloader.download()?)
-    };
-    let model_runner_process =
-        ModelRunnerProcess::start(&model_files, draft_model_files, args.draft_token_count).await?;
+    let model_downloader = ModelDownloader::new(args.model)?;
+    let model_artifacts = model_downloader.download()?;
+    let draft_model_artifacts = args
+        .draft_model
+        .map(ModelDownloader::new)
+        .transpose()?
+        .map(|downloader| downloader.download())
+        .transpose()?;
+    let model_runner_process = ModelRunnerProcess::start(
+        &model_artifacts,
+        draft_model_artifacts,
+        args.draft_token_count,
+    )
+    .await?;
     let request_handler_process =
         match RequestHandlerProcess::start(model_runner_process.socket_path(), args.request_socket)
             .await

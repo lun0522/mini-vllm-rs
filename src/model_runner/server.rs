@@ -1,4 +1,4 @@
-use crate::model_loaders::model_downloader::ModelFiles;
+use crate::model_loaders::model_downloader::ModelArtifacts;
 use crate::model_runner::ModelRunner;
 use crate::proto::generate_text_event;
 use crate::proto::model_runner_command;
@@ -7,13 +7,16 @@ use crate::proto::model_runner_service_server::ModelRunnerServiceServer;
 use crate::proto::CommandResult;
 use crate::proto::GenerateText;
 use crate::proto::GenerateTextEvent;
+use crate::proto::ModelPaths;
 use crate::proto::ModelRunnerCommand;
 use crate::utils::rpc_shutdown::RpcShutdown;
+use crate::utils::textproto::parse_textproto;
 use anyhow::Context;
 use anyhow::Result;
 use argh::FromArgs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::str::FromStr;
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -29,24 +32,12 @@ const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
 /// Runs model inference using files already available on disk.
 #[derive(FromArgs)]
 pub(crate) struct ModelRunnerProcessArgs {
-    /// local tokenizer path used by the model runner worker
+    /// textproto paths for the main GGUF model and tokenizer
     #[argh(option)]
-    tokenizer_path: PathBuf,
-    /// local model configuration path used by the model runner worker
+    model: ModelPaths,
+    /// textproto paths for the draft GGUF model and tokenizer
     #[argh(option)]
-    config_path: PathBuf,
-    /// local model weights path used by the model runner worker
-    #[argh(option)]
-    weights_path: PathBuf,
-    /// local draft tokenizer path used by the model runner worker
-    #[argh(option)]
-    draft_tokenizer_path: Option<PathBuf>,
-    /// local draft model configuration path used by the model runner worker
-    #[argh(option)]
-    draft_config_path: Option<PathBuf>,
-    /// local draft model weights path used by the model runner worker
-    #[argh(option)]
-    draft_weights_path: Option<PathBuf>,
+    draft_model: Option<ModelPaths>,
     /// number of tokens proposed by the draft model per speculative decoding step
     #[argh(option)]
     draft_token_count: usize,
@@ -55,46 +46,52 @@ pub(crate) struct ModelRunnerProcessArgs {
     socket_path: PathBuf,
 }
 
+impl FromStr for ModelPaths {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        parse_textproto(value, "model_runner.ModelPaths")
+    }
+}
+
 pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
-    let draft_model_files = match (
-        args.draft_tokenizer_path,
-        args.draft_config_path,
-        args.draft_weights_path,
-    ) {
-        (Some(tokenizer), Some(config), Some(weights)) => Some(ModelFiles {
-            tokenizer,
-            config,
-            weights,
-        }),
-        (None, None, None) => None,
-        _ => anyhow::bail!(
-            "draft model tokenizer, configuration, and weights paths must be provided together"
-        ),
-    };
-    let model_files = ModelFiles {
-        tokenizer: args.tokenizer_path,
-        config: args.config_path,
-        weights: args.weights_path,
-    };
+    let model_artifacts = create_model_artifacts(args.model, "main")?;
+    let draft_model_artifacts = args
+        .draft_model
+        .map(|paths| create_model_artifacts(paths, "draft"))
+        .transpose()?;
     run_server(
-        &model_files,
-        draft_model_files,
+        &model_artifacts,
+        draft_model_artifacts,
         args.draft_token_count,
         &args.socket_path,
     )
     .await
 }
 
+fn create_model_artifacts(paths: ModelPaths, model_name: &str) -> Result<ModelArtifacts> {
+    if paths.tokenizer_path.is_empty() || paths.gguf_path.is_empty() {
+        anyhow::bail!("{model_name} model tokenizer_path and gguf_path must not be empty");
+    }
+    Ok(ModelArtifacts {
+        tokenizer: PathBuf::from(paths.tokenizer_path),
+        gguf: PathBuf::from(paths.gguf_path),
+    })
+}
+
 async fn run_server(
-    model_files: &ModelFiles,
-    draft_model_files: Option<ModelFiles>,
+    model_artifacts: &ModelArtifacts,
+    draft_model_artifacts: Option<ModelArtifacts>,
     draft_token_count: usize,
     socket_path: &Path,
 ) -> Result<()> {
     // Bind only after model initialization succeeds so the socket itself is a
     // readiness signal for the parent process.
-    let model_runner =
-        ModelRunner::new(model_files, draft_model_files.as_ref(), draft_token_count)?;
+    let model_runner = ModelRunner::new(
+        model_artifacts,
+        draft_model_artifacts.as_ref(),
+        draft_token_count,
+    )?;
     let listener = UnixListener::bind(socket_path)
         .context("failed to bind the model runner Unix domain socket")?;
     let (inference_sender, inference_receiver) = mpsc::channel(INFERENCE_QUEUE_CAPACITY);

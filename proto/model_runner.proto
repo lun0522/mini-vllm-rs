@@ -9,6 +9,14 @@ service ModelRunnerService {
   rpc HandleCommand(ModelRunnerCommand) returns (CommandResult);
 }
 
+// Local files required to load a downloaded GGUF model.
+message ModelPaths {
+  // Local tokenizer.json path.
+  string tokenizer_path = 1;
+  // Local GGUF model path.
+  string gguf_path = 2;
+}
+
 message ModelRunnerCommand {
   // The operation for the model runner to execute.
   oneof command {

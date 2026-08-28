@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package model_config;
+
+// Identifies a GGUF model and the tokenizer used with it on Hugging Face.
+message ModelConfig {
+  // Hugging Face repository containing the GGUF file.
+  string model_id = 1;
+  // GGUF filename within the model repository.
+  string model_filename = 2;
+  // Hugging Face repository providing tokenizer.json.
+  string tokenizer_id = 3;
+  // Model repository branch, tag, or commit hash; defaults to main when empty.
+  string model_revision = 4;
+}

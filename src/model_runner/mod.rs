@@ -2,7 +2,7 @@ pub(crate) mod process;
 pub(crate) mod server;
 
 use crate::model_loaders::loaded_model::LoadedModel;
-use crate::model_loaders::model_downloader::ModelFiles;
+use crate::model_loaders::model_downloader::ModelArtifacts;
 use crate::proto::GenerateText;
 use crate::proto::TextGenerationStats;
 use anyhow::Context;
@@ -27,24 +27,23 @@ pub(crate) struct ModelRunner {
 
 impl ModelRunner {
     pub(crate) fn new(
-        model_files: &ModelFiles,
-        draft_model_files: Option<&ModelFiles>,
+        model_artifacts: &ModelArtifacts,
+        draft_model_artifacts: Option<&ModelArtifacts>,
         draft_token_count: usize,
     ) -> Result<Self> {
         let device = Self::get_inference_device()?;
-        let loaded_model = LoadedModel::new(model_files, device)?;
-        let loaded_draft_model = draft_model_files
-            .map(|draft_model_files| {
+        let loaded_model = LoadedModel::new(model_artifacts, device)?;
+        let loaded_draft_model = draft_model_artifacts
+            .map(|draft_model_artifacts| {
                 let mut loaded_draft_model =
-                    LoadedModel::new(draft_model_files, loaded_model.device().clone())?;
+                    LoadedModel::new(draft_model_artifacts, loaded_model.device().clone())?;
                 loaded_draft_model.substitute_tokenizer(&loaded_model);
                 Ok::<_, anyhow::Error>(loaded_draft_model)
             })
             .transpose()?;
         info!(
-            "Selected inference device {:?} with data type {:?}",
-            loaded_model.device(),
-            loaded_model.dtype()
+            "Selected inference device {:?} for quantized GGUF inference",
+            loaded_model.device()
         );
         Ok(Self {
             loaded_model,
@@ -63,15 +62,16 @@ impl ModelRunner {
             .context("max_new_tokens does not fit in usize")?;
         let repeat_last_n = usize::try_from(command.repeat_last_n)
             .context("repeat_last_n does not fit in usize")?;
+        let model_prompt = self.loaded_model.format_chat_prompt(&command.prompt);
+        let end_of_sequence_tokens = self.loaded_model.end_of_sequence_tokens();
         let (model, tokenizer, device) = self.loaded_model.start_inference();
-        let model_prompt = Self::format_chat_prompt(&command.prompt);
         let encoding = tokenizer
             .encode(model_prompt, true)
             .map_err(anyhow::Error::msg)
             .context("failed to tokenize the prompt")?;
         let mut tokens = encoding.get_ids().to_vec();
         let prompt_token_count = tokens.len();
-        let eos_tokens: Vec<u32> = ["<|endoftext|>", "<|im_end|>"]
+        let eos_tokens: Vec<u32> = end_of_sequence_tokens
             .iter()
             .filter_map(|token| tokenizer.token_to_id(token))
             .collect();
@@ -131,10 +131,6 @@ impl ModelRunner {
                 decode_finished.duration_since(prefill_finished),
             ),
         })
-    }
-
-    fn format_chat_prompt(prompt: &str) -> String {
-        format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
     }
 
     fn duration_milliseconds(duration: std::time::Duration) -> u64 {

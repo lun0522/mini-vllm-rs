@@ -1,10 +1,12 @@
-use crate::model_loaders::model_downloader::ModelFiles;
+use crate::model_loaders::model_downloader::ModelArtifacts;
 use crate::model_runner::server;
 use crate::proto::model_runner_service_client::ModelRunnerServiceClient;
+use crate::proto::ModelPaths;
 use crate::proto::ModelRunnerCommand;
 use crate::proto::Shutdown;
 use crate::utils::child_process::ChildProcess;
 use crate::utils::domain_socket;
+use crate::utils::textproto::format_textproto;
 use anyhow::Context;
 use anyhow::Result;
 use std::os::unix::process::CommandExt;
@@ -26,14 +28,14 @@ pub(crate) struct ModelRunnerProcess {
 
 impl ModelRunnerProcess {
     pub(crate) async fn start(
-        model_files: &ModelFiles,
-        draft_model_files: Option<ModelFiles>,
+        model_artifacts: &ModelArtifacts,
+        draft_model_artifacts: Option<ModelArtifacts>,
         draft_token_count: usize,
     ) -> Result<Self> {
         let (socket_directory, socket_path) = create_socket()?;
         let mut child_process = spawn(
-            model_files,
-            draft_model_files.as_ref(),
+            model_artifacts,
+            draft_model_artifacts.as_ref(),
             draft_token_count,
             &socket_path,
         )?;
@@ -72,32 +74,25 @@ impl ModelRunnerProcess {
 }
 
 fn spawn(
-    model_files: &ModelFiles,
-    draft_model_files: Option<&ModelFiles>,
+    model_artifacts: &ModelArtifacts,
+    draft_model_artifacts: Option<&ModelArtifacts>,
     draft_token_count: usize,
     socket_path: &Path,
 ) -> Result<ChildProcess> {
     let executable = std::env::current_exe().context("failed to locate the current executable")?;
+    let model = format_model_paths(model_artifacts)?;
     let mut command = Command::new(executable);
     command
         .process_group(0)
         .env(server::PROCESS_ENVIRONMENT_VARIABLE, "1")
-        .arg("--tokenizer-path")
-        .arg(&model_files.tokenizer)
-        .arg("--config-path")
-        .arg(&model_files.config)
-        .arg("--weights-path")
-        .arg(&model_files.weights)
+        .arg("--model")
+        .arg(model)
         .arg("--draft-token-count")
         .arg(draft_token_count.to_string());
-    if let Some(draft_model_files) = draft_model_files {
+    if let Some(draft_model_artifacts) = draft_model_artifacts {
         command
-            .arg("--draft-tokenizer-path")
-            .arg(&draft_model_files.tokenizer)
-            .arg("--draft-config-path")
-            .arg(&draft_model_files.config)
-            .arg("--draft-weights-path")
-            .arg(&draft_model_files.weights);
+            .arg("--draft-model")
+            .arg(format_model_paths(draft_model_artifacts)?);
     }
     let child = command
         .arg("--socket-path")
@@ -105,6 +100,22 @@ fn spawn(
         .spawn()
         .context("failed to start the model runner process")?;
     Ok(ChildProcess::new(child, "model runner".to_owned()))
+}
+
+fn format_model_paths(model_artifacts: &ModelArtifacts) -> Result<String> {
+    let paths = ModelPaths {
+        tokenizer_path: model_artifacts
+            .tokenizer
+            .to_str()
+            .context("tokenizer path is not valid UTF-8")?
+            .to_owned(),
+        gguf_path: model_artifacts
+            .gguf
+            .to_str()
+            .context("GGUF path is not valid UTF-8")?
+            .to_owned(),
+    };
+    format_textproto(&paths, "model_runner.ModelPaths").map_err(anyhow::Error::msg)
 }
 
 fn create_socket() -> Result<(tempfile::TempDir, PathBuf)> {

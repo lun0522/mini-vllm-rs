@@ -1,44 +1,30 @@
 use crate::model_loaders::CausalLanguageModel;
-use anyhow::Context;
 use anyhow::Result;
-use candle_core::DType;
+use candle_core::quantized::gguf_file;
 use candle_core::Device;
 use candle_core::Tensor;
-use candle_nn::VarBuilder;
-use candle_transformers::models::qwen2::Config;
-use candle_transformers::models::qwen2::ModelForCausalLM;
-use std::path::Path;
+use candle_transformers::models::quantized_qwen2::ModelWeights;
+use std::fs::File;
 
 pub(super) struct Qwen2Backend {
-    model: ModelForCausalLM,
+    model: ModelWeights,
 }
 
 impl Qwen2Backend {
     pub(super) fn new(
-        config: &[u8],
-        weights_path: &Path,
-        dtype: DType,
+        content: gguf_file::Content,
+        gguf_file: &mut File,
         device: &Device,
     ) -> Result<Self> {
-        let config: Config =
-            serde_json::from_slice(config).context("failed to parse the Qwen2 model config")?;
-
-        // SAFETY: The weights are immutable files in the Hugging Face cache, and this
-        // process never modifies or truncates them while the memory-mapped model exists.
-        let var_builder = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[weights_path], dtype, device)
-                .context("failed to memory-map the model weights")?
-        };
-        let model = ModelForCausalLM::new(&config, var_builder)
-            .context("failed to initialize the Qwen2 model")?;
-
-        Ok(Self { model })
+        Ok(Self {
+            model: ModelWeights::from_gguf(content, gguf_file, device)?,
+        })
     }
 }
 
 impl CausalLanguageModel for Qwen2Backend {
     fn forward(&mut self, input: &Tensor, start_position: usize) -> candle_core::Result<Tensor> {
-        self.model.forward(input, start_position)
+        self.model.forward(input, start_position)?.unsqueeze(1)
     }
 
     fn clear_kv_cache(&mut self) {
