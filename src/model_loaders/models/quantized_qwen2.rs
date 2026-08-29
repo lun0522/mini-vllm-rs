@@ -13,13 +13,18 @@
 //! - [Model Card](https://huggingface.co/Qwen/Qwen2)
 //!
 
-use crate::{quantized_nn::RmsNorm, utils::repeat_kv};
+use crate::model_loaders::CausalLanguageModel;
+use anyhow::Result as AnyhowResult;
 use candle::{
     quantized::{gguf_file, QMatMul},
     DType, Device, IndexOp, Result, Tensor,
 };
+use candle_core as candle;
 use candle_nn::{Embedding, Module};
+use candle_transformers::quantized_nn::RmsNorm;
+use candle_transformers::utils::repeat_kv;
 use std::collections::HashMap;
+use std::fs::File;
 
 #[derive(Debug, Clone)]
 struct Mlp {
@@ -298,7 +303,7 @@ impl ModelWeights {
         if let Some(mask) = self.masks.get(&(seq_len, kv_len)) {
             Ok(mask.clone())
         } else {
-            let mask = crate::utils::build_causal_mask(seq_len, index_pos, device)?;
+            let mask = candle_transformers::utils::build_causal_mask(seq_len, index_pos, device)?;
             self.masks.insert((seq_len, kv_len), mask.clone());
             Ok(mask)
         }
@@ -342,5 +347,31 @@ impl ModelWeights {
         let x = x.i((.., seq_len - 1, ..))?;
         let _enter = self.span_output.enter();
         self.output.forward(&x)
+    }
+}
+
+pub(crate) struct Qwen2Backend {
+    model: ModelWeights,
+}
+
+impl Qwen2Backend {
+    pub(crate) fn new(
+        content: gguf_file::Content,
+        gguf_file: &mut File,
+        device: &Device,
+    ) -> AnyhowResult<Self> {
+        Ok(Self {
+            model: ModelWeights::from_gguf(content, gguf_file, device)?,
+        })
+    }
+}
+
+impl CausalLanguageModel for Qwen2Backend {
+    fn forward(&mut self, input: &Tensor, start_position: usize) -> Result<Tensor> {
+        self.model.forward(input, start_position)?.unsqueeze(1)
+    }
+
+    fn clear_kv_cache(&mut self) {
+        self.model.clear_kv_cache();
     }
 }

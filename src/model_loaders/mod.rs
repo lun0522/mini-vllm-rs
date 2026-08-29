@@ -1,7 +1,6 @@
-mod llama;
 pub(crate) mod loaded_model;
 pub(crate) mod model_downloader;
-mod qwen2;
+mod models;
 
 use candle_core::Tensor;
 use std::fmt;

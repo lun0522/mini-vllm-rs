@@ -24,6 +24,7 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tokenizers = { version = "0.22.0", default-features = false, features = ["onig"] }
 tonic = "0.12"
 tower = { version = "0.4", features = ["util"] }
+tracing = "0.1"
 
 [build-dependencies]
 tonic-build = "0.12"

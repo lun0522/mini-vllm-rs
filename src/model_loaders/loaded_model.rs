@@ -1,4 +1,6 @@
 use crate::model_loaders::model_downloader::ModelArtifacts;
+use crate::model_loaders::models::quantized_llama::LlamaBackend;
+use crate::model_loaders::models::quantized_qwen2::Qwen2Backend;
 use crate::model_loaders::CausalLanguageModel;
 use crate::model_loaders::ModelArchitecture;
 use crate::model_loaders::ModelRole;
@@ -106,21 +108,13 @@ fn load_model_backend(gguf_path: &Path, device: &Device) -> Result<LoadedBackend
         .clone();
     match architecture.as_str() {
         "llama" => Ok(LoadedBackend {
-            model: Box::new(super::llama::LlamaBackend::new(
-                content,
-                &mut gguf_file,
-                device,
-            )?),
+            model: Box::new(LlamaBackend::new(content, &mut gguf_file, device)?),
             architecture: ModelArchitecture::Llama,
             input_vocabulary_size,
             output_vocabulary_size,
         }),
         "qwen2" => Ok(LoadedBackend {
-            model: Box::new(super::qwen2::Qwen2Backend::new(
-                content,
-                &mut gguf_file,
-                device,
-            )?),
+            model: Box::new(Qwen2Backend::new(content, &mut gguf_file, device)?),
             architecture: ModelArchitecture::Qwen2,
             input_vocabulary_size,
             output_vocabulary_size,

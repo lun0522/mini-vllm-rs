@@ -1,6 +1,6 @@
 # Candle model source provenance
 
-The following files were copied without modification from
+The model implementations in this directory were initially copied from
 [`huggingface/candle`](https://github.com/huggingface/candle) at the `0.11.0`
 release (commit `31f35b147389700ed2a178ee66a91c3cc25cc80d`):
 
@@ -12,5 +12,5 @@ release (commit `31f35b147389700ed2a178ee66a91c3cc25cc80d`):
 The copied code is distributed under Candle's MIT license. The complete license
 text is included in `CANDLE_LICENSE-MIT` in this directory.
 
-These source files are retained as an unmodified starting point and are not yet
-included in mini-vllm-rs's Rust module tree.
+They have since been integrated with mini-vllm-rs's model-loading interface and
+may diverge from the upstream implementations.
