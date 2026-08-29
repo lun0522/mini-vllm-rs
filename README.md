@@ -1,21 +1,10 @@
 # mini-vllm-rs
 
-A small Rust project that will grow into a continuous-batching LLM server. The
-first milestone downloads a quantized GGUF model from Hugging Face and performs
-basic autoregressive inference with [Candle](https://github.com/huggingface/candle).
-
-Only quantized GGUF checkpoints are supported. The default is the Q4_K_M
-variant of Qwen2.5 7B Instruct. The selected GGUF and its `tokenizer.json` are
-downloaded on the first run and reused from the Hugging Face cache afterward.
-A `ModelDownloader` owns that disk-acquisition step, while `LoadedModel` only
-loads the resulting local artifacts. GGUF metadata selects the Qwen2 or Llama
-quantized Candle backend and the matching chat prompt format. The main process
-downloads the artifacts and starts separate request-handler and model-runner
-processes. Commands cross process boundaries as
-Protocol Buffers messages over tonic and Unix domain sockets, so the model
-runner does not need internet access.
-
-## Roadmap
+`mini-vllm-rs` is an educational project for building a fast, lightweight LLM
+inference engine in Rust with [Candle](https://github.com/huggingface/candle).
+It favors clear implementations of modern serving techniques over production
+completeness. The roadmap shows what the project supports and where it is
+heading.
 
 Status: ✅ done · 🚧 in progress · ⬜ not started
 
@@ -26,140 +15,73 @@ Status: ✅ done · 🚧 in progress · ⬜ not started
   - ✅ Separate request-handling and model-inference processes.
 - 🚧 Paged attention.
   - ✅ Preallocated, engine-owned KV caches passed into model forward calls.
-  - 🚧 KV-cache paging and block-table management.
+  - 🚧 Fixed-size KV-cache blocks with per-request allocation and block tables.
+  - ⬜ Attention over paged caches without rebuilding contiguous tensors.
 - ⬜ Continuous batching.
-  - ⬜ Request scheduling across a continuously changing batch.
+  - ⬜ Per-request state with dynamic admission, scheduling, and cancellation.
+  - ⬜ Batched prefill and decode with chunked prefill support.
 - ⬜ Speculative decoding.
   - ✅ Draft-model loading with tokenizer compatibility and vocabulary coverage
     validation.
-  - ⬜ Draft-token proposal and target-model verification.
+  - ⬜ Draft proposal and target verification with cache commit and rollback.
+- ⬜ Performance evaluation.
+  - ⬜ Measure latency, throughput, and KV-cache memory usage.
+  - ⬜ Compare baseline, continuously batched, and speculative execution.
 
 ## Process architecture
 
-During inference, the program uses three operating-system processes. All run
-the same executable, but internal environment markers select the request-handler
-and model-runner modes for the child processes.
-
-```text
-main process
- ├─ parses the GGUF, tokenizer, and revision arguments
- ├─ downloads the GGUF and tokenizer or reuses the Hugging Face cache
- ├─ starts the model runner and request handler processes
- ├─ optionally submits the built-in example request
- ├─ waits for Ctrl-C
- └─ shuts down both child processes in reverse dependency order
-
-request handler process
- ├─ listens for local tonic requests on the public Unix domain socket
- ├─ accepts concurrent GenerateText requests
- ├─ forwards inference requests to the model runner
- ├─ proxies generated-text and statistics streams back to requesters
- └─ exits after receiving its Shutdown RPC
-
-model runner process
- ├─ parses local GGUF, tokenizer, and socket arguments
- ├─ loads the quantized model from disk without accessing the internet
- ├─ starts the tonic Unix domain socket server
- ├─ queues inference requests from tonic handlers
- ├─ runs a dedicated inference thread that owns the loaded model
- ├─ streams generated text followed by final generation statistics
- └─ exits after receiving the Shutdown command
-```
-
-The main process owns downloading and both child-process lifecycles. The request
-handler owns the client-facing local endpoint, while the model runner owns the
-initialized quantized model, tokenizer, inference device, and mutable inference state on
-its inference thread. This boundary allows multiple inference commands to reuse
-one loaded model. The request queue can later feed a continuous-batching
-scheduler or multiple device-specific workers without changing the RPC layer.
-Generated text follows the reverse path over tonic: the model runner emits
-events to the request handler, which proxies them to the requesting client.
-Successful streams end with token counts and prefill/decode durations in
-milliseconds. The processes between the model and client do not print or
-aggregate streamed text.
-
-See [Model runner architecture](src/model_runner/README.md) for file
-responsibilities and inference-request flow diagrams.
-
-See [Model loaders](src/model_loaders/README.md) for the loading flow, local
-Candle model adaptations, and KV-cache ownership design.
+- The main process downloads model artifacts and manages child-process
+  lifecycles.
+- The request-handler process accepts local tonic requests and proxies response
+  streams.
+- The model-runner process owns the loaded models, inference device, and mutable
+  inference state on a dedicated thread.
+- Processes communicate through Protocol Buffers over Unix domain sockets.
+- See [Model runner architecture](src/model_runner/README.md) for request-flow
+  diagrams and [Model loaders](src/model_loaders/README.md) for model and cache
+  details.
 
 ## Run
 
-CPU (portable, but slower):
-
-```shell
-cargo run --release
-```
-
-Apple Silicon with Metal acceleration:
-
-```shell
-cargo run --release --features metal
-```
-
-The defaults select `Qwen2.5-7B-Instruct-Q4_K_M.gguf` from
-[`bartowski/Qwen2.5-7B-Instruct-GGUF`](https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF)
-and its tokenizer from `Qwen/Qwen2.5-7B-Instruct`. A GGUF repository can contain
-many quantizations, so each `--model` textproto identifies the repository,
-GGUF filename, tokenizer repository, and optional revision. Select the Llama
-3.1 Q4_K_M model with:
-
-```shell
-cargo run --release -- \
-  --model 'model_id: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF" model_filename: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"'
-```
-
-The tokenizer repository may be gated even when the converted GGUF repository
-is public. Set `HF_TOKEN` to a Hugging Face access token after accepting any
-applicable model terms.
-
-Set `model_revision: "<revision>"` in the textproto to select a branch, tag, or
-commit. It defaults to `main` when omitted.
-
-The optional `--draft-model` accepts the same textproto structure and prepares a
-second GGUF model for future speculative decoding. `--draft-token-count`
-controls how many tokens it will propose per step and defaults to `4`:
-
-```shell
-cargo run --release -- \
-  --draft-model 'model_id: "<gguf-repository>" model_filename: "<model.gguf>" tokenizer_id: "<tokenizer-repository>"' \
-  --draft-token-count 4
-```
-
-The draft GGUF and tokenizer are downloaded by the main process. At startup,
-the model runner verifies that the draft tokenizer has the same token-to-ID
-mapping as the target tokenizer, then discards the draft tokenizer and uses only
-the target tokenizer. Speculative decoding itself is not implemented yet.
-
-The request handler listens on `/tmp/mini-vllm-rs.sock` by default. Select a
-different local Unix domain socket with `--request-socket`:
-
-```shell
-cargo run --release -- --request-socket /tmp/my-mini-vllm.sock
-```
-
-The processes remain active until Ctrl-C. To submit the built-in example after
-startup, pass `--run-example`:
+Run the built-in example on CPU:
 
 ```shell
 cargo run --release -- --run-example
 ```
 
-The built-in example settings are initialized in `main_process/example.rs`. They
-ask the model to explain continuous batching in detail, using a ChatML-style
-architecture-appropriate chat prompt, greedy decoding with a repetition penalty,
-and a limit of 1,024 new tokens.
-Generation stops early when the model emits a chat end token. The program logs
-the effective model, GGUF file, revision, device, and prompt. The model runner
-streams generated-text events through the request handler, and the main process
-uses `GeneratedTextOutput` to print the example token by token. The final event
-reports input/output token counts and prefill/decode durations. Set
-`stream_output` to `false` in the inference settings to make the model runner
-buffer the response and send it as one text event before the statistics event.
-Informational logs are enabled by default and can be filtered with `RUST_LOG`
-(for example, set `RUST_LOG=warn`). The default Q4_K_M GGUF is approximately
-4.7 GB, in addition to the tokenizer.
+Run it with Metal acceleration on Apple Silicon:
+
+```shell
+cargo run --release --features metal -- --run-example
+```
+
+Run the example with a different GGUF model:
+
+```shell
+cargo run --release -- \
+  --run-example \
+  --model 'model_id: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF" model_filename: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"'
+```
+
+Arguments:
+
+- `--run-example` submits the built-in request after startup. Without it, the
+  server waits for requests on `/tmp/mini-vllm-rs.sock` until Ctrl-C.
+- `--model '<textproto>'` selects the target model. Set `model_id`,
+  `model_filename`, and `tokenizer_id`; optionally set `model_revision`, which
+  defaults to `main`.
+- `--draft-model '<textproto>'` loads a tokenizer-compatible draft model for
+  future speculative decoding.
+- `--draft-token-count <count>` sets the future proposal length and defaults to
+  `4`.
+- `--request-socket <path>` changes the request-handler Unix socket path.
+
+Notes:
+
+- The default model is "Qwen2.5 7B Instruct Q4_K_M" and is approximately 4.7 GB.
+- Downloads are reused from the Hugging Face cache.
+- Set `HF_TOKEN` when accessing private or gated repositories.
+- Set `RUST_LOG` to change log filtering, for example `RUST_LOG=warn`.
 
 ## Model licenses
 
