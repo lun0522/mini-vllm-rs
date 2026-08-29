@@ -14,6 +14,7 @@
 //!
 
 use crate::model_loaders::CausalLanguageModel;
+use crate::model_loaders::KvCache;
 use anyhow::Result as AnyhowResult;
 use candle::{
     quantized::{gguf_file, QMatMul},
@@ -60,7 +61,6 @@ struct LayerWeights {
     cos: Tensor,
     sin: Tensor,
     neg_inf: Tensor,
-    kv_cache: Option<(Tensor, Tensor)>,
     span_attn: tracing::Span,
     span_rot: tracing::Span,
     span_mlp: tracing::Span,
@@ -82,10 +82,11 @@ impl LayerWeights {
     }
 
     fn forward_attn(
-        &mut self,
+        &self,
         x: &Tensor,
         mask: Option<&Tensor>,
         index_pos: usize,
+        kv_cache: &mut Option<(Tensor, Tensor)>,
     ) -> Result<Tensor> {
         let _enter = self.span_attn.enter();
         let (b_sz, seq_len, n_embd) = x.dims3()?;
@@ -117,7 +118,7 @@ impl LayerWeights {
         let q = self.apply_rotary_emb(&q, index_pos)?;
         let k = self.apply_rotary_emb(&k, index_pos)?;
 
-        let (k, v) = match &self.kv_cache {
+        let (k, v) = match &*kv_cache {
             None => (k, v),
             Some((k_cache, v_cache)) => {
                 if index_pos == 0 {
@@ -129,7 +130,7 @@ impl LayerWeights {
                 }
             }
         };
-        self.kv_cache = Some((k.clone(), v.clone()));
+        *kv_cache = Some((k.clone(), v.clone()));
 
         // Support for MQA, useful for 70B models and mistral.
         let k = repeat_kv(k, self.n_head / self.n_kv_head)?;
@@ -277,7 +278,6 @@ impl ModelWeights {
                 n_kv_head: head_count_kv,
                 head_dim,
                 neg_inf: neg_inf.clone(),
-                kv_cache: None,
                 span_attn,
                 span_rot,
                 span_mlp,
@@ -309,17 +309,12 @@ impl ModelWeights {
         }
     }
 
-    /// Clear the KV cache across all layers.
-    ///
-    /// Call this between independent conversations to free cached attention
-    /// state without recreating the model.
-    pub fn clear_kv_cache(&mut self) {
-        for layer in self.layers.iter_mut() {
-            layer.kv_cache = None;
-        }
-    }
-
-    pub fn forward(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
+    pub fn forward(
+        &mut self,
+        x: &Tensor,
+        index_pos: usize,
+        kv_cache: &mut KvCache,
+    ) -> Result<Tensor> {
         let (_b_sz, seq_len) = x.dims2()?;
         let mask = if seq_len == 1 {
             None
@@ -328,11 +323,12 @@ impl ModelWeights {
         };
         let _enter = self.span.enter();
         let mut layer_in = self.tok_embeddings.forward(x)?;
-        for layer in self.layers.iter_mut() {
+        for (layer_index, layer) in self.layers.iter().enumerate() {
             let x = layer_in;
             let residual = &x;
             let x = layer.attention_norm.forward(&x)?;
-            let attn = layer.forward_attn(&x, mask.as_ref(), index_pos)?;
+            let attn =
+                layer.forward_attn(&x, mask.as_ref(), index_pos, kv_cache.layer(layer_index))?;
             let x = (attn + residual)?;
 
             // MLP
@@ -367,11 +363,18 @@ impl Qwen2Backend {
 }
 
 impl CausalLanguageModel for Qwen2Backend {
-    fn forward(&mut self, input: &Tensor, start_position: usize) -> Result<Tensor> {
-        self.model.forward(input, start_position)?.unsqueeze(1)
+    fn layer_count(&self) -> usize {
+        self.model.layers.len()
     }
 
-    fn clear_kv_cache(&mut self) {
-        self.model.clear_kv_cache();
+    fn forward(
+        &mut self,
+        input: &Tensor,
+        start_position: usize,
+        kv_cache: &mut KvCache,
+    ) -> Result<Tensor> {
+        self.model
+            .forward(input, start_position, kv_cache)?
+            .unsqueeze(1)
     }
 }

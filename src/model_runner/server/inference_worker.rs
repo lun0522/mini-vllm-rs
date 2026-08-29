@@ -1,5 +1,6 @@
 use crate::model_loaders::loaded_model::LoadedModel;
 use crate::model_loaders::model_downloader::ModelArtifacts;
+use crate::model_loaders::KvCache;
 use crate::model_loaders::ModelRole;
 use crate::proto::generate_text_event;
 use crate::proto::GenerateText;
@@ -20,10 +21,13 @@ use super::tokenizer::validate_tokenizer_compatibility;
 /// Owns the loaded models and executes requests on the inference thread.
 pub(super) struct ModelRunner {
     loaded_model: LoadedModel,
+    target_kv_cache: KvCache,
     tokenizer: Tokenizer,
     // TODO: Use the loaded draft model and draft token count for speculative decoding.
     #[expect(dead_code, reason = "speculative decoding is not implemented yet")]
     loaded_draft_model: Option<LoadedModel>,
+    #[expect(dead_code, reason = "speculative decoding is not implemented yet")]
+    draft_kv_cache: Option<KvCache>,
     #[expect(dead_code, reason = "speculative decoding is not implemented yet")]
     draft_token_count: usize,
 }
@@ -61,9 +65,15 @@ impl ModelRunner {
             "Selected inference device {:?} for quantized GGUF inference",
             loaded_model.device()
         );
+        let target_kv_cache = KvCache::new(loaded_model.layer_count());
+        let draft_kv_cache = loaded_draft_model
+            .as_ref()
+            .map(|model| KvCache::new(model.layer_count()));
         Ok(Self {
             loaded_model,
+            target_kv_cache,
             tokenizer,
+            draft_kv_cache,
             loaded_draft_model,
             draft_token_count,
         })
@@ -75,8 +85,10 @@ impl ModelRunner {
         push_fragment: impl FnMut(&str) -> Result<()>,
         is_cancelled: impl FnMut() -> bool,
     ) -> Result<TextGenerationStats> {
+        self.target_kv_cache.clear();
         text_generation::generate_text(
             &mut self.loaded_model,
+            &mut self.target_kv_cache,
             &self.tokenizer,
             command,
             push_fragment,

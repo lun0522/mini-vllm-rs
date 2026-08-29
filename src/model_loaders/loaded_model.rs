@@ -59,6 +59,10 @@ impl LoadedModel {
         &self.device
     }
 
+    pub(crate) fn layer_count(&self) -> usize {
+        self.model.layer_count()
+    }
+
     pub(crate) fn format_chat_prompt(&self, prompt: &str) -> String {
         self.architecture.format_chat_prompt(prompt)
     }
@@ -67,10 +71,8 @@ impl LoadedModel {
         self.architecture.end_of_sequence_tokens()
     }
 
-    /// Clears request-specific KV-cache state and returns reusable model resources.
-    pub(crate) fn start_inference(&mut self) -> (&mut dyn CausalLanguageModel, &Device) {
-        self.model.clear_kv_cache();
-        (&mut *self.model, &self.device)
+    pub(crate) fn model(&mut self) -> &mut dyn CausalLanguageModel {
+        &mut *self.model
     }
 }
 

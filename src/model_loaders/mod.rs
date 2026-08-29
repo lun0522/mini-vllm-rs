@@ -5,13 +5,38 @@ mod models;
 use candle_core::Tensor;
 use std::fmt;
 
+/// Request-specific key and value tensors, indexed by transformer layer.
+pub(crate) struct KvCache {
+    layers: Vec<Option<(Tensor, Tensor)>>,
+}
+
+impl KvCache {
+    pub(crate) fn new(layer_count: usize) -> Self {
+        Self {
+            layers: vec![None; layer_count],
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.layers.fill(None);
+    }
+
+    pub(crate) fn layer(&mut self, layer_index: usize) -> &mut Option<(Tensor, Tensor)> {
+        &mut self.layers[layer_index]
+    }
+}
+
 /// Common inference operations implemented by each supported model architecture.
 pub(crate) trait CausalLanguageModel: Send {
-    /// Returns next-token logits shaped `(batch_size, 1, vocabulary_size)`.
-    fn forward(&mut self, input: &Tensor, start_position: usize) -> candle_core::Result<Tensor>;
+    fn layer_count(&self) -> usize;
 
-    /// Removes the KV-cache state left by the previous inference request.
-    fn clear_kv_cache(&mut self);
+    /// Returns next-token logits shaped `(batch_size, 1, vocabulary_size)`.
+    fn forward(
+        &mut self,
+        input: &Tensor,
+        start_position: usize,
+        kv_cache: &mut KvCache,
+    ) -> candle_core::Result<Tensor>;
 }
 
 pub(crate) enum ModelRole {

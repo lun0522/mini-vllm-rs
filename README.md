@@ -15,6 +15,25 @@ processes. Commands cross process boundaries as
 Protocol Buffers messages over tonic and Unix domain sockets, so the model
 runner does not need internet access.
 
+## Roadmap
+
+Status: ✅ done · 🚧 in progress · ⬜ not started
+
+- ✅ Core inference serving.
+  - ✅ End-to-end quantized GGUF inference for Qwen2 and Llama on a single
+    inference thread.
+  - ✅ Streaming or buffered output with generation statistics.
+  - ✅ Separate request-handling and model-inference processes.
+- 🚧 Paged attention.
+  - ✅ Preallocated, engine-owned KV caches passed into model forward calls.
+  - 🚧 KV-cache paging and block-table management.
+- ⬜ Continuous batching.
+  - ⬜ Request scheduling across a continuously changing batch.
+- ⬜ Speculative decoding.
+  - ✅ Draft-model loading with tokenizer compatibility and vocabulary coverage
+    validation.
+  - ⬜ Draft-token proposal and target-model verification.
+
 ## Process architecture
 
 During inference, the program uses three operating-system processes. All run
@@ -61,6 +80,9 @@ aggregate streamed text.
 
 See [Model runner architecture](src/model_runner/README.md) for file
 responsibilities and inference-request flow diagrams.
+
+See [Model loaders](src/model_loaders/README.md) for the loading flow, local
+Candle model adaptations, and KV-cache ownership design.
 
 ## Run
 
@@ -158,10 +180,3 @@ License](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct):
 If model weights are bundled or redistributed, include the model's license and
 any required attribution or notices with the distribution. Models added in the
 future may use different licenses or require accepting additional usage terms.
-
-## Project direction
-
-Inference runs in a dedicated worker process spawned from the Rust binary.
-Server-side scheduling and continuous batching can be added in Rust as the
-project grows; Python clients and load generators can live alongside it without
-changing the Cargo layout.

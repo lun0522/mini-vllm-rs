@@ -1,5 +1,6 @@
 use crate::model_loaders::loaded_model::LoadedModel;
 use crate::model_loaders::CausalLanguageModel;
+use crate::model_loaders::KvCache;
 use crate::proto::GenerateText;
 use crate::proto::TextGenerationStats;
 use anyhow::Context;
@@ -16,6 +17,7 @@ use tokenizers::Tokenizer;
 struct GenerationParameters {
     max_new_tokens: usize,
     repeat_last_n: usize,
+    repeat_penalty: f32,
 }
 
 impl GenerationParameters {
@@ -25,12 +27,14 @@ impl GenerationParameters {
                 .context("max_new_tokens does not fit in usize")?,
             repeat_last_n: usize::try_from(command.repeat_last_n)
                 .context("repeat_last_n does not fit in usize")?,
+            repeat_penalty: command.repeat_penalty,
         })
     }
 }
 
 pub(super) fn generate_text(
     loaded_model: &mut LoadedModel,
+    kv_cache: &mut KvCache,
     tokenizer: &Tokenizer,
     command: &GenerateText,
     mut push_fragment: impl FnMut(&str) -> Result<()>,
@@ -39,7 +43,8 @@ pub(super) fn generate_text(
     let parameters = GenerationParameters::from_command(command)?;
     let model_prompt = loaded_model.format_chat_prompt(&command.prompt);
     let end_of_sequence_tokens = loaded_model.end_of_sequence_tokens();
-    let (model, device) = loaded_model.start_inference();
+    let device = loaded_model.device().clone();
+    let model = loaded_model.model();
     let mut tokens = tokenize_prompt(tokenizer, model_prompt)?;
     let prompt_token_count = tokens.len();
     let eos_tokens = resolve_end_of_sequence_tokens(tokenizer, end_of_sequence_tokens);
@@ -54,10 +59,10 @@ pub(super) fn generate_text(
         }
         let next_token = sample_next_token(
             model,
-            device,
+            &device,
+            kv_cache,
             &tokens,
-            parameters.repeat_last_n,
-            command.repeat_penalty,
+            &parameters,
             step,
             &mut logits_processor,
         )?;
@@ -112,21 +117,21 @@ fn resolve_end_of_sequence_tokens(
 fn sample_next_token(
     model: &mut dyn CausalLanguageModel,
     device: &Device,
+    kv_cache: &mut KvCache,
     tokens: &[u32],
-    repeat_last_n: usize,
-    repeat_penalty: f32,
+    parameters: &GenerationParameters,
     step: usize,
     logits_processor: &mut LogitsProcessor,
 ) -> Result<u32> {
-    // Feed the full prompt once, then one token at a time. The model backend
-    // retains the KV cache between these calls.
+    // Feed the full prompt once, then one token at a time. The engine-owned KV
+    // cache retains attention state between these calls.
     let context_size = if step == 0 { tokens.len() } else { 1 };
     let start_pos = tokens.len() - context_size;
     let input = Tensor::new(&tokens[start_pos..], device)?.unsqueeze(0)?;
-    let logits = model.forward(&input, start_pos)?;
+    let logits = model.forward(&input, start_pos, kv_cache)?;
     let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
-    let repeat_start = tokens.len().saturating_sub(repeat_last_n);
-    let logits = apply_repeat_penalty(&logits, repeat_penalty, &tokens[repeat_start..])?;
+    let repeat_start = tokens.len().saturating_sub(parameters.repeat_last_n);
+    let logits = apply_repeat_penalty(&logits, parameters.repeat_penalty, &tokens[repeat_start..])?;
     logits_processor.sample(&logits).map_err(Into::into)
 }
 
