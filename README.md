@@ -4,7 +4,7 @@
 inference engine in Rust with [Candle](https://github.com/huggingface/candle).
 It favors clear implementations of modern serving techniques over production
 completeness. The roadmap shows what the project supports and where it is
-heading.
+heading. The project currently supports macOS only.
 
 Status: ✅ done · 🚧 in progress · ⬜ not started
 
@@ -80,8 +80,44 @@ Notes:
 
 - The default model is "Qwen2.5 7B Instruct Q4_K_M" and is approximately 4.7 GB.
 - Downloads are reused from the Hugging Face cache.
-- Set `HF_TOKEN` when accessing private or gated repositories.
 - Set `RUST_LOG` to change log filtering, for example `RUST_LOG=warn`.
+
+## Troubleshooting
+
+### A gated tokenizer returns HTTP 401
+
+The Llama example downloads its GGUF weights from the public
+`bartowski/Meta-Llama-3.1-8B-Instruct-GGUF` repository, but downloads
+`tokenizer.json` from the gated `meta-llama/Meta-Llama-3.1-8B-Instruct`
+repository. Without approved access and local authentication, startup fails
+with an error similar to:
+
+```text
+tokenizer model 'meta-llama/Meta-Llama-3.1-8B-Instruct' does not provide
+tokenizer.json, or the file could not be downloaded: status code 401
+```
+
+To fix it:
+
+1. Sign in to Hugging Face and open
+   [`meta-llama/Meta-Llama-3.1-8B-Instruct`](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct).
+2. Accept the model terms and wait for access approval if it is not immediate.
+3. Create a Hugging Face user token with read access.
+4. Save the token where this project's `hf-hub` client can read it:
+
+   ```shell
+   hf auth login
+   ```
+
+5. Confirm that the CLI uses the approved account, then rerun the original
+   command:
+
+   ```shell
+   hf auth whoami
+   ```
+
+If the `hf` command is unavailable, install the
+[official Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/en/guides/cli).
 
 ## Model licenses
 
