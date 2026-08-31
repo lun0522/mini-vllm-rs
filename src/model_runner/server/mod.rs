@@ -36,6 +36,12 @@ const INFERENCE_QUEUE_CAPACITY: usize = 32;
 const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
 
 pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
+    let kv_cache_type = match args.kv_cache_type {
+        KvCacheType::Contiguous => KvCacheType::Contiguous,
+        KvCacheType::Paged { .. } => KvCacheType::Paged {
+            page_token_count: args.kv_cache_page_token_count,
+        },
+    };
     let model_artifacts = create_model_artifacts(args.model, ModelRole::Target)?;
     let draft_model_artifacts = args
         .draft_model
@@ -45,7 +51,7 @@ pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
         &model_artifacts,
         draft_model_artifacts,
         args.draft_token_count,
-        args.kv_cache_type,
+        kv_cache_type,
         &args.socket_path,
     )
     .await

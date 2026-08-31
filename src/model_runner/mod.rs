@@ -4,17 +4,19 @@ pub(crate) mod server;
 use std::fmt;
 use std::str::FromStr;
 
+pub(crate) const DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT: usize = 16;
+
 #[derive(Clone, Copy)]
 pub(crate) enum KvCacheType {
     Contiguous,
-    Paged,
+    Paged { page_token_count: usize },
 }
 
 impl fmt::Display for KvCacheType {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Contiguous => formatter.write_str("contiguous"),
-            Self::Paged => formatter.write_str("paged"),
+            Self::Paged { page_token_count } => write!(formatter, "paged({page_token_count})"),
         }
     }
 }
@@ -25,7 +27,9 @@ impl FromStr for KvCacheType {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "contiguous" => Ok(Self::Contiguous),
-            "paged" => Ok(Self::Paged),
+            "paged" => Ok(Self::Paged {
+                page_token_count: DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT,
+            }),
             unsupported => Err(format!(
                 "unsupported KV cache implementation: {unsupported}"
             )),

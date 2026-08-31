@@ -63,6 +63,10 @@ impl LoadedModel {
         self.model.layer_count()
     }
 
+    pub(crate) fn kv_cache_bytes_per_token(&self) -> usize {
+        self.model.kv_cache_bytes_per_token()
+    }
+
     pub(crate) fn format_chat_prompt(&self, prompt: &str) -> String {
         self.architecture.format_chat_prompt(prompt)
     }

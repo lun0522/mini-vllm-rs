@@ -1,13 +1,12 @@
 use crate::model_loaders::CachedKeyValue;
 use crate::model_loaders::KvCache;
+use crate::model_loaders::ModelRole;
 use crate::model_runner::KvCacheType;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::Tensor;
 
-// TODO: Expose page size config in CLI.
-const KV_CACHE_PAGE_SIZE: usize = 16;
 const TOKEN_DIMENSION: usize = 2;
 
 #[derive(Default)]
@@ -86,6 +85,7 @@ struct PagedLayerCache {
 /// Each layer records the page IDs assigned to it, while the cache separately tracks page IDs that
 /// were released and can be reassigned. Pages are allocated or reused as each layer's cache grows.
 pub(super) struct PagedKvCache {
+    page_token_count: usize,
     key_pages: Vec<Tensor>,
     value_pages: Vec<Tensor>,
     free_page_ids: Vec<usize>,
@@ -93,8 +93,9 @@ pub(super) struct PagedKvCache {
 }
 
 impl PagedKvCache {
-    fn new(layer_count: usize) -> Self {
+    fn new(layer_count: usize, page_token_count: usize) -> Self {
         Self {
+            page_token_count,
             key_pages: Vec::new(),
             value_pages: Vec::new(),
             free_page_ids: Vec::new(),
@@ -111,8 +112,10 @@ impl PagedKvCache {
         }
 
         let page_id = self.key_pages.len();
-        self.key_pages.push(create_new_page(key)?);
-        self.value_pages.push(create_new_page(value)?);
+        self.key_pages
+            .push(create_new_page(key, self.page_token_count)?);
+        self.value_pages
+            .push(create_new_page(value, self.page_token_count)?);
         Ok(page_id)
     }
 
@@ -143,8 +146,16 @@ impl PagedKvCache {
     fn reconstruct_full_cache(&self, layer_index: usize) -> Result<CachedKeyValue> {
         let layer_cache = &self.layer_caches[layer_index];
         Ok(CachedKeyValue {
-            key: reconstruct_contiguous_tensor(&self.key_pages, layer_cache)?,
-            value: reconstruct_contiguous_tensor(&self.value_pages, layer_cache)?,
+            key: reconstruct_contiguous_tensor(
+                &self.key_pages,
+                layer_cache,
+                self.page_token_count,
+            )?,
+            value: reconstruct_contiguous_tensor(
+                &self.value_pages,
+                layer_cache,
+                self.page_token_count,
+            )?,
         })
     }
 }
@@ -172,7 +183,7 @@ impl KvCache for PagedKvCache {
             validate_cache_append(current_token_count, layer_index, start_position, key, value)?;
         let mut input_offset = 0;
         while input_offset < appended_token_count {
-            let page_offset = self.layer_caches[layer_index].token_count % KV_CACHE_PAGE_SIZE;
+            let page_offset = self.layer_caches[layer_index].token_count % self.page_token_count;
             if page_offset == 0 {
                 let page_id = self.allocate_page(key, value)?;
                 self.layer_caches[layer_index].page_ids.push(page_id);
@@ -183,7 +194,7 @@ impl KvCache for PagedKvCache {
                 .copied()
                 .context("partial KV-cache page is missing from the block table")?;
             let written_token_count =
-                (KV_CACHE_PAGE_SIZE - page_offset).min(appended_token_count - input_offset);
+                (self.page_token_count - page_offset).min(appended_token_count - input_offset);
             self.write_page(
                 page_id,
                 page_offset,
@@ -228,11 +239,11 @@ fn validate_cache_append(
     Ok(appended_token_count)
 }
 
-fn create_new_page(source: &Tensor) -> Result<Tensor> {
+fn create_new_page(source: &Tensor, page_token_count: usize) -> Result<Tensor> {
     // TODO: Allocate monolithic key/value tensor pools and suballocate page views from them.
     let (batch_size, head_count, _, head_dimension) = source.dims4()?;
     Ok(Tensor::zeros(
-        (batch_size, head_count, KV_CACHE_PAGE_SIZE, head_dimension),
+        (batch_size, head_count, page_token_count, head_dimension),
         source.dtype(),
         source.device(),
     )?)
@@ -245,13 +256,14 @@ fn create_new_page(source: &Tensor) -> Result<Tensor> {
 fn reconstruct_contiguous_tensor(
     pages: &[Tensor],
     layer_cache: &PagedLayerCache,
+    page_token_count: usize,
 ) -> Result<Tensor> {
     let mut remaining_token_count = layer_cache.token_count;
     let mut page_slices = Vec::with_capacity(layer_cache.page_ids.len());
     for &page_id in &layer_cache.page_ids {
-        let page_token_count = KV_CACHE_PAGE_SIZE.min(remaining_token_count);
-        page_slices.push(pages[page_id].narrow(TOKEN_DIMENSION, 0, page_token_count)?);
-        remaining_token_count -= page_token_count;
+        let slice_token_count = page_token_count.min(remaining_token_count);
+        page_slices.push(pages[page_id].narrow(TOKEN_DIMENSION, 0, slice_token_count)?);
+        remaining_token_count -= slice_token_count;
     }
     let materialized = match page_slices.as_slice() {
         [page] => page.clone(),
@@ -264,10 +276,22 @@ fn reconstruct_contiguous_tensor(
     Ok(materialized.contiguous()?)
 }
 
-pub(super) fn create_kv_cache(kv_cache_type: KvCacheType, layer_count: usize) -> Box<dyn KvCache> {
+pub(super) fn create_kv_cache(
+    kv_cache_type: KvCacheType,
+    kv_cache_bytes_per_token: usize,
+    layer_count: usize,
+    model_role: ModelRole,
+) -> Box<dyn KvCache> {
     match kv_cache_type {
         KvCacheType::Contiguous => Box::new(ContiguousKvCache::new(layer_count)),
-        KvCacheType::Paged => Box::new(PagedKvCache::new(layer_count)),
+        KvCacheType::Paged { page_token_count } => {
+            let page_size_bytes = 2 * page_token_count * kv_cache_bytes_per_token;
+            log::info!(
+                "Creating {model_role} model paged KV cache with {page_token_count} tokens per page \
+                ({page_size_bytes} bytes per virtual page)"
+            );
+            Box::new(PagedKvCache::new(layer_count, page_token_count))
+        }
     }
 }
 
@@ -275,6 +299,8 @@ pub(super) fn create_kv_cache(kv_cache_type: KvCacheType, layer_count: usize) ->
 mod tests {
     use super::*;
     use candle_core::Device;
+
+    const PAGE_TOKEN_COUNT: usize = 16;
 
     fn cache_tensor(start: u32, token_count: usize) -> Result<Tensor> {
         Ok(
@@ -294,17 +320,17 @@ mod tests {
     #[test]
     fn allocates_pages_for_short_full_and_long_prompts() -> Result<()> {
         for (token_count, expected_page_count) in [(15, 1), (16, 1), (17, 2)] {
-            let mut cache = PagedKvCache::new(1);
+            let mut cache = PagedKvCache::new(1, PAGE_TOKEN_COUNT);
             let key = cache_tensor(0, token_count)?;
             let value = cache_tensor(100, token_count)?;
             let cached = cache.append(0, 0, &key, &value)?;
             assert_eq!(cache.layer_caches[0].page_ids.len(), expected_page_count);
             assert!(cache.key_pages.iter().all(|page| page
                 .dim(TOKEN_DIMENSION)
-                .is_ok_and(|size| size == KV_CACHE_PAGE_SIZE)));
+                .is_ok_and(|size| size == PAGE_TOKEN_COUNT)));
             assert!(cache.value_pages.iter().all(|page| page
                 .dim(TOKEN_DIMENSION)
-                .is_ok_and(|size| size == KV_CACHE_PAGE_SIZE)));
+                .is_ok_and(|size| size == PAGE_TOKEN_COUNT)));
             assert_eq!(tensor_values(&cached.key)?, tensor_values(&key)?);
             assert_eq!(tensor_values(&cached.value)?, tensor_values(&value)?);
         }
@@ -313,7 +339,7 @@ mod tests {
 
     #[test]
     fn appends_across_a_page_boundary() -> Result<()> {
-        let mut cache = PagedKvCache::new(1);
+        let mut cache = PagedKvCache::new(1, PAGE_TOKEN_COUNT);
         cache.append(0, 0, &cache_tensor(0, 15)?, &cache_tensor(100, 15)?)?;
         let cached = cache.append(0, 15, &cache_tensor(15, 3)?, &cache_tensor(115, 3)?)?;
         assert_eq!(cache.layer_caches[0].page_ids.len(), 2);
@@ -327,7 +353,7 @@ mod tests {
 
     #[test]
     fn assigns_different_pages_to_different_layers() -> Result<()> {
-        let mut cache = PagedKvCache::new(2);
+        let mut cache = PagedKvCache::new(2, PAGE_TOKEN_COUNT);
         let key = cache_tensor(0, 1)?;
         let value = cache_tensor(100, 1)?;
         cache.append(0, 0, &key, &value)?;
@@ -341,7 +367,7 @@ mod tests {
 
     #[test]
     fn reuses_pages_after_clear() -> Result<()> {
-        let mut cache = PagedKvCache::new(1);
+        let mut cache = PagedKvCache::new(1, PAGE_TOKEN_COUNT);
         let key = cache_tensor(0, 17)?;
         let value = cache_tensor(100, 17)?;
         cache.append(0, 0, &key, &value)?;
@@ -360,7 +386,7 @@ mod tests {
 
     #[test]
     fn rejects_an_inconsistent_start_position() -> Result<()> {
-        let mut cache = PagedKvCache::new(1);
+        let mut cache = PagedKvCache::new(1, PAGE_TOKEN_COUNT);
         let key = cache_tensor(0, 1)?;
         let value = cache_tensor(100, 1)?;
         cache.append(0, 0, &key, &value)?;

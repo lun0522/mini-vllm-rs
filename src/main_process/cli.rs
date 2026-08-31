@@ -1,4 +1,5 @@
 use crate::model_runner::KvCacheType;
+use crate::model_runner::DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT;
 use crate::proto::ModelConfig;
 use crate::utils::textproto::parse_textproto;
 use argh::FromArgs;
@@ -23,6 +24,9 @@ pub(crate) struct MainProcessArgs {
     /// KV cache implementation used for model inference
     #[argh(option, default = "KvCacheType::Contiguous")]
     pub(crate) kv_cache_type: KvCacheType,
+    /// number of tokens per KV-cache page; only affects paged KV caches
+    #[argh(option, default = "DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT")]
+    pub(crate) kv_cache_page_token_count: usize,
     /// unix domain socket exposed to local inference clients
     #[argh(option, default = "default_request_socket()")]
     pub(crate) request_socket: PathBuf,
@@ -82,6 +86,18 @@ fn default_request_socket() -> PathBuf {
 }
 
 fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
+    if args.kv_cache_page_token_count == 0 {
+        log::warn!(
+            "Invalid KV-cache page token count {}; using default value {DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT}",
+            args.kv_cache_page_token_count
+        );
+        args.kv_cache_page_token_count = DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT;
+    }
+    if matches!(args.kv_cache_type, KvCacheType::Paged { .. }) {
+        args.kv_cache_type = KvCacheType::Paged {
+            page_token_count: args.kv_cache_page_token_count,
+        };
+    }
     if args.model.model_revision.is_empty() {
         args.model.model_revision = "main".to_owned();
     }

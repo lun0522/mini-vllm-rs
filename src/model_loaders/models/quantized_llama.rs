@@ -545,6 +545,20 @@ impl CausalLanguageModel for LlamaBackend {
         self.model.layers.len()
     }
 
+    fn kv_cache_bytes_per_token(&self) -> usize {
+        let attention = &self.model.layers[0];
+        // GQA stores only the KV heads, so this can be smaller than the model-wide hidden
+        // dimension, which includes every query head.
+        let kv_hidden_size = attention.n_kv_head * attention.head_dim;
+        kv_hidden_size
+            * self
+                .model
+                .tok_embeddings
+                .embeddings()
+                .dtype()
+                .size_in_bytes()
+    }
+
     fn forward(
         &mut self,
         input: &Tensor,

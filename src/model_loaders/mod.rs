@@ -28,6 +28,9 @@ pub(crate) struct CachedKeyValue {
 pub(crate) trait CausalLanguageModel: Send {
     fn layer_count(&self) -> usize;
 
+    /// Returns the bytes occupied by one token in either the key or value cache tensor.
+    fn kv_cache_bytes_per_token(&self) -> usize;
+
     /// Returns next-token logits shaped `(batch_size, 1, vocabulary_size)`.
     fn forward(
         &mut self,

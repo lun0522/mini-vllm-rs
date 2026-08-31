@@ -55,11 +55,14 @@ Run it with Metal acceleration on Apple Silicon:
 cargo run --release --features metal -- --run-example
 ```
 
-Run the example with a different GGUF model:
+Run the example with a different GGUF model and a paged KV cache containing 32
+tokens per page:
 
 ```shell
 cargo run --release -- \
   --run-example \
+  --kv-cache-type paged \
+  --kv-cache-page-token-count 32 \
   --model 'model_id: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF" model_filename: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"'
 ```
 
@@ -76,6 +79,8 @@ Arguments:
   `4`.
 - `--kv-cache-type <type>` selects `contiguous` or `paged` KV-cache storage and
   defaults to `contiguous`.
+- `--kv-cache-page-token-count <count>` sets the number of tokens stored in each
+  page and defaults to `16`; it only affects the `paged` KV-cache type.
 - `--request-socket <path>` changes the request-handler Unix socket path.
 
 Notes:

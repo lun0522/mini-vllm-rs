@@ -23,6 +23,9 @@ pub(crate) struct ModelRunnerProcessArgs {
     /// KV cache implementation used for model inference
     #[argh(option)]
     pub(super) kv_cache_type: KvCacheType,
+    /// number of tokens per KV-cache page; only affects paged KV caches
+    #[argh(option)]
+    pub(super) kv_cache_page_token_count: usize,
     /// unix domain socket path used by the model runner worker
     #[argh(option)]
     pub(super) socket_path: PathBuf,
