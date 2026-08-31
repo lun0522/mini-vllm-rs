@@ -16,11 +16,11 @@ Candle 0.11.0 and adapted locally:
 - Candle-internal import paths were changed to use the public `candle-core`,
   `candle-nn`, and `candle-transformers` APIs available to this crate.
 - Request-specific KV tensors were removed from the model layers. `ModelRunner`
-  owns a preallocated `ContiguousKvCache` for each loaded target or draft model
+  owns the selected cache implementation for each loaded target or draft model
   and passes it through the `KvCache` trait into every model `forward` call.
-- Each empty cache slot becomes a contiguous key/value tensor pair during
-  prompt prefill. Decode steps append the new token's tensors to that pair. This
-  is not paged attention yet.
+- The paged implementation stores keys and values in separate 16-token page
+  pools with a block table for each layer. It reconstructs contiguous tensors
+  before calling Candle's existing attention operations.
 - Reusable causal attention masks remain in the model because they are derived
   from tensor shapes rather than belonging to a particular request.
 

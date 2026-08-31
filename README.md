@@ -15,7 +15,7 @@ Status: ✅ done · 🚧 in progress · ⬜ not started
   - ✅ Separate request-handling and model-inference processes.
 - 🚧 Paged attention.
   - ✅ Preallocated, engine-owned KV caches passed into model forward calls.
-  - 🚧 Fixed-size KV-cache blocks with per-request allocation and block tables.
+  - ✅ Fixed-size KV-cache pages with per-layer allocation and block tables.
   - ⬜ Attention over paged caches without rebuilding contiguous tensors.
 - ⬜ Continuous batching.
   - ⬜ Per-request state with dynamic admission, scheduling, and cancellation.
@@ -74,7 +74,7 @@ Arguments:
   future speculative decoding.
 - `--draft-token-count <count>` sets the future proposal length and defaults to
   `4`.
-- `--kv-cache-type <type>` selects the KV-cache implementation and
+- `--kv-cache-type <type>` selects `contiguous` or `paged` KV-cache storage and
   defaults to `contiguous`.
 - `--request-socket <path>` changes the request-handler Unix socket path.
 

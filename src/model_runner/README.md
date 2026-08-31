@@ -13,7 +13,7 @@ flowchart LR
         Server["server/mod.rs<br/>tonic service and request queues"]
         Cli["server/cli.rs<br/>Worker arguments and artifact paths"]
         Tokenizer["server/tokenizer.rs<br/>Tokenizer loading and compatibility"]
-        KvCache["server/kv_cache.rs<br/>Engine-owned contiguous KV cache"]
+        KvCache["server/kv_cache.rs<br/>Engine-owned KV-cache implementations"]
         InferenceWorker["server/inference_worker.rs<br/>Inference thread and model ownership"]
         TextGeneration["server/text_generation.rs<br/>Autoregressive decoding loop"]
     end
@@ -31,8 +31,9 @@ flowchart LR
 - `server/cli.rs` parses local model paths into `ModelArtifacts`.
 - `server/tokenizer.rs` loads tokenizers and validates that target and draft
   vocabularies use identical token-to-ID mappings.
-- `server/kv_cache.rs` implements the model-facing cache interface with one
-  contiguous key/value tensor pair per transformer layer.
+- `server/kv_cache.rs` provides contiguous storage and optional 16-token paged
+  storage with separate key/value pools and per-layer block tables. Paged mode
+  reconstructs contiguous tensors for the existing attention operations.
 - `server/inference_worker.rs` owns the model, tokenizer, device, and KV-cache
   state on its dedicated thread.
 - When a draft model is configured, the worker validates its tokenizer against

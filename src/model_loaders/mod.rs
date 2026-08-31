@@ -9,7 +9,19 @@ use std::fmt;
 pub(crate) trait KvCache: Send {
     fn clear(&mut self);
 
-    fn layer(&mut self, layer_index: usize) -> &mut Option<(Tensor, Tensor)>;
+    /// Stores newly computed key/value tensors and returns the complete layer cache for attention.
+    fn append(
+        &mut self,
+        layer_index: usize,
+        start_position: usize,
+        key: &Tensor,
+        value: &Tensor,
+    ) -> anyhow::Result<CachedKeyValue>;
+}
+
+pub(crate) struct CachedKeyValue {
+    pub(crate) key: Tensor,
+    pub(crate) value: Tensor,
 }
 
 /// Common inference operations implemented by each supported model architecture.

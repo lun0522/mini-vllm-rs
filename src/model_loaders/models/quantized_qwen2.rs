@@ -86,7 +86,8 @@ impl LayerWeights {
         x: &Tensor,
         mask: Option<&Tensor>,
         index_pos: usize,
-        kv_cache: &mut Option<(Tensor, Tensor)>,
+        layer_index: usize,
+        kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
         let _enter = self.span_attn.enter();
         let (b_sz, seq_len, n_embd) = x.dims3()?;
@@ -118,19 +119,11 @@ impl LayerWeights {
         let q = self.apply_rotary_emb(&q, index_pos)?;
         let k = self.apply_rotary_emb(&k, index_pos)?;
 
-        let (k, v) = match &*kv_cache {
-            None => (k, v),
-            Some((k_cache, v_cache)) => {
-                if index_pos == 0 {
-                    (k, v)
-                } else {
-                    let k = Tensor::cat(&[k_cache, &k], 2)?;
-                    let v = Tensor::cat(&[v_cache, &v], 2)?;
-                    (k, v)
-                }
-            }
-        };
-        *kv_cache = Some((k.clone(), v.clone()));
+        let cached = kv_cache
+            .append(layer_index, index_pos, &k, &v)
+            .map_err(candle_core::Error::wrap)?;
+        let k = cached.key;
+        let v = cached.value;
 
         // Support for MQA, useful for 70B models and mistral.
         let k = repeat_kv(k, self.n_head / self.n_kv_head)?;
@@ -327,8 +320,7 @@ impl ModelWeights {
             let x = layer_in;
             let residual = &x;
             let x = layer.attention_norm.forward(&x)?;
-            let attn =
-                layer.forward_attn(&x, mask.as_ref(), index_pos, kv_cache.layer(layer_index))?;
+            let attn = layer.forward_attn(&x, mask.as_ref(), index_pos, layer_index, kv_cache)?;
             let x = (attn + residual)?;
 
             // MLP
