@@ -74,6 +74,8 @@ Arguments:
   future speculative decoding.
 - `--draft-token-count <count>` sets the future proposal length and defaults to
   `4`.
+- `--kv-cache-type <type>` selects the KV-cache implementation and
+  defaults to `contiguous`.
 - `--request-socket <path>` changes the request-handler Unix socket path.
 
 Notes:

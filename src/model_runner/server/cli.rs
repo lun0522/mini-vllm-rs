@@ -1,5 +1,6 @@
 use crate::model_loaders::model_downloader::ModelArtifacts;
 use crate::model_loaders::ModelRole;
+use crate::model_runner::KvCacheType;
 use crate::proto::ModelPaths;
 use crate::utils::textproto::parse_textproto;
 use anyhow::Result;
@@ -19,6 +20,9 @@ pub(crate) struct ModelRunnerProcessArgs {
     /// number of tokens proposed by the draft model per speculative decoding step
     #[argh(option)]
     pub(super) draft_token_count: usize,
+    /// KV cache implementation used for model inference
+    #[argh(option)]
+    pub(super) kv_cache_type: KvCacheType,
     /// unix domain socket path used by the model runner worker
     #[argh(option)]
     pub(super) socket_path: PathBuf,

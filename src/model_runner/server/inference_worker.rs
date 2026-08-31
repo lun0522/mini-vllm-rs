@@ -2,6 +2,7 @@ use crate::model_loaders::loaded_model::LoadedModel;
 use crate::model_loaders::model_downloader::ModelArtifacts;
 use crate::model_loaders::KvCache;
 use crate::model_loaders::ModelRole;
+use crate::model_runner::KvCacheType;
 use crate::proto::generate_text_event;
 use crate::proto::GenerateText;
 use crate::proto::GenerateTextEvent;
@@ -14,6 +15,7 @@ use tokenizers::Tokenizer;
 use tokio::sync::mpsc;
 use tonic::Status;
 
+use super::kv_cache::create_kv_cache;
 use super::text_generation;
 use super::tokenizer::load_tokenizer;
 use super::tokenizer::validate_tokenizer_compatibility;
@@ -21,13 +23,13 @@ use super::tokenizer::validate_tokenizer_compatibility;
 /// Owns the loaded models and executes requests on the inference thread.
 pub(super) struct ModelRunner {
     loaded_model: LoadedModel,
-    target_kv_cache: KvCache,
+    target_kv_cache: Box<dyn KvCache>,
     tokenizer: Tokenizer,
     // TODO: Use the loaded draft model and draft token count for speculative decoding.
     #[expect(dead_code, reason = "speculative decoding is not implemented yet")]
     loaded_draft_model: Option<LoadedModel>,
     #[expect(dead_code, reason = "speculative decoding is not implemented yet")]
-    draft_kv_cache: Option<KvCache>,
+    draft_kv_cache: Option<Box<dyn KvCache>>,
     #[expect(dead_code, reason = "speculative decoding is not implemented yet")]
     draft_token_count: usize,
 }
@@ -37,6 +39,7 @@ impl ModelRunner {
         model_artifacts: &ModelArtifacts,
         draft_model_artifacts: Option<&ModelArtifacts>,
         draft_token_count: usize,
+        kv_cache_type: KvCacheType,
     ) -> Result<Self> {
         let device = Self::get_inference_device()?;
         let tokenizer = load_tokenizer(&model_artifacts.tokenizer)
@@ -65,10 +68,10 @@ impl ModelRunner {
             "Selected inference device {:?} for quantized GGUF inference",
             loaded_model.device()
         );
-        let target_kv_cache = KvCache::new(loaded_model.layer_count());
+        let target_kv_cache = create_kv_cache(kv_cache_type, loaded_model.layer_count());
         let draft_kv_cache = loaded_draft_model
             .as_ref()
-            .map(|model| KvCache::new(model.layer_count()));
+            .map(|model| create_kv_cache(kv_cache_type, model.layer_count()));
         Ok(Self {
             loaded_model,
             target_kv_cache,
@@ -88,7 +91,7 @@ impl ModelRunner {
         self.target_kv_cache.clear();
         text_generation::generate_text(
             &mut self.loaded_model,
-            &mut self.target_kv_cache,
+            self.target_kv_cache.as_mut(),
             &self.tokenizer,
             command,
             push_fragment,

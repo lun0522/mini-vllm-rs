@@ -1,5 +1,6 @@
 use crate::model_loaders::model_downloader::ModelArtifacts;
 use crate::model_runner::server;
+use crate::model_runner::KvCacheType;
 use crate::proto::model_runner_service_client::ModelRunnerServiceClient;
 use crate::proto::ModelPaths;
 use crate::proto::ModelRunnerCommand;
@@ -31,12 +32,14 @@ impl ModelRunnerProcess {
         model_artifacts: &ModelArtifacts,
         draft_model_artifacts: Option<ModelArtifacts>,
         draft_token_count: usize,
+        kv_cache_type: KvCacheType,
     ) -> Result<Self> {
         let (socket_directory, socket_path) = create_socket()?;
         let mut child_process = spawn(
             model_artifacts,
             draft_model_artifacts.as_ref(),
             draft_token_count,
+            kv_cache_type,
             &socket_path,
         )?;
         let channel =
@@ -77,6 +80,7 @@ fn spawn(
     model_artifacts: &ModelArtifacts,
     draft_model_artifacts: Option<&ModelArtifacts>,
     draft_token_count: usize,
+    kv_cache_type: KvCacheType,
     socket_path: &Path,
 ) -> Result<ChildProcess> {
     let executable = std::env::current_exe().context("failed to locate the current executable")?;
@@ -88,7 +92,9 @@ fn spawn(
         .arg("--model")
         .arg(model)
         .arg("--draft-token-count")
-        .arg(draft_token_count.to_string());
+        .arg(draft_token_count.to_string())
+        .arg("--kv-cache-type")
+        .arg(kv_cache_type.to_string());
     if let Some(draft_model_artifacts) = draft_model_artifacts {
         command
             .arg("--draft-model")

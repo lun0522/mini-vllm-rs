@@ -1,3 +1,4 @@
+use crate::model_runner::KvCacheType;
 use crate::proto::ModelConfig;
 use crate::utils::textproto::parse_textproto;
 use argh::FromArgs;
@@ -19,6 +20,9 @@ pub(crate) struct MainProcessArgs {
     /// number of tokens proposed by the draft model per speculative decoding step
     #[argh(option, default = "DEFAULT_DRAFT_TOKEN_COUNT")]
     pub(crate) draft_token_count: usize,
+    /// KV cache implementation used for model inference
+    #[argh(option, default = "KvCacheType::Contiguous")]
+    pub(crate) kv_cache_type: KvCacheType,
     /// unix domain socket exposed to local inference clients
     #[argh(option, default = "default_request_socket()")]
     pub(crate) request_socket: PathBuf,
@@ -42,6 +46,7 @@ impl fmt::Display for MainProcessArgs {
         } else {
             writeln!(formatter, "Draft model: disabled")?;
         }
+        writeln!(formatter, "KV cache type: {}", self.kv_cache_type)?;
         writeln!(
             formatter,
             "Request socket: {}",

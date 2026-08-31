@@ -1,5 +1,6 @@
 use crate::model_loaders::model_downloader::ModelArtifacts;
 use crate::model_loaders::ModelRole;
+use crate::model_runner::KvCacheType;
 use crate::proto::model_runner_command;
 use crate::proto::model_runner_service_server::ModelRunnerService;
 use crate::proto::model_runner_service_server::ModelRunnerServiceServer;
@@ -21,6 +22,7 @@ use tonic::Status;
 
 mod cli;
 mod inference_worker;
+mod kv_cache;
 mod text_generation;
 mod tokenizer;
 
@@ -43,6 +45,7 @@ pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
         &model_artifacts,
         draft_model_artifacts,
         args.draft_token_count,
+        args.kv_cache_type,
         &args.socket_path,
     )
     .await
@@ -52,6 +55,7 @@ async fn run_server(
     model_artifacts: &ModelArtifacts,
     draft_model_artifacts: Option<ModelArtifacts>,
     draft_token_count: usize,
+    kv_cache_type: KvCacheType,
     socket_path: &Path,
 ) -> Result<()> {
     // Bind only after model initialization succeeds so the socket itself is a
@@ -60,6 +64,7 @@ async fn run_server(
         model_artifacts,
         draft_model_artifacts.as_ref(),
         draft_token_count,
+        kv_cache_type,
     )?;
     let listener = UnixListener::bind(socket_path)
         .context("failed to bind the model runner Unix domain socket")?;

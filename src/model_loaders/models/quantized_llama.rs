@@ -499,7 +499,7 @@ impl ModelWeights {
         &mut self,
         x: &Tensor,
         index_pos: usize,
-        kv_cache: &mut KvCache,
+        kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
         let (_b_sz, seq_len) = x.dims2()?;
         let mask = if seq_len == 1 {
@@ -557,7 +557,7 @@ impl CausalLanguageModel for LlamaBackend {
         &mut self,
         input: &Tensor,
         start_position: usize,
-        kv_cache: &mut KvCache,
+        kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
         self.model
             .forward(input, start_position, kv_cache)?

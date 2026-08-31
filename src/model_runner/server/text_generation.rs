@@ -34,7 +34,7 @@ impl GenerationParameters {
 
 pub(super) fn generate_text(
     loaded_model: &mut LoadedModel,
-    kv_cache: &mut KvCache,
+    kv_cache: &mut dyn KvCache,
     tokenizer: &Tokenizer,
     command: &GenerateText,
     mut push_fragment: impl FnMut(&str) -> Result<()>,
@@ -117,7 +117,7 @@ fn resolve_end_of_sequence_tokens(
 fn sample_next_token(
     model: &mut dyn CausalLanguageModel,
     device: &Device,
-    kv_cache: &mut KvCache,
+    kv_cache: &mut dyn KvCache,
     tokens: &[u32],
     parameters: &GenerationParameters,
     step: usize,
