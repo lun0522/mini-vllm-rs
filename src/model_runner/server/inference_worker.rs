@@ -70,8 +70,8 @@ impl ModelRunner {
         );
         let target_kv_cache = create_kv_cache(
             kv_cache_type,
-            loaded_model.layer_count(),
             loaded_model.kv_cache_bytes_per_token(),
+            loaded_model.layer_count(),
             ModelRole::Target,
         );
         let draft_kv_cache = loaded_draft_model.as_ref().map(|model| {
@@ -197,4 +197,48 @@ fn send_event(
     event_sender
         .blocking_send(Ok(GenerateTextEvent { event: Some(event) }))
         .context("generation response stream was dropped")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn receive_event(
+        receiver: &mut mpsc::Receiver<Result<GenerateTextEvent, Status>>,
+    ) -> generate_text_event::Event {
+        receiver
+            .blocking_recv()
+            .expect("event channel closed")
+            .expect("generation returned an error")
+            .event
+            .expect("generation event was empty")
+    }
+
+    #[test]
+    fn generation_result_orders_buffered_text_before_final_stats() {
+        let stats = TextGenerationStats {
+            input_token_count: 3,
+            output_token_count: 2,
+            ..Default::default()
+        };
+
+        let (sender, mut receiver) = mpsc::channel(2);
+        send_generation_result(&sender, false, "answer".to_owned(), stats);
+        assert!(matches!(
+            receive_event(&mut receiver),
+            generate_text_event::Event::Text(text) if text == "answer"
+        ));
+        assert!(matches!(
+            receive_event(&mut receiver),
+            generate_text_event::Event::Stats(received) if received == stats
+        ));
+
+        let (sender, mut receiver) = mpsc::channel(1);
+        send_generation_result(&sender, true, String::new(), stats);
+        assert!(matches!(
+            receive_event(&mut receiver),
+            generate_text_event::Event::Stats(received) if received == stats
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
 }

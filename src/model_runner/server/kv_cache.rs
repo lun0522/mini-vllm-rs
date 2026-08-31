@@ -319,18 +319,23 @@ mod tests {
 
     #[test]
     fn allocates_pages_for_short_full_and_long_prompts() -> Result<()> {
-        for (token_count, expected_page_count) in [(15, 1), (16, 1), (17, 2)] {
-            let mut cache = PagedKvCache::new(1, PAGE_TOKEN_COUNT);
+        for (page_token_count, token_count, expected_page_count) in [
+            (PAGE_TOKEN_COUNT, 15, 1),
+            (PAGE_TOKEN_COUNT, 16, 1),
+            (PAGE_TOKEN_COUNT, 17, 2),
+            (2, 3, 2),
+        ] {
+            let mut cache = PagedKvCache::new(/* layer_count */ 1, page_token_count);
             let key = cache_tensor(0, token_count)?;
             let value = cache_tensor(100, token_count)?;
             let cached = cache.append(0, 0, &key, &value)?;
             assert_eq!(cache.layer_caches[0].page_ids.len(), expected_page_count);
             assert!(cache.key_pages.iter().all(|page| page
                 .dim(TOKEN_DIMENSION)
-                .is_ok_and(|size| size == PAGE_TOKEN_COUNT)));
+                .is_ok_and(|size| size == page_token_count)));
             assert!(cache.value_pages.iter().all(|page| page
                 .dim(TOKEN_DIMENSION)
-                .is_ok_and(|size| size == PAGE_TOKEN_COUNT)));
+                .is_ok_and(|size| size == page_token_count)));
             assert_eq!(tensor_values(&cached.key)?, tensor_values(&key)?);
             assert_eq!(tensor_values(&cached.value)?, tensor_values(&value)?);
         }
@@ -338,8 +343,30 @@ mod tests {
     }
 
     #[test]
+    fn contiguous_and_paged_caches_match_across_appends() -> Result<()> {
+        let mut contiguous = ContiguousKvCache::new(/* layer_count */ 1);
+        let mut paged = PagedKvCache::new(/* layer_count */ 1, /* page_token_count */ 2);
+
+        for (start, token_count) in [(0, 1), (1, 3), (4, 2)] {
+            let key = cache_tensor(start as u32, token_count)?;
+            let value = cache_tensor(100 + start as u32, token_count)?;
+            let contiguous_cache = contiguous.append(0, start, &key, &value)?;
+            let paged_cache = paged.append(0, start, &key, &value)?;
+            assert_eq!(
+                tensor_values(&contiguous_cache.key)?,
+                tensor_values(&paged_cache.key)?
+            );
+            assert_eq!(
+                tensor_values(&contiguous_cache.value)?,
+                tensor_values(&paged_cache.value)?
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn appends_across_a_page_boundary() -> Result<()> {
-        let mut cache = PagedKvCache::new(1, PAGE_TOKEN_COUNT);
+        let mut cache = PagedKvCache::new(/* layer_count */ 1, PAGE_TOKEN_COUNT);
         cache.append(0, 0, &cache_tensor(0, 15)?, &cache_tensor(100, 15)?)?;
         let cached = cache.append(0, 15, &cache_tensor(15, 3)?, &cache_tensor(115, 3)?)?;
         assert_eq!(cache.layer_caches[0].page_ids.len(), 2);
@@ -353,7 +380,7 @@ mod tests {
 
     #[test]
     fn assigns_different_pages_to_different_layers() -> Result<()> {
-        let mut cache = PagedKvCache::new(2, PAGE_TOKEN_COUNT);
+        let mut cache = PagedKvCache::new(/* layer_count */ 2, PAGE_TOKEN_COUNT);
         let key = cache_tensor(0, 1)?;
         let value = cache_tensor(100, 1)?;
         cache.append(0, 0, &key, &value)?;
@@ -367,7 +394,7 @@ mod tests {
 
     #[test]
     fn reuses_pages_after_clear() -> Result<()> {
-        let mut cache = PagedKvCache::new(1, PAGE_TOKEN_COUNT);
+        let mut cache = PagedKvCache::new(/* layer_count */ 1, PAGE_TOKEN_COUNT);
         let key = cache_tensor(0, 17)?;
         let value = cache_tensor(100, 17)?;
         cache.append(0, 0, &key, &value)?;
@@ -386,7 +413,7 @@ mod tests {
 
     #[test]
     fn rejects_an_inconsistent_start_position() -> Result<()> {
-        let mut cache = PagedKvCache::new(1, PAGE_TOKEN_COUNT);
+        let mut cache = PagedKvCache::new(/* layer_count */ 1, PAGE_TOKEN_COUNT);
         let key = cache_tensor(0, 1)?;
         let value = cache_tensor(100, 1)?;
         cache.append(0, 0, &key, &value)?;
