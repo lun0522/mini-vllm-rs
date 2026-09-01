@@ -95,7 +95,7 @@ fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
     }
     if matches!(args.kv_cache_type, KvCacheType::Paged { .. }) {
         args.kv_cache_type = KvCacheType::Paged {
-            page_token_count: args.kv_cache_page_token_count,
+            per_page_token_count: args.kv_cache_page_token_count,
         };
     }
     if args.model.model_revision.is_empty() {

@@ -3,6 +3,7 @@ use crate::model_loaders::models::quantized_llama::LlamaBackend;
 use crate::model_loaders::models::quantized_qwen2::Qwen2Backend;
 use crate::model_loaders::CausalLanguageModel;
 use crate::model_loaders::ModelArchitecture;
+use crate::model_loaders::ModelInfo;
 use crate::model_loaders::ModelRole;
 use anyhow::bail;
 use anyhow::Context;
@@ -59,12 +60,8 @@ impl LoadedModel {
         &self.device
     }
 
-    pub(crate) fn layer_count(&self) -> usize {
-        self.model.layer_count()
-    }
-
-    pub(crate) fn kv_cache_bytes_per_token(&self) -> usize {
-        self.model.kv_cache_bytes_per_token()
+    pub(crate) fn info(&self) -> &ModelInfo {
+        self.model.info()
     }
 
     pub(crate) fn format_chat_prompt(&self, prompt: &str) -> String {

@@ -86,9 +86,11 @@ fn spawn(
 ) -> Result<ChildProcess> {
     let executable = std::env::current_exe().context("failed to locate the current executable")?;
     let model = format_model_paths(model_artifacts)?;
-    let (kv_cache_type_arg, page_token_count) = match kv_cache_type {
+    let (kv_cache_type_arg, per_page_token_count) = match kv_cache_type {
         KvCacheType::Contiguous => ("contiguous", DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT),
-        KvCacheType::Paged { page_token_count } => ("paged", page_token_count),
+        KvCacheType::Paged {
+            per_page_token_count,
+        } => ("paged", per_page_token_count),
     };
     let mut command = Command::new(executable);
     command
@@ -101,7 +103,7 @@ fn spawn(
         .arg("--kv-cache-type")
         .arg(kv_cache_type_arg)
         .arg("--kv-cache-page-token-count")
-        .arg(page_token_count.to_string());
+        .arg(per_page_token_count.to_string());
     if let Some(draft_model_artifacts) = draft_model_artifacts {
         command
             .arg("--draft-model")

@@ -20,6 +20,7 @@ use std::collections::HashMap;
 
 use crate::model_loaders::CausalLanguageModel;
 use crate::model_loaders::KvCache;
+use crate::model_loaders::ModelInfo;
 use anyhow::Result as AnyhowResult;
 use candle::quantized::gguf_file;
 use candle::quantized::QTensor;
@@ -526,6 +527,7 @@ impl ModelWeights {
 
 pub(crate) struct LlamaBackend {
     model: ModelWeights,
+    model_info: ModelInfo,
 }
 
 impl LlamaBackend {
@@ -534,29 +536,21 @@ impl LlamaBackend {
         gguf_file: &mut File,
         device: &Device,
     ) -> AnyhowResult<Self> {
-        Ok(Self {
-            model: ModelWeights::from_gguf(content, gguf_file, device)?,
-        })
+        let model = ModelWeights::from_gguf(content, gguf_file, device)?;
+        let attention = &model.layers[0];
+        let model_info = ModelInfo {
+            layer_count: model.layers.len(),
+            kv_head_count: attention.n_kv_head,
+            head_dimension: attention.head_dim,
+            activation_dtype: model.tok_embeddings.embeddings().dtype(),
+        };
+        Ok(Self { model, model_info })
     }
 }
 
 impl CausalLanguageModel for LlamaBackend {
-    fn layer_count(&self) -> usize {
-        self.model.layers.len()
-    }
-
-    fn kv_cache_bytes_per_token(&self) -> usize {
-        let attention = &self.model.layers[0];
-        // GQA stores only the KV heads, so this can be smaller than the model-wide hidden
-        // dimension, which includes every query head.
-        let kv_hidden_size = attention.n_kv_head * attention.head_dim;
-        kv_hidden_size
-            * self
-                .model
-                .tok_embeddings
-                .embeddings()
-                .dtype()
-                .size_in_bytes()
+    fn info(&self) -> &ModelInfo {
+        &self.model_info
     }
 
     fn forward(

@@ -33,8 +33,8 @@ flowchart LR
   vocabularies use identical token-to-ID mappings.
 - `server/kv_cache.rs` provides contiguous storage and optional configurable,
   token-sized paged storage with separate key/value pools and per-layer block
-  tables. Paged mode reconstructs contiguous tensors for the existing attention
-  operations.
+  tables. Paged mode uses a fixed 4 GiB physical pool and reconstructs contiguous
+  tensors for the existing attention operations.
 - `server/inference_worker.rs` owns the model, tokenizer, device, and KV-cache
   state on its dedicated thread.
 - When a draft model is configured, the worker validates its tokenizer against

@@ -2,8 +2,22 @@ pub(crate) mod loaded_model;
 pub(crate) mod model_downloader;
 mod models;
 
+use candle_core::DType;
 use candle_core::Tensor;
 use std::fmt;
+
+/// Common inference operations implemented by each supported model architecture.
+pub(crate) trait CausalLanguageModel: Send {
+    fn info(&self) -> &ModelInfo;
+
+    /// Returns next-token logits shaped `(batch_size, 1, vocabulary_size)`.
+    fn forward(
+        &mut self,
+        input: &Tensor,
+        start_position: usize,
+        kv_cache: &mut dyn KvCache,
+    ) -> candle_core::Result<Tensor>;
+}
 
 /// Provides request-specific key and value tensors to model layers.
 pub(crate) trait KvCache: Send {
@@ -24,20 +38,19 @@ pub(crate) struct CachedKeyValue {
     pub(crate) value: Tensor,
 }
 
-/// Common inference operations implemented by each supported model architecture.
-pub(crate) trait CausalLanguageModel: Send {
-    fn layer_count(&self) -> usize;
+pub(crate) struct ModelInfo {
+    pub(crate) layer_count: usize,
+    pub(crate) kv_head_count: usize,
+    pub(crate) head_dimension: usize,
+    pub(crate) activation_dtype: DType,
+}
 
-    /// Returns the bytes occupied by one token in either the key or value cache tensor.
-    fn kv_cache_bytes_per_token(&self) -> usize;
-
-    /// Returns next-token logits shaped `(batch_size, 1, vocabulary_size)`.
-    fn forward(
-        &mut self,
-        input: &Tensor,
-        start_position: usize,
-        kv_cache: &mut dyn KvCache,
-    ) -> candle_core::Result<Tensor>;
+impl ModelInfo {
+    pub(crate) fn kv_cache_bytes_per_token(&self) -> usize {
+        // Use the projected KV width rather than the model-wide hidden dimension because GQA
+        // stores fewer key/value heads than query heads.
+        self.kv_head_count * self.head_dimension * self.activation_dtype.size_in_bytes()
+    }
 }
 
 pub(crate) enum ModelRole {

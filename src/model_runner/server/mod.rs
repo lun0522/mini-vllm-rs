@@ -39,7 +39,7 @@ pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
     let kv_cache_type = match args.kv_cache_type {
         KvCacheType::Contiguous => KvCacheType::Contiguous,
         KvCacheType::Paged { .. } => KvCacheType::Paged {
-            page_token_count: args.kv_cache_page_token_count,
+            per_page_token_count: args.kv_cache_page_token_count,
         },
     };
     let model_artifacts = create_model_artifacts(args.model, ModelRole::Target)?;

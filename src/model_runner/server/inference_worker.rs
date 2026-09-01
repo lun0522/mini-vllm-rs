@@ -68,20 +68,11 @@ impl ModelRunner {
             "Selected inference device {:?} for quantized GGUF inference",
             loaded_model.device()
         );
-        let target_kv_cache = create_kv_cache(
-            kv_cache_type,
-            loaded_model.kv_cache_bytes_per_token(),
-            loaded_model.layer_count(),
-            ModelRole::Target,
-        );
-        let draft_kv_cache = loaded_draft_model.as_ref().map(|model| {
-            create_kv_cache(
-                kv_cache_type,
-                model.kv_cache_bytes_per_token(),
-                model.layer_count(),
-                ModelRole::Draft,
-            )
-        });
+        let target_kv_cache = create_kv_cache(kv_cache_type, &loaded_model, ModelRole::Target)?;
+        let draft_kv_cache = loaded_draft_model
+            .as_ref()
+            .map(|model| create_kv_cache(kv_cache_type, model, ModelRole::Draft))
+            .transpose()?;
         Ok(Self {
             loaded_model,
             target_kv_cache,
