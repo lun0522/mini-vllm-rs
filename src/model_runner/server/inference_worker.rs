@@ -20,6 +20,10 @@ use super::text_generation;
 use super::tokenizer::load_tokenizer;
 use super::tokenizer::validate_tokenizer_compatibility;
 
+// TODO: Source the paged KV-cache pool capacity from the CLI.
+/// Total byte budget shared equally by the key and value pools.
+const PAGED_KV_CACHE_POOL_SIZE_BYTES: usize = 4 * 1024 * 1024 * 1024;
+
 /// Owns the loaded models and executes requests on the inference thread.
 pub(super) struct ModelRunner {
     loaded_model: LoadedModel,
@@ -68,10 +72,22 @@ impl ModelRunner {
             "Selected inference device {:?} for quantized GGUF inference",
             loaded_model.device()
         );
-        let target_kv_cache = create_kv_cache(kv_cache_type, &loaded_model, ModelRole::Target)?;
+        let target_kv_cache = create_kv_cache(
+            kv_cache_type,
+            &loaded_model,
+            ModelRole::Target,
+            PAGED_KV_CACHE_POOL_SIZE_BYTES,
+        )?;
         let draft_kv_cache = loaded_draft_model
             .as_ref()
-            .map(|model| create_kv_cache(kv_cache_type, model, ModelRole::Draft))
+            .map(|model| {
+                create_kv_cache(
+                    kv_cache_type,
+                    model,
+                    ModelRole::Draft,
+                    PAGED_KV_CACHE_POOL_SIZE_BYTES / 2,
+                )
+            })
             .transpose()?;
         Ok(Self {
             loaded_model,

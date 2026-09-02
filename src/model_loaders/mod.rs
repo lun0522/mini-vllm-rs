@@ -60,6 +60,7 @@ impl ModelInfo {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum ModelRole {
     Target,
     Draft,
