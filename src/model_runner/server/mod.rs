@@ -1,4 +1,6 @@
+use crate::model_loaders::loaded_model::LoadedModel;
 use crate::model_loaders::model_downloader::ModelArtifacts;
+use crate::model_loaders::KvCache;
 use crate::model_loaders::ModelRole;
 use crate::model_runner::KvCacheType;
 use crate::proto::model_runner_command;
@@ -34,6 +36,11 @@ use inference_worker::ModelRunner;
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_MODEL_RUNNER";
 const INFERENCE_QUEUE_CAPACITY: usize = 32;
 const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
+
+pub(super) struct ModelAndKvCache {
+    pub(super) model: LoadedModel,
+    pub(super) kv_cache: Box<dyn KvCache>,
+}
 
 pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
     let kv_cache_type = match args.kv_cache_type {

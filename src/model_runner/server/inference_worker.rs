@@ -1,6 +1,5 @@
 use crate::model_loaders::loaded_model::LoadedModel;
 use crate::model_loaders::model_downloader::ModelArtifacts;
-use crate::model_loaders::KvCache;
 use crate::model_loaders::ModelRole;
 use crate::model_runner::KvCacheType;
 use crate::proto::generate_text_event;
@@ -19,6 +18,7 @@ use super::kv_cache::create_kv_cache;
 use super::text_generation;
 use super::tokenizer::load_tokenizer;
 use super::tokenizer::validate_tokenizer_compatibility;
+use super::ModelAndKvCache;
 
 // TODO: Source the paged KV-cache pool capacity from the CLI.
 /// Total byte budget shared equally by the key and value pools.
@@ -26,15 +26,9 @@ const PAGED_KV_CACHE_POOL_SIZE_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
 /// Owns the loaded models and executes requests on the inference thread.
 pub(super) struct ModelRunner {
-    loaded_model: LoadedModel,
-    target_kv_cache: Box<dyn KvCache>,
     tokenizer: Tokenizer,
-    // TODO: Use the loaded draft model and draft token count for speculative decoding.
-    #[expect(dead_code, reason = "speculative decoding is not implemented yet")]
-    loaded_draft_model: Option<LoadedModel>,
-    #[expect(dead_code, reason = "speculative decoding is not implemented yet")]
-    draft_kv_cache: Option<Box<dyn KvCache>>,
-    #[expect(dead_code, reason = "speculative decoding is not implemented yet")]
+    target: ModelAndKvCache,
+    draft: Option<ModelAndKvCache>,
     draft_token_count: usize,
 }
 
@@ -78,23 +72,24 @@ impl ModelRunner {
             ModelRole::Target,
             PAGED_KV_CACHE_POOL_SIZE_BYTES,
         )?;
-        let draft_kv_cache = loaded_draft_model
-            .as_ref()
+        let draft = loaded_draft_model
             .map(|model| {
-                create_kv_cache(
+                let kv_cache = create_kv_cache(
                     kv_cache_type,
-                    model,
+                    &model,
                     ModelRole::Draft,
                     PAGED_KV_CACHE_POOL_SIZE_BYTES / 2,
-                )
+                )?;
+                Ok::<_, anyhow::Error>(ModelAndKvCache { model, kv_cache })
             })
             .transpose()?;
         Ok(Self {
-            loaded_model,
-            target_kv_cache,
             tokenizer,
-            draft_kv_cache,
-            loaded_draft_model,
+            target: ModelAndKvCache {
+                model: loaded_model,
+                kv_cache: target_kv_cache,
+            },
+            draft,
             draft_token_count,
         })
     }
@@ -105,11 +100,15 @@ impl ModelRunner {
         push_fragment: impl FnMut(&str) -> Result<()>,
         is_cancelled: impl FnMut() -> bool,
     ) -> Result<TextGenerationStats> {
-        self.target_kv_cache.clear();
+        self.target.kv_cache.clear();
+        if let Some(draft) = self.draft.as_mut() {
+            draft.kv_cache.clear();
+        }
         text_generation::generate_text(
-            &mut self.loaded_model,
-            self.target_kv_cache.as_mut(),
             &self.tokenizer,
+            &mut self.target,
+            self.draft.as_mut(),
+            self.draft_token_count,
             command,
             push_fragment,
             is_cancelled,

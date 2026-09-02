@@ -1,4 +1,3 @@
-use crate::model_loaders::loaded_model::LoadedModel;
 use crate::model_loaders::CausalLanguageModel;
 use crate::model_loaders::KvCache;
 use crate::proto::GenerateText;
@@ -13,6 +12,8 @@ use candle_transformers::utils::apply_repeat_penalty;
 use std::time::Duration;
 use std::time::Instant;
 use tokenizers::Tokenizer;
+
+use super::ModelAndKvCache;
 
 struct GenerationParameters {
     max_new_tokens: usize,
@@ -33,18 +34,18 @@ impl GenerationParameters {
 }
 
 pub(super) fn generate_text(
-    loaded_model: &mut LoadedModel,
-    kv_cache: &mut dyn KvCache,
     tokenizer: &Tokenizer,
+    target: &mut ModelAndKvCache,
+    draft: Option<&mut ModelAndKvCache>,
+    draft_token_count: usize,
     command: &GenerateText,
     mut push_fragment: impl FnMut(&str) -> Result<()>,
     mut is_cancelled: impl FnMut() -> bool,
 ) -> Result<TextGenerationStats> {
     let parameters = GenerationParameters::from_command(command)?;
-    let model_prompt = loaded_model.format_chat_prompt(&command.prompt);
-    let end_of_sequence_tokens = loaded_model.end_of_sequence_tokens();
-    let device = loaded_model.device().clone();
-    let model = loaded_model.model();
+    let model_prompt = target.model.format_chat_prompt(&command.prompt);
+    let end_of_sequence_tokens = target.model.end_of_sequence_tokens();
+    let device = target.model.device().clone();
     let mut tokens = tokenize_prompt(tokenizer, model_prompt)?;
     let prompt_token_count = tokens.len();
     let eos_tokens = resolve_end_of_sequence_tokens(tokenizer, end_of_sequence_tokens);
@@ -53,6 +54,17 @@ pub(super) fn generate_text(
 
     let generation_started = Instant::now();
     let mut prefill_finished = None;
+    if let Some(draft) = draft {
+        let _draft_tokens = generate_draft_tokens(
+            draft,
+            &tokens,
+            draft_token_count.min(parameters.max_new_tokens),
+            &parameters,
+            &eos_tokens,
+            &mut is_cancelled,
+        )?;
+    }
+    let model = target.model.model();
     for step in 0..parameters.max_new_tokens {
         if is_cancelled() {
             anyhow::bail!("generation request was cancelled");
@@ -60,7 +72,7 @@ pub(super) fn generate_text(
         let next_token = sample_next_token(
             model,
             &device,
-            kv_cache,
+            target.kv_cache.as_mut(),
             &tokens,
             &parameters,
             step,
@@ -94,6 +106,41 @@ pub(super) fn generate_text(
         prefill_finished,
         decode_finished,
     )
+}
+
+fn generate_draft_tokens(
+    draft: &mut ModelAndKvCache,
+    tokens: &[u32],
+    draft_token_count: usize,
+    parameters: &GenerationParameters,
+    eos_tokens: &[u32],
+    is_cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<u32>> {
+    let device = draft.model.device().clone();
+    let model = draft.model.model();
+    let mut draft_context = tokens.to_vec();
+    let mut draft_tokens = Vec::with_capacity(draft_token_count);
+    let mut logits_processor = LogitsProcessor::new(0, None, None);
+    for step in 0..draft_token_count {
+        if is_cancelled() {
+            anyhow::bail!("generation request was cancelled");
+        }
+        let next_token = sample_next_token(
+            model,
+            &device,
+            draft.kv_cache.as_mut(),
+            &draft_context,
+            parameters,
+            step,
+            &mut logits_processor,
+        )?;
+        draft_tokens.push(next_token);
+        if eos_tokens.contains(&next_token) {
+            break;
+        }
+        draft_context.push(next_token);
+    }
+    Ok(draft_tokens)
 }
 
 fn tokenize_prompt(tokenizer: &Tokenizer, model_prompt: String) -> Result<Vec<u32>> {
