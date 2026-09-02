@@ -22,6 +22,16 @@ struct ContiguousLayerCache {
     token_count: usize,
 }
 
+trait LayerCache {
+    fn cached_token_count(&self) -> usize;
+}
+
+impl LayerCache for ContiguousLayerCache {
+    fn cached_token_count(&self) -> usize {
+        self.token_count
+    }
+}
+
 /// Stores one growing, contiguous key tensor and value tensor per transformer layer.
 pub(super) struct ContiguousKvCache {
     layer_caches: Vec<ContiguousLayerCache>,
@@ -38,12 +48,6 @@ impl ContiguousKvCache {
 }
 
 impl KvCache for ContiguousKvCache {
-    fn clear(&mut self) {
-        for layer_cache in &mut self.layer_caches {
-            *layer_cache = ContiguousLayerCache::default();
-        }
-    }
-
     fn append(
         &mut self,
         layer_index: usize,
@@ -77,12 +81,55 @@ impl KvCache for ContiguousKvCache {
             value: cached_value,
         })
     }
+
+    fn truncate(&mut self, target_token_count: usize) -> Result<()> {
+        validate_truncation(&self.layer_caches, target_token_count)?;
+        for layer_cache in &mut self.layer_caches {
+            if target_token_count == layer_cache.token_count {
+                continue;
+            }
+            if target_token_count == 0 {
+                *layer_cache = ContiguousLayerCache::default();
+                continue;
+            }
+            layer_cache.key = Some(
+                layer_cache
+                    .key
+                    .as_ref()
+                    .context("contiguous key cache is missing")?
+                    .narrow(TOKEN_DIMENSION, 0, target_token_count)?
+                    .contiguous()?,
+            );
+            layer_cache.value = Some(
+                layer_cache
+                    .value
+                    .as_ref()
+                    .context("contiguous value cache is missing")?
+                    .narrow(TOKEN_DIMENSION, 0, target_token_count)?
+                    .contiguous()?,
+            );
+            layer_cache.token_count = target_token_count;
+        }
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        for layer_cache in &mut self.layer_caches {
+            *layer_cache = ContiguousLayerCache::default();
+        }
+    }
 }
 
 #[derive(Default)]
 struct PagedLayerCache {
     page_ids: Vec<usize>,
     token_count: usize,
+}
+
+impl LayerCache for PagedLayerCache {
+    fn cached_token_count(&self) -> usize {
+        self.token_count
+    }
 }
 
 /// Stores KV caches in reusable physical pages addressed through per-layer block tables.
@@ -235,14 +282,6 @@ impl PagedKvCache {
 }
 
 impl KvCache for PagedKvCache {
-    fn clear(&mut self) {
-        for layer_index in 0..self.layer_caches.len() {
-            let page_ids = std::mem::take(&mut self.layer_caches[layer_index].page_ids);
-            self.layer_caches[layer_index].token_count = 0;
-            self.release_pages(page_ids);
-        }
-    }
-
     fn append(
         &mut self,
         layer_index: usize,
@@ -259,6 +298,27 @@ impl KvCache for PagedKvCache {
         self.validate_append_capacity(current_token_count, appended_token_count)?;
         self.append_to_pages(layer_index, key, value, appended_token_count)?;
         self.reconstruct_full_cache(layer_index)
+    }
+
+    fn truncate(&mut self, target_token_count: usize) -> Result<()> {
+        validate_truncation(&self.layer_caches, target_token_count)?;
+        let retained_page_count = target_token_count.div_ceil(self.per_page_token_count);
+        for layer_index in 0..self.layer_caches.len() {
+            let released_page_ids = self.layer_caches[layer_index]
+                .page_ids
+                .split_off(retained_page_count);
+            self.layer_caches[layer_index].token_count = target_token_count;
+            self.release_pages(released_page_ids);
+        }
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        for layer_index in 0..self.layer_caches.len() {
+            let page_ids = std::mem::take(&mut self.layer_caches[layer_index].page_ids);
+            self.layer_caches[layer_index].token_count = 0;
+            self.release_pages(page_ids);
+        }
     }
 }
 
@@ -289,6 +349,23 @@ fn validate_cache_append(
         bail!("cannot append an empty KV-cache tensor");
     }
     Ok(appended_token_count)
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the staged cache truncation method")
+)]
+fn validate_truncation<T: LayerCache>(layer_caches: &[T], target_token_count: usize) -> Result<()> {
+    for (layer_index, layer_cache) in layer_caches.iter().enumerate() {
+        let current_token_count = layer_cache.cached_token_count();
+        if target_token_count > current_token_count {
+            bail!(
+                "cannot truncate KV-cache layer {layer_index} from {current_token_count} to \
+                 {target_token_count} tokens"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn allocate_pool(
@@ -480,6 +557,60 @@ mod tests {
                 tensor_values(&paged_cache.value)?
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn truncates_contiguous_and_paged_caches_before_reuse() -> Result<()> {
+        let mut contiguous = ContiguousKvCache::new(/* layer_count */ 1);
+        let mut paged = paged_cache(
+            /* layer_count */ 1,
+            /* per_page_token_count */ 2,
+            TEST_PAGE_CAPACITY,
+        )?;
+        let key = cache_tensor(0, 6)?;
+        let value = cache_tensor(100, 6)?;
+        contiguous.append(0, 0, &key, &value)?;
+        paged.append(0, 0, &key, &value)?;
+
+        contiguous.truncate(3)?;
+        paged.truncate(3)?;
+        assert_eq!(paged.free_page_ids.len(), TEST_PAGE_CAPACITY - 2);
+
+        let key = cache_tensor(3, 2)?;
+        let value = cache_tensor(103, 2)?;
+        let contiguous_cache = contiguous.append(0, 3, &key, &value)?;
+        let paged_cache = paged.append(0, 3, &key, &value)?;
+        assert_eq!(
+            tensor_values(&contiguous_cache.key)?,
+            (0..5).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            tensor_values(&contiguous_cache.key)?,
+            tensor_values(&paged_cache.key)?
+        );
+        assert_eq!(
+            tensor_values(&contiguous_cache.value)?,
+            tensor_values(&paged_cache.value)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_truncation_beyond_the_cached_token_count() -> Result<()> {
+        let mut contiguous = ContiguousKvCache::new(/* layer_count */ 1);
+        let mut paged = paged_cache(
+            /* layer_count */ 1,
+            /* per_page_token_count */ 2,
+            TEST_PAGE_CAPACITY,
+        )?;
+        let key = cache_tensor(0, 2)?;
+        let value = cache_tensor(100, 2)?;
+        contiguous.append(0, 0, &key, &value)?;
+        paged.append(0, 0, &key, &value)?;
+
+        assert!(contiguous.truncate(3).is_err());
+        assert!(paged.truncate(3).is_err());
         Ok(())
     }
 

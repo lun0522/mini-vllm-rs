@@ -21,8 +21,6 @@ pub(crate) trait CausalLanguageModel: Send {
 
 /// Provides request-specific key and value tensors to model layers.
 pub(crate) trait KvCache: Send {
-    fn clear(&mut self);
-
     /// Stores newly computed key/value tensors and returns the complete layer cache for attention.
     fn append(
         &mut self,
@@ -31,6 +29,15 @@ pub(crate) trait KvCache: Send {
         key: &Tensor,
         value: &Tensor,
     ) -> anyhow::Result<CachedKeyValue>;
+
+    /// Discards cached tokens at and after `target_token_count` in every model layer.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "reserved for speculative cache rollback")
+    )]
+    fn truncate(&mut self, target_token_count: usize) -> anyhow::Result<()>;
+
+    fn clear(&mut self);
 }
 
 pub(crate) struct CachedKeyValue {

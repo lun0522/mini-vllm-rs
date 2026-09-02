@@ -6,24 +6,27 @@ It favors clear implementations of modern serving techniques over production
 completeness. The roadmap shows what the project supports and where it is
 heading. The project currently supports macOS only.
 
-Status: ✅ done · 🚧 in progress · ⬜ not started
+Status: ✅ done · 🚧 in progress · ⬜ not started · ➖ out of scope
 
 - ✅ Core inference serving.
   - ✅ End-to-end quantized GGUF inference for Qwen2 and Llama on a single
     inference thread.
   - ✅ Streaming or buffered output with generation statistics.
   - ✅ Separate request-handling and model-inference processes.
-- 🚧 Paged attention.
+- ✅ Paged attention.
   - ✅ Preallocated, engine-owned KV caches passed into model forward calls.
   - ✅ Fixed-size KV-cache pages with per-layer allocation and block tables.
-  - ⬜ Attention over paged caches without rebuilding contiguous tensors.
-- ⬜ Continuous batching.
-  - ⬜ Per-request state with dynamic admission, scheduling, and cancellation.
-  - ⬜ Batched prefill and decode with chunked prefill support.
+  - ➖ Attention over paged caches without rebuilding contiguous tensors.
 - ⬜ Speculative decoding.
   - ✅ Draft-model loading with tokenizer compatibility and vocabulary coverage
     validation.
-  - ⬜ Draft proposal and target verification with cache commit and rollback.
+  - ⬜ Draft proposal and batched target verification with cache commit and
+    rollback.
+- ⬜ Prefix caching.
+  - ⬜ Reuse KV-cache pages for prompt prefixes shared across requests.
+- ⬜ Continuous batching.
+  - ⬜ Per-request state with dynamic admission, scheduling, and cancellation.
+  - ⬜ Batched prefill and decode with chunked prefill support.
 - ⬜ Performance evaluation.
   - ⬜ Measure latency, throughput, and KV-cache memory usage.
   - ⬜ Compare baseline, continuously batched, and speculative execution.
