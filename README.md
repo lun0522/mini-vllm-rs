@@ -58,15 +58,19 @@ Run it with Metal acceleration on Apple Silicon:
 cargo run --release --features metal -- --run-example
 ```
 
-Run the example with a different GGUF model and a paged KV cache containing 32
-tokens per page:
+Run the example with Llama 3.1 8B Instruct as the target, the quantized Llama
+3.2 1B Instruct as its draft model, and a paged KV cache containing 32 tokens
+per page. Both models use the same tokenizer so their token IDs remain
+compatible:
 
 ```shell
 cargo run --release -- \
   --run-example \
   --kv-cache-type paged \
   --kv-cache-page-token-count 32 \
-  --model 'model_id: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF" model_filename: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"'
+  --model 'model_id: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF" model_filename: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"' \
+  --draft-model 'model_id: "bartowski/Llama-3.2-1B-Instruct-GGUF" model_filename: "Llama-3.2-1B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"' \
+  --draft-token-count 4
 ```
 
 Arguments:
@@ -128,6 +132,29 @@ To fix it:
 
 If the `hf` command is unavailable, install the
 [official Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/en/guides/cli).
+
+### Metal produces repetitive or nonsensical output after loading a draft model
+
+Loading a draft model increases unified-memory usage even before speculative
+decoding uses it: both models' weights and their preallocated KV caches remain
+resident, alongside activations and Metal working buffers. Under severe memory
+pressure, Metal may report an allocation or command-buffer error, but an error
+is not guaranteed. Buffer allocation can succeed before the working set is
+fully exercised, and inference may instead produce numerically corrupted logits
+that appear as repetitive punctuation, a repeated token, or otherwise
+nonsensical text.
+
+If target-model output is correct without `--draft-model` but becomes corrupted
+when the draft model is loaded, treat memory pressure as the first suspect. Try
+omitting the draft model or using smaller target and draft models. You can also
+open macOS Activity Monitor, select the Memory tab, and watch the Memory
+Pressure graph and Swap Used while loading the models and generating text. A
+yellow or red graph, or rapidly increasing swap usage, supports the memory-
+pressure diagnosis. The KV-cache budget is currently hardcoded as
+`PAGED_KV_CACHE_POOL_SIZE_BYTES` in `inference_worker.rs`; lowering it can
+confirm the diagnosis until the budget is configurable through the CLI.
+Changing the number of tokens per page does not reduce the total preallocated
+KV-cache budget.
 
 ## Model licenses
 

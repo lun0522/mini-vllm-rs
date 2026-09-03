@@ -22,7 +22,7 @@ use super::ModelAndKvCache;
 
 // TODO: Source the paged KV-cache pool capacity from the CLI.
 /// Total byte budget shared equally by the key and value pools.
-const PAGED_KV_CACHE_POOL_SIZE_BYTES: usize = 4 * 1024 * 1024 * 1024;
+const PAGED_KV_CACHE_POOL_SIZE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 /// Owns the loaded models and executes requests on the inference thread.
 pub(super) struct ModelRunner {
@@ -78,7 +78,7 @@ impl ModelRunner {
                     kv_cache_type,
                     &model,
                     ModelRole::Draft,
-                    PAGED_KV_CACHE_POOL_SIZE_BYTES / 2,
+                    PAGED_KV_CACHE_POOL_SIZE_BYTES / 4,
                 )?;
                 Ok::<_, anyhow::Error>(ModelAndKvCache { model, kv_cache })
             })
