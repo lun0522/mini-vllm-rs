@@ -26,6 +26,9 @@ pub(crate) struct ModelRunnerProcessArgs {
     /// number of tokens per KV-cache page; only affects paged KV caches
     #[argh(option)]
     pub(super) kv_cache_page_token_count: usize,
+    /// total KV-cache size in bytes for the target model
+    #[argh(option)]
+    pub(super) target_kv_cache_size_bytes: usize,
     /// unix domain socket path used by the model runner worker
     #[argh(option)]
     pub(super) socket_path: PathBuf,

@@ -54,6 +54,7 @@ async fn run_main_process(args: MainProcessArgs) -> Result<()> {
         draft_model_artifacts,
         args.draft_token_count,
         args.kv_cache_type,
+        args.target_kv_cache_size_bytes,
     )
     .await?;
     let request_handler_process =

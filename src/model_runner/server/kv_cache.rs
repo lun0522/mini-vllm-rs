@@ -9,6 +9,7 @@ use anyhow::Context;
 use anyhow::Result;
 use candle_core::Device;
 use candle_core::Tensor;
+use thousands::Separable;
 
 const TOKEN_DIMENSION: usize = 2;
 
@@ -47,8 +48,8 @@ impl ContiguousKvCache {
             per_pool_size_bytes / model_info.layer_count / model_info.kv_cache_bytes_per_token();
         if per_layer_token_count == 0 {
             bail!(
-                "contiguous KV cache size {total_size_bytes} bytes cannot hold one token for each \
-                 of {} layers",
+                "contiguous KV cache size {} bytes cannot hold one token for each of {} layers",
+                total_size_bytes.separate_with_commas(),
                 model_info.layer_count
             );
         }
@@ -70,15 +71,24 @@ impl ContiguousKvCache {
                 .map(|_| ContiguousLayerCache::default())
                 .collect(),
         };
+        let allocated_size_bytes = 2
+            * model_info.layer_count
+            * per_layer_token_count
+            * model_info.kv_cache_bytes_per_token();
         log::info!(
             "Created {model_role} model contiguous KV cache with capacity for \
-             {per_layer_token_count} cached tokens"
+             {per_layer_token_count} cached tokens using {} bytes",
+            allocated_size_bytes.separate_with_commas()
         );
         Ok(cache)
     }
 }
 
 impl KvCache for ContiguousKvCache {
+    fn token_capacity(&self) -> usize {
+        self.per_layer_token_count
+    }
+
     fn append(
         &mut self,
         layer_index: usize,
@@ -167,8 +177,9 @@ impl PagedKvCache {
         let per_pool_page_count = per_pool_size_bytes / page_size_bytes;
         if per_pool_page_count == 0 {
             bail!(
-                "paged KV cache size {total_size_bytes} bytes cannot hold one \
-                 {per_page_token_count}-token page per pool"
+                "paged KV cache size {} bytes cannot hold one \
+                 {per_page_token_count}-token page per pool",
+                total_size_bytes.separate_with_commas()
             );
         }
         let cache = Self {
@@ -193,9 +204,12 @@ impl PagedKvCache {
         };
         let total_cached_token_count =
             per_pool_page_count / model_info.layer_count * per_page_token_count;
+        let allocated_size_bytes = 2 * per_pool_page_count * page_size_bytes;
         log::info!(
             "Created {model_role} model paged KV cache with {per_pool_page_count} pages per pool \
-             and capacity for {total_cached_token_count} cached tokens"
+             and capacity for {total_cached_token_count} cached tokens using \
+             {} bytes",
+            allocated_size_bytes.separate_with_commas()
         );
         Ok(cache)
     }
@@ -307,6 +321,10 @@ impl PagedKvCache {
 }
 
 impl KvCache for PagedKvCache {
+    fn token_capacity(&self) -> usize {
+        self.per_pool_page_count / self.layer_caches.len() * self.per_page_token_count
+    }
+
     fn append(
         &mut self,
         layer_index: usize,

@@ -34,6 +34,7 @@ impl ModelRunnerProcess {
         draft_model_artifacts: Option<ModelArtifacts>,
         draft_token_count: usize,
         kv_cache_type: KvCacheType,
+        target_kv_cache_size_bytes: usize,
     ) -> Result<Self> {
         let (socket_directory, socket_path) = create_socket()?;
         let mut child_process = spawn(
@@ -41,6 +42,7 @@ impl ModelRunnerProcess {
             draft_model_artifacts.as_ref(),
             draft_token_count,
             kv_cache_type,
+            target_kv_cache_size_bytes,
             &socket_path,
         )?;
         let channel =
@@ -82,6 +84,7 @@ fn spawn(
     draft_model_artifacts: Option<&ModelArtifacts>,
     draft_token_count: usize,
     kv_cache_type: KvCacheType,
+    target_kv_cache_size_bytes: usize,
     socket_path: &Path,
 ) -> Result<ChildProcess> {
     let executable = std::env::current_exe().context("failed to locate the current executable")?;
@@ -103,7 +106,9 @@ fn spawn(
         .arg("--kv-cache-type")
         .arg(kv_cache_type_arg)
         .arg("--kv-cache-page-token-count")
-        .arg(per_page_token_count.to_string());
+        .arg(per_page_token_count.to_string())
+        .arg("--target-kv-cache-size-bytes")
+        .arg(target_kv_cache_size_bytes.to_string());
     if let Some(draft_model_artifacts) = draft_model_artifacts {
         command
             .arg("--draft-model")

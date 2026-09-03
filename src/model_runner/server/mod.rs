@@ -94,6 +94,7 @@ pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
         draft_model_artifacts,
         args.draft_token_count,
         kv_cache_type,
+        args.target_kv_cache_size_bytes,
         &args.socket_path,
     )
     .await
@@ -104,6 +105,7 @@ async fn run_server(
     draft_model_artifacts: Option<ModelArtifacts>,
     draft_token_count: usize,
     kv_cache_type: KvCacheType,
+    target_kv_cache_size_bytes: usize,
     socket_path: &Path,
 ) -> Result<()> {
     // Bind only after model initialization succeeds so the socket itself is a
@@ -113,6 +115,7 @@ async fn run_server(
         draft_model_artifacts.as_ref(),
         draft_token_count,
         kv_cache_type,
+        target_kv_cache_size_bytes,
     )?;
     let listener = UnixListener::bind(socket_path)
         .context("failed to bind the model runner Unix domain socket")?;

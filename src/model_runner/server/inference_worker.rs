@@ -1,5 +1,6 @@
 use crate::model_loaders::loaded_model::LoadedModel;
 use crate::model_loaders::model_downloader::ModelArtifacts;
+use crate::model_loaders::ModelInfo;
 use crate::model_loaders::ModelRole;
 use crate::model_runner::KvCacheType;
 use crate::proto::generate_text_event;
@@ -20,10 +21,6 @@ use super::tokenizer::load_tokenizer;
 use super::tokenizer::validate_tokenizer_compatibility;
 use super::ModelAndKvCache;
 
-// TODO: Source the paged KV-cache pool capacity from the CLI.
-/// Total byte budget shared equally by the key and value pools.
-const PAGED_KV_CACHE_POOL_SIZE_BYTES: usize = 2 * 1024 * 1024 * 1024;
-
 /// Owns the loaded models and executes requests on the inference thread.
 pub(super) struct ModelRunner {
     tokenizer: Tokenizer,
@@ -38,6 +35,7 @@ impl ModelRunner {
         draft_model_artifacts: Option<&ModelArtifacts>,
         draft_token_count: usize,
         kv_cache_type: KvCacheType,
+        target_kv_cache_size_bytes: usize,
     ) -> Result<Self> {
         let device = Self::get_inference_device()?;
         let tokenizer = load_tokenizer(&model_artifacts.tokenizer)
@@ -70,15 +68,18 @@ impl ModelRunner {
             kv_cache_type,
             &loaded_model,
             ModelRole::Target,
-            PAGED_KV_CACHE_POOL_SIZE_BYTES,
+            target_kv_cache_size_bytes,
         )?;
+        let target_kv_cache_token_capacity = target_kv_cache.token_capacity();
         let draft = loaded_draft_model
             .map(|model| {
+                let draft_kv_cache_size_bytes =
+                    compute_kv_cache_size_bytes(model.info(), target_kv_cache_token_capacity)?;
                 let kv_cache = create_kv_cache(
                     kv_cache_type,
                     &model,
                     ModelRole::Draft,
-                    PAGED_KV_CACHE_POOL_SIZE_BYTES / 4,
+                    draft_kv_cache_size_bytes,
                 )?;
                 Ok::<_, anyhow::Error>(ModelAndKvCache::new(model, kv_cache))
             })
@@ -124,6 +125,15 @@ impl ModelRunner {
             Ok(Device::Cpu)
         }
     }
+}
+
+fn compute_kv_cache_size_bytes(model_info: &ModelInfo, token_capacity: usize) -> Result<usize> {
+    model_info
+        .kv_cache_bytes_per_token()
+        .checked_mul(model_info.layer_count)
+        .and_then(|size| size.checked_mul(token_capacity))
+        .and_then(|size| size.checked_mul(2))
+        .context("KV-cache size exceeds usize")
 }
 
 pub(super) struct InferenceRequest {
@@ -205,6 +215,7 @@ fn send_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::DType;
 
     fn receive_event(
         receiver: &mut mpsc::Receiver<Result<GenerateTextEvent, Status>>,
@@ -243,5 +254,25 @@ mod tests {
             generate_text_event::Event::Stats(received) if received == stats
         ));
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn derives_draft_cache_size_for_target_token_capacity() -> Result<()> {
+        let draft_model_info = ModelInfo {
+            layer_count: 4,
+            kv_head_count: 2,
+            head_dimension: 8,
+            activation_dtype: DType::F32,
+        };
+        let target_token_capacity = 128;
+
+        let size_bytes = compute_kv_cache_size_bytes(&draft_model_info, target_token_capacity)?;
+
+        let derived_token_capacity = size_bytes
+            / 2
+            / draft_model_info.layer_count
+            / draft_model_info.kv_cache_bytes_per_token();
+        assert_eq!(derived_token_capacity, target_token_capacity);
+        Ok(())
     }
 }

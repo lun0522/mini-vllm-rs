@@ -99,6 +99,9 @@ Arguments:
   defaults to `contiguous`.
 - `--kv-cache-page-token-count <count>` sets the number of tokens stored in each
   page and defaults to `16`; it only affects the `paged` KV-cache type.
+- `--target-kv-cache-size-bytes <bytes>` sets the target model's total KV-cache
+  allocation and defaults to 2 GiB. A draft model is allocated enough KV-cache
+  memory to hold the same number of tokens.
 - `--request-socket <path>` changes the request-handler Unix socket path.
 
 Notes:
@@ -161,11 +164,9 @@ omitting the draft model or using smaller target and draft models. You can also
 open macOS Activity Monitor, select the Memory tab, and watch the Memory
 Pressure graph and Swap Used while loading the models and generating text. A
 yellow or red graph, or rapidly increasing swap usage, supports the memory-
-pressure diagnosis. The KV-cache budget is currently hardcoded as
-`PAGED_KV_CACHE_POOL_SIZE_BYTES` in `inference_worker.rs`; lowering it can
-confirm the diagnosis until the budget is configurable through the CLI.
-Changing the number of tokens per page does not reduce the total preallocated
-KV-cache budget.
+pressure diagnosis. Lowering `--target-kv-cache-size-bytes` can confirm the
+diagnosis. Changing the number of tokens per page does not materially reduce
+the requested KV-cache budget.
 
 ## Model licenses
 
@@ -174,14 +175,15 @@ downloaded separately and remain subject to their respective licenses. Using or
 distributing this software does not grant rights to any model weights. Review
 and comply with the license and usage terms for each model before using it.
 
-The Qwen model is licensed under Apache 2.0:
+The Qwen target and draft models are licensed under Apache 2.0:
 
 - [`Qwen/Qwen2.5-7B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct)
+- [`Qwen/Qwen2.5-0.5B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)
 
-Meta Llama 3.1 uses the [Llama 3.1 Community
-License](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct):
+The Meta Llama target and draft models use their respective community licenses:
 
 - [`bartowski/Meta-Llama-3.1-8B-Instruct-GGUF`](https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF)
+- [`bartowski/Llama-3.2-1B-Instruct-GGUF`](https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF)
 
 If model weights are bundled or redistributed, include the model's license and
 any required attribution or notices with the distribution. Models added in the

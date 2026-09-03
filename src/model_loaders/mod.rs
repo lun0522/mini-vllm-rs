@@ -31,6 +31,9 @@ pub(crate) trait CausalLanguageModel: Send {
 
 /// Provides request-specific key and value tensors to model layers.
 pub(crate) trait KvCache: Send {
+    /// Maximum number of tokens that can be cached for every model layer.
+    fn token_capacity(&self) -> usize;
+
     /// Stores newly computed key/value tensors and returns the complete layer cache for attention.
     fn append(
         &mut self,

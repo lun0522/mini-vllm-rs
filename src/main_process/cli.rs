@@ -6,8 +6,10 @@ use argh::FromArgs;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
+use thousands::Separable;
 
 const DEFAULT_DRAFT_TOKEN_COUNT: usize = 4;
+const DEFAULT_TARGET_KV_CACHE_SIZE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 /// Runs text generation with a model from Hugging Face.
 #[derive(FromArgs)]
@@ -27,6 +29,9 @@ pub(crate) struct MainProcessArgs {
     /// number of tokens per KV-cache page; only affects paged KV caches
     #[argh(option, default = "DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT")]
     pub(crate) kv_cache_page_token_count: usize,
+    /// total KV-cache size in bytes for the target model
+    #[argh(option, default = "DEFAULT_TARGET_KV_CACHE_SIZE_BYTES")]
+    pub(crate) target_kv_cache_size_bytes: usize,
     /// unix domain socket exposed to local inference clients
     #[argh(option, default = "default_request_socket()")]
     pub(crate) request_socket: PathBuf,
@@ -51,6 +56,11 @@ impl fmt::Display for MainProcessArgs {
             writeln!(formatter, "Draft model: disabled")?;
         }
         writeln!(formatter, "KV cache type: {}", self.kv_cache_type)?;
+        writeln!(
+            formatter,
+            "Target KV cache size: {} bytes",
+            self.target_kv_cache_size_bytes.separate_with_commas()
+        )?;
         writeln!(
             formatter,
             "Request socket: {}",
@@ -86,6 +96,15 @@ fn default_request_socket() -> PathBuf {
 }
 
 fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
+    if args.target_kv_cache_size_bytes == 0 {
+        log::warn!(
+            "Invalid target KV-cache size {}; using default value \
+             {}",
+            args.target_kv_cache_size_bytes.separate_with_commas(),
+            DEFAULT_TARGET_KV_CACHE_SIZE_BYTES.separate_with_commas()
+        );
+        args.target_kv_cache_size_bytes = DEFAULT_TARGET_KV_CACHE_SIZE_BYTES;
+    }
     if args.kv_cache_page_token_count == 0 {
         log::warn!(
             "Invalid KV-cache page token count {}; using default value {DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT}",
