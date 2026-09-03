@@ -31,12 +31,17 @@ flowchart LR
 - `server/cli.rs` parses local model paths into `ModelArtifacts`.
 - `server/tokenizer.rs` loads tokenizers and validates that target and draft
   vocabularies use identical token-to-ID mappings.
-- `server/kv_cache.rs` provides contiguous storage and optional configurable,
-  token-sized paged storage with separate key/value pools and per-layer block
-  tables. Paged mode uses a fixed 4 GiB physical pool and reconstructs contiguous
-  tensors for the existing attention operations.
-- `server/inference_worker.rs` owns the model, tokenizer, device, and KV-cache
-  state on its dedicated thread.
+- `server/kv_cache.rs` preallocates separate key/value pools for contiguous or
+  paged storage. Paged mode uses configurable fixed-token-count pages and
+  per-layer block tables, and reconstructs contiguous tensors for the existing
+  attention operations.
+- `server/inference_worker.rs` owns the target model, optional draft model,
+  tokenizer, device, and corresponding KV caches on its dedicated thread. The
+  target cache uses the configured byte budget; the draft cache is sized to
+  hold the same number of tokens.
+- `server/text_generation.rs` performs prompt prefill, ordinary greedy decode,
+  or speculative decode using draft proposals, batched target verification,
+  cache rollback, and request-level acceptance statistics.
 - When a draft model is configured, the worker validates its tokenizer against
   the target tokenizer and then retains only the target tokenizer.
 - The worker binds its socket after loading the model, so the socket signals
@@ -54,15 +59,30 @@ sequenceDiagram
     participant Rpc as model_runner/server/mod.rs
     participant Worker as inference_worker.rs
     participant Decode as text_generation.rs
-    participant Model as LoadedModel / Candle
+    participant Target as Target model / Candle
+    participant Draft as Optional draft model / Candle
 
     Caller->>Handler: GenerateText request
     Handler->>Rpc: Forward GenerateText over tonic/UDS
     Rpc->>Worker: Queue InferenceRequest
-    Worker->>Decode: Generate text with the loaded model
+    Worker->>Decode: Generate text with loaded model(s)
+    opt Draft model configured
+        Decode->>Draft: Prefill prompt without sampling
+    end
+    Decode->>Target: Prefill prompt and sample first token
     loop Until stop token, limit, or cancellation
-        Decode->>Model: Forward tokens using KV cache
-        Model-->>Decode: Next-token logits
+        alt Draft model configured
+            Decode->>Draft: Generate draft proposals autoregressively
+            Draft-->>Decode: Proposed token IDs
+            Decode->>Target: Verify proposal batch in one forward pass
+            Target-->>Decode: Logits for every proposal position
+            Decode->>Decode: Accept matching prefix and choose replacement
+            Decode->>Target: Truncate rejected cache suffix
+            Decode->>Draft: Truncate rejected cache suffix
+        else Target-only decode
+            Decode->>Target: Forward the pending token
+            Target-->>Decode: Next-token logits
+        end
         Decode-->>Worker: Push decoded text fragment
         Worker-->>Rpc: Queue GenerateTextEvent::Text
         Rpc-->>Handler: Stream text event
@@ -76,10 +96,11 @@ sequenceDiagram
 
 - `server/mod.rs` receives tonic requests and queues them on a bounded channel.
 - `inference_worker.rs` owns the loaded model and processes requests on its
-  dedicated thread.
+  dedicated thread, clearing its reusable caches before each request.
 - `inference_worker.rs` delegates decoding to `text_generation.rs`.
 - `text_generation.rs` tokenizes prompts, samples and decodes tokens, checks
-  cancellation and stop tokens, and records timing.
+  cancellation and stop tokens, and records prefill, decode, and speculative
+  acceptance statistics.
 - Text fragments stream immediately unless `stream_output` is false, in which
   case they are buffered.
 - A successful response ends with a `TextGenerationStats` event.

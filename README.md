@@ -6,7 +6,7 @@ It favors clear implementations of modern serving techniques over production
 completeness. The roadmap shows what the project supports and where it is
 heading. The project currently supports macOS only.
 
-Status: ✅ done · 🚧 in progress · ⬜ not started · ➖ out of scope
+Status: ✅ done · 🚧 in progress · ⬜ not started · ❌ out of scope
 
 - ✅ Core inference serving.
   - ✅ End-to-end quantized GGUF inference for Qwen2 and Llama on a single
@@ -16,12 +16,14 @@ Status: ✅ done · 🚧 in progress · ⬜ not started · ➖ out of scope
 - ✅ Paged attention.
   - ✅ Preallocated, engine-owned KV caches passed into model forward calls.
   - ✅ Fixed-size KV-cache pages with per-layer allocation and block tables.
-  - ➖ Attention over paged caches without rebuilding contiguous tensors.
+  - ❌ Attention over paged caches without rebuilding contiguous tensors.
 - ✅ Speculative decoding.
   - ✅ Draft-model loading with tokenizer compatibility and vocabulary coverage
     validation.
   - ✅ Draft proposal and batched target verification with cache commit and
     rollback.
+  - ❌ Randomized sampling with distribution-preserving probabilistic draft
+    verification.
 - ⬜ Prefix caching.
   - ⬜ Reuse KV-cache pages for prompt prefixes shared across requests.
 - ⬜ Continuous batching.
@@ -44,6 +46,28 @@ Status: ✅ done · 🚧 in progress · ⬜ not started · ➖ out of scope
   diagrams and [Model loaders](src/model_loaders/README.md) for model and cache
   details.
 
+The main process is a supervisor rather than a serving stage, so there are two
+serving processes today. Unlike
+[vLLM](https://docs.vllm.ai/en/latest/design/arch_overview/), the model runner
+keeps scheduling, KV-cache management, and device execution together. A third
+serving process would add an IPC exchange to every inference step without a
+clear benefit while there is only one device worker.
+
+The following architectural changes are on the way:
+
+- Move chat formatting, tokenization, and incremental decoding into bounded
+  worker threads in the request-handler process, and use token-level RPCs with
+  the model runner.
+- Add a scheduler component inside the model-runner process and implement
+  continuous batching with one local Metal worker.
+- Define a narrow model-worker interface before adding more execution backends.
+- Add routing across local CPU and Metal workers for heterogeneous-device
+  experiments.
+- Add independent model replicas and per-model workers for data parallelism and
+  serving multiple small models.
+- Move workers into separate processes only when multiple devices, model
+  unloading, or fault isolation justify the additional boundary.
+
 ## Run
 
 Run the built-in example on CPU:
@@ -51,6 +75,20 @@ Run the built-in example on CPU:
 ```shell
 cargo run --release -- --run-example
 ```
+
+Optionally, set the `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` environment
+variables for this command to control the number of CPU worker threads:
+
+```shell
+CANDLE_NUM_THREADS=8 RAYON_NUM_THREADS=8 cargo run --release -- --run-example
+```
+
+`CANDLE_NUM_THREADS` controls Candle's dedicated worker pool, including
+quantized matrix multiplication, while `RAYON_NUM_THREADS` controls
+Rayon-based operations. On Apple Silicon, Candle defaults to the number of
+performance-core logical CPUs, so the efficiency cores are not used by
+default. Adjust both values for the machine's CPU; using more threads does not
+necessarily improve throughput for every model or workload.
 
 Run it with Metal acceleration on Apple Silicon:
 

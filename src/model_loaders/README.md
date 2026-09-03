@@ -18,9 +18,17 @@ Candle 0.11.0 and adapted locally:
 - Request-specific KV tensors were removed from the model layers. `ModelRunner`
   owns the selected cache implementation for each loaded target or draft model
   and passes it through the `KvCache` trait into every model `forward` call.
-- The paged implementation stores keys and values in separate 16-token page
-  pools with a block table for each layer. It reconstructs contiguous tensors
-  before calling Candle's existing attention operations.
+- Each backend records reusable `ModelInfo`, including its layer count, KV-head
+  geometry, and activation data type, so the model runner can allocate caches
+  without depending on architecture-specific model internals.
+- Contiguous and paged caches both preallocate separate key and value pools from
+  a configured total byte budget. Paged caches use a configurable number of
+  tokens per page and maintain a block table for each layer.
+- Paged caches reconstruct contiguous tensors before calling Candle's existing
+  attention operations.
+- Model backends provide logits for either the final input position or every
+  input position; speculative decoding uses the latter to verify a draft token
+  batch with one target-model forward pass.
 - Reusable causal attention masks remain in the model because they are derived
   from tensor shapes rather than belonging to a particular request.
 
