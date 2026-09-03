@@ -376,10 +376,6 @@ fn validate_cache_append(
     Ok(appending_token_count)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the staged cache truncation method")
-)]
 fn validate_truncation<T: LayerCache>(layer_caches: &[T], target_token_count: usize) -> Result<()> {
     for (layer_index, layer_cache) in layer_caches.iter().enumerate() {
         let current_token_count = layer_cache.cached_token_count();

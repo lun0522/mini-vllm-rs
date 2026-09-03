@@ -59,6 +59,10 @@ impl ModelAndKvCache {
             .model()
             .forward(input, start_position, kv_cache.as_mut())
     }
+
+    fn truncate(&self, target_token_count: usize) -> Result<()> {
+        self.kv_cache.borrow_mut().truncate(target_token_count)
+    }
 }
 
 pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {

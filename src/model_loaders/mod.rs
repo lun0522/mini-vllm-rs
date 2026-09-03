@@ -31,10 +31,6 @@ pub(crate) trait KvCache: Send {
     ) -> anyhow::Result<CachedKeyValue>;
 
     /// Discards cached tokens at and after `target_token_count` in every model layer.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "reserved for speculative cache rollback")
-    )]
     fn truncate(&mut self, target_token_count: usize) -> anyhow::Result<()>;
 
     fn clear(&mut self);
