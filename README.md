@@ -58,13 +58,25 @@ Run it with Metal acceleration on Apple Silicon:
 cargo run --release --features metal -- --run-example
 ```
 
-Run the example with Llama 3.1 8B Instruct as the target, the quantized Llama
-3.2 1B Instruct as its draft model, and a paged KV cache containing 32 tokens
-per page. Both models use the same tokenizer so their token IDs remain
-compatible:
+Run the "Qwen2.5 7B Instruct Q4_K_M" target model with the "Qwen2.5 0.5B
+Instruct Q4_K_M" draft model for speculative decoding (both use the same
+tokenizer so their token IDs remain compatible):
 
 ```shell
-cargo run --release -- \
+cargo run --release --features metal -- \
+  --run-example \
+  --model 'model_id: "bartowski/Qwen2.5-7B-Instruct-GGUF" model_filename: "Qwen2.5-7B-Instruct-Q4_K_M.gguf" tokenizer_id: "Qwen/Qwen2.5-7B-Instruct"' \
+  --draft-model 'model_id: "bartowski/Qwen2.5-0.5B-Instruct-GGUF" model_filename: "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" tokenizer_id: "Qwen/Qwen2.5-7B-Instruct"' \
+  --draft-token-count 4
+```
+
+Run the "Llama 3.1 8B Instruct Q4_K_M" target model with the "Llama 3.2 1B
+Instruct Q4_K_M" draft model for speculative decoding (both use the same
+tokenizer so their token IDs remain compatible) and a paged KV cache containing
+32 tokens per page:
+
+```shell
+cargo run --release --features metal -- \
   --run-example \
   --kv-cache-type paged \
   --kv-cache-page-token-count 32 \

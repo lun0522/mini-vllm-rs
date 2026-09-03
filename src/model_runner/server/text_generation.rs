@@ -441,3 +441,97 @@ fn create_generation_stats(
 fn duration_milliseconds(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Device;
+
+    type TestGenerator = TextGenerator<fn(u32) -> Result<()>, fn() -> bool>;
+
+    fn create_test_generator(tokens: Vec<u32>, eos_tokens: Vec<u32>) -> TestGenerator {
+        fn ignore_token(_: u32) -> Result<()> {
+            Ok(())
+        }
+
+        fn never_cancelled() -> bool {
+            false
+        }
+
+        TextGenerator {
+            tokens,
+            draft_token_count: 4,
+            max_new_token_count: 16,
+            repeat_last_n: 64,
+            repeat_penalty: 1.0,
+            eos_tokens,
+            target_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
+            draft_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
+            accepted_draft_token_count: 0,
+            proposed_draft_token_count: 0,
+            push_token: ignore_token,
+            is_cancelled: never_cancelled,
+        }
+    }
+
+    #[test]
+    fn verifies_the_accepted_draft_prefix_and_target_replacement() -> Result<()> {
+        let mut generator = create_test_generator(vec![0], vec![]);
+        let draft_tokens = [1, 2, 3];
+        let verification_logits = Tensor::new(
+            &[
+                [0.0f32, 10.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 10.0],
+                [0.0, 0.0, 0.0, 10.0, 0.0],
+            ],
+            &Device::Cpu,
+        )?;
+
+        let result = generator.verify_draft_tokens(&draft_tokens, &verification_logits)?;
+
+        assert_eq!(result.accepted_token_count, 1);
+        assert_eq!(result.maybe_replacement_token, Some(4));
+        Ok(())
+    }
+
+    #[test]
+    fn verifies_when_all_draft_tokens_are_accepted() -> Result<()> {
+        let mut generator = create_test_generator(vec![0], vec![]);
+        let draft_tokens = [1, 2, 3];
+        let verification_logits = Tensor::new(
+            &[
+                [0.0f32, 10.0, 0.0, 0.0],
+                [0.0, 0.0, 10.0, 0.0],
+                [0.0, 0.0, 0.0, 10.0],
+            ],
+            &Device::Cpu,
+        )?;
+
+        let result = generator.verify_draft_tokens(&draft_tokens, &verification_logits)?;
+
+        assert_eq!(result.accepted_token_count, draft_tokens.len());
+        assert_eq!(result.maybe_replacement_token, None);
+        Ok(())
+    }
+
+    #[test]
+    fn commits_speculative_tokens_and_stops_before_eos() -> Result<()> {
+        let mut generator = create_test_generator(vec![1], vec![3]);
+        let result = generator.commit_speculative_tokens(&[2, 3], Some(4))?;
+
+        assert_eq!(result.committed_token_count, 1);
+        assert!(!result.should_continue);
+        assert_eq!(generator.tokens, vec![1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn computes_acceptance_rate_only_when_draft_tokens_were_proposed() {
+        let mut generator = create_test_generator(vec![1], vec![]);
+        assert_eq!(generator.compute_draft_token_acceptance_rate(), None);
+
+        generator.accepted_draft_token_count = 3;
+        generator.proposed_draft_token_count = 4;
+        assert_eq!(generator.compute_draft_token_acceptance_rate(), Some(0.75));
+    }
+}
