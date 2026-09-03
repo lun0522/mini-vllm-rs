@@ -3,7 +3,7 @@ use crate::proto::TextGenerationStats;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::DType;
-use candle_core::Device;
+use candle_core::IndexOp;
 use candle_core::Tensor;
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::utils::apply_repeat_penalty;
@@ -15,16 +15,28 @@ use tokenizers::Tokenizer;
 use super::ModelAndKvCache;
 
 struct TextGenerator<PushToken, IsCancelled> {
-    device: Device,
     tokens: Vec<u32>,
     draft_token_count: usize,
     max_new_token_count: usize,
     repeat_last_n: usize,
     repeat_penalty: f32,
     eos_tokens: Vec<u32>,
-    logits_processor: RefCell<LogitsProcessor>,
+    target_logits_processor: RefCell<LogitsProcessor>,
+    draft_logits_processor: RefCell<LogitsProcessor>,
+    accepted_draft_token_count: usize,
+    proposed_draft_token_count: usize,
     push_token: PushToken,
     is_cancelled: IsCancelled,
+}
+
+struct DraftVerificationResult {
+    accepted_token_count: usize,
+    maybe_replacement_token: Option<u32>,
+}
+
+struct DecodeIterationResult {
+    committed_token_count: usize,
+    should_continue: bool,
 }
 
 pub(super) fn generate_text(
@@ -38,7 +50,6 @@ pub(super) fn generate_text(
 ) -> Result<TextGenerationStats> {
     let target_model = target.model.borrow();
     let model_prompt = target_model.format_chat_prompt(&command.prompt);
-    let device = target_model.device().clone();
     let eos_tokens =
         resolve_end_of_sequence_tokens(tokenizer, target_model.end_of_sequence_tokens());
     drop(target_model);
@@ -57,7 +68,6 @@ pub(super) fn generate_text(
     };
 
     TextGenerator {
-        device,
         tokens,
         draft_token_count,
         max_new_token_count: usize::try_from(command.max_new_tokens)
@@ -66,7 +76,10 @@ pub(super) fn generate_text(
             .context("repeat_last_n does not fit in usize")?,
         repeat_penalty: command.repeat_penalty,
         eos_tokens,
-        logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
+        target_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
+        draft_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
+        accepted_draft_token_count: 0,
+        proposed_draft_token_count: 0,
         push_token,
         is_cancelled,
     }
@@ -101,6 +114,7 @@ where
             generation_started,
             prefill_finished,
             decode_finished,
+            self.compute_draft_token_acceptance_rate(),
         )
     }
 
@@ -123,7 +137,8 @@ where
             target,
             &self.tokens,
             /* start_position */ 0,
-            &mut self.logits_processor.borrow_mut(),
+            /* appended_tokens */ &[],
+            &mut self.target_logits_processor.borrow_mut(),
         )?;
         self.commit_next_token(next_token)
     }
@@ -133,98 +148,241 @@ where
         target: &ModelAndKvCache,
         draft: Option<&ModelAndKvCache>,
     ) -> Result<()> {
-        for _ in 1..self.max_new_token_count {
+        let mut generated_token_count = 1;
+        while generated_token_count < self.max_new_token_count {
             if (self.is_cancelled)() {
                 anyhow::bail!("generation request was cancelled");
             }
-            if let Some(draft) = draft.filter(|_| self.draft_token_count > 0) {
-                self.measure_draft_acceptance(target, draft)?;
-            }
-            let start_position = self.tokens.len() - 1;
-            let next_token = self.sample_next_token(
-                target,
-                &self.tokens,
-                start_position,
-                &mut self.logits_processor.borrow_mut(),
-            )?;
-            if !self.commit_next_token(next_token)? {
-                break;
+            let should_continue = match draft {
+                Some(draft) => {
+                    let DecodeIterationResult {
+                        committed_token_count,
+                        should_continue,
+                    } = self.run_speculative_iteration(
+                        target,
+                        draft,
+                        self.max_new_token_count - generated_token_count,
+                    )?;
+                    generated_token_count += committed_token_count;
+                    should_continue
+                }
+                None => {
+                    let start_position = self.tokens.len() - 1;
+                    let next_token = self.sample_next_token(
+                        target,
+                        &self.tokens[start_position..],
+                        start_position,
+                        /* appended_tokens */ &[],
+                        &mut self.target_logits_processor.borrow_mut(),
+                    )?;
+                    generated_token_count += 1;
+                    self.commit_next_token(next_token)?
+                }
+            };
+            if !should_continue {
+                return Ok(());
             }
         }
         Ok(())
     }
 
-    fn measure_draft_acceptance(
+    fn run_speculative_iteration(
         &mut self,
         target: &ModelAndKvCache,
         draft: &ModelAndKvCache,
-    ) -> Result<()> {
+        remaining_max_token_count: usize,
+    ) -> Result<DecodeIterationResult> {
+        // Generate draft proposals autoregressively, starting with the pending token that has
+        // not yet been written to either model's KV cache.
         let original_cached_token_count = self.tokens.len() - 1;
-        let mut draft_context = self.tokens.clone();
-        let mut draft_logits_processor = LogitsProcessor::new(0, None, None);
-        let mut draft_tokens = Vec::with_capacity(self.draft_token_count);
+        let draft_tokens = self.generate_draft_tokens(
+            draft,
+            original_cached_token_count,
+            remaining_max_token_count,
+        )?;
 
-        for _ in 0..self.draft_token_count {
+        // Run the target model once over the pending token and proposed prefix, producing one
+        // set of verification logits for every draft token.
+        let verification_logits = self.compute_draft_verification_logits(
+            target,
+            &draft_tokens,
+            original_cached_token_count,
+        )?;
+
+        // Accept the longest prefix on which target and draft sampling agree. At the first
+        // mismatch, retain the target token as the replacement output.
+        let DraftVerificationResult {
+            accepted_token_count,
+            maybe_replacement_token,
+        } = self.verify_draft_tokens(&draft_tokens, &verification_logits)?;
+        self.accepted_draft_token_count += accepted_token_count;
+        self.proposed_draft_token_count += draft_tokens.len();
+
+        // Discard cache entries derived from rejected proposals and retain exactly the verified
+        // input prefix needed for the next decode iteration.
+        let replacement_token_count = usize::from(maybe_replacement_token.is_some());
+        let retained_cached_token_count =
+            original_cached_token_count + accepted_token_count + replacement_token_count;
+        target.truncate(retained_cached_token_count)?;
+        draft.truncate(retained_cached_token_count)?;
+
+        // Publish the accepted draft prefix, followed by the target replacement when the models
+        // disagreed. EOS is observed but never added to the generated output.
+        self.commit_speculative_tokens(
+            &draft_tokens[..accepted_token_count],
+            maybe_replacement_token,
+        )
+    }
+
+    fn generate_draft_tokens(
+        &mut self,
+        draft: &ModelAndKvCache,
+        original_cached_token_count: usize,
+        remaining_max_token_count: usize,
+    ) -> Result<Vec<u32>> {
+        // Limit the proposal batch to the request's remaining output budget.
+        let draft_token_count = self.draft_token_count.min(remaining_max_token_count);
+        let mut draft_tokens = Vec::with_capacity(draft_token_count);
+        for _ in 0..draft_token_count {
             if (self.is_cancelled)() {
                 anyhow::bail!("generation request was cancelled");
             }
-            let start_position = draft_context.len() - 1;
+            let start_position = original_cached_token_count + draft_tokens.len();
+            let input_token = draft_tokens
+                .last()
+                .copied()
+                .or_else(|| self.tokens.last().copied())
+                .context("generation context is empty")?;
             let next_token = self.sample_next_token(
                 draft,
-                &draft_context,
+                &[input_token],
                 start_position,
-                &mut draft_logits_processor,
+                &draft_tokens,
+                &mut self.draft_logits_processor.borrow_mut(),
             )?;
             draft_tokens.push(next_token);
-            draft_context.push(next_token);
-        }
-
-        let mut target_context = self.tokens.clone();
-        let mut target_logits_processor = LogitsProcessor::new(0, None, None);
-        let mut accepted_token_count = 0;
-        for &draft_token in &draft_tokens {
-            if (self.is_cancelled)() {
-                anyhow::bail!("generation request was cancelled");
-            }
-            let start_position = target_context.len() - 1;
-            let target_token = self.sample_next_token(
-                target,
-                &target_context,
-                start_position,
-                &mut target_logits_processor,
-            )?;
-            if target_token != draft_token {
+            if self.eos_tokens.contains(&next_token) {
                 break;
             }
-            accepted_token_count += 1;
-            target_context.push(draft_token);
         }
+        Ok(draft_tokens)
+    }
 
-        target.truncate(original_cached_token_count)?;
-        // Keep the real pending token consumed by the first draft step, but discard every
-        // speculative token appended after it. This leaves the draft cache aligned with the
-        // target cache after the normal one-token target decode below.
-        draft.truncate(original_cached_token_count + 1)?;
-        log::info!(
-            "Accepted {accepted_token_count}/{} speculative draft tokens ({:.1}%)",
-            draft_tokens.len(),
-            accepted_token_count as f64 / draft_tokens.len() as f64 * 100.0
-        );
-        Ok(())
+    fn compute_draft_verification_logits(
+        &self,
+        target: &ModelAndKvCache,
+        draft_tokens: &[u32],
+        start_position: usize,
+    ) -> Result<Tensor> {
+        let mut verification_tokens = Vec::with_capacity(draft_tokens.len());
+        verification_tokens.push(*self.tokens.last().context("generation context is empty")?);
+        verification_tokens.extend_from_slice(&draft_tokens[..draft_tokens.len() - 1]);
+        let input =
+            Tensor::new(&verification_tokens[..], target.model.borrow().device())?.unsqueeze(0)?;
+        Ok(target
+            .forward_for_speculative_verification(&input, start_position)?
+            .squeeze(0)?
+            .to_dtype(DType::F32)?)
+    }
+
+    fn verify_draft_tokens(
+        &mut self,
+        draft_tokens: &[u32],
+        verification_logits: &Tensor,
+    ) -> Result<DraftVerificationResult> {
+        let mut accepted_token_count = 0;
+        for (position, &draft_token) in draft_tokens.iter().enumerate() {
+            let target_token = self.sample_logits(
+                &verification_logits.i(position)?,
+                &draft_tokens[..position],
+                &mut self.target_logits_processor.borrow_mut(),
+            )?;
+            if target_token != draft_token {
+                return Ok(DraftVerificationResult {
+                    accepted_token_count,
+                    maybe_replacement_token: Some(target_token),
+                });
+            }
+            accepted_token_count += 1;
+            if self.eos_tokens.contains(&draft_token) {
+                break;
+            }
+        }
+        Ok(DraftVerificationResult {
+            accepted_token_count,
+            maybe_replacement_token: None,
+        })
+    }
+
+    fn commit_speculative_tokens(
+        &mut self,
+        accepted_draft_tokens: &[u32],
+        maybe_replacement_token: Option<u32>,
+    ) -> Result<DecodeIterationResult> {
+        let mut committed_token_count = 0;
+        for &draft_token in accepted_draft_tokens {
+            if !self.commit_next_token(draft_token)? {
+                return Ok(DecodeIterationResult {
+                    committed_token_count,
+                    should_continue: false,
+                });
+            }
+            committed_token_count += 1;
+        }
+        if let Some(replacement_token) = maybe_replacement_token {
+            if !self.commit_next_token(replacement_token)? {
+                return Ok(DecodeIterationResult {
+                    committed_token_count,
+                    should_continue: false,
+                });
+            }
+            committed_token_count += 1;
+        }
+        Ok(DecodeIterationResult {
+            committed_token_count,
+            should_continue: true,
+        })
+    }
+
+    fn compute_draft_token_acceptance_rate(&self) -> Option<f32> {
+        if self.proposed_draft_token_count == 0 {
+            return None;
+        }
+        Some(self.accepted_draft_token_count as f32 / self.proposed_draft_token_count as f32)
     }
 
     fn sample_next_token(
         &self,
         model: &ModelAndKvCache,
-        tokens: &[u32],
+        input_tokens: &[u32],
         start_position: usize,
+        appended_tokens: &[u32],
         logits_processor: &mut LogitsProcessor,
     ) -> Result<u32> {
-        let input = Tensor::new(&tokens[start_position..], &self.device)?.unsqueeze(0)?;
+        let input = Tensor::new(input_tokens, model.model.borrow().device())?.unsqueeze(0)?;
         let logits = model.forward(&input, start_position)?;
         let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
-        let repeat_start = tokens.len().saturating_sub(self.repeat_last_n);
-        let logits = apply_repeat_penalty(&logits, self.repeat_penalty, &tokens[repeat_start..])?;
+        self.sample_logits(&logits, appended_tokens, logits_processor)
+    }
+
+    fn sample_logits(
+        &self,
+        logits: &Tensor,
+        appended_tokens: &[u32],
+        logits_processor: &mut LogitsProcessor,
+    ) -> Result<u32> {
+        // Collect the repetition window from committed and speculative tokens.
+        let total_token_count = self.tokens.len() + appended_tokens.len();
+        let repeat_start = total_token_count.saturating_sub(self.repeat_last_n);
+        let mut repeat_tokens = Vec::with_capacity(total_token_count - repeat_start);
+        if repeat_start < self.tokens.len() {
+            repeat_tokens.extend_from_slice(&self.tokens[repeat_start..]);
+        }
+        let appended_start = repeat_start.saturating_sub(self.tokens.len());
+        repeat_tokens.extend_from_slice(&appended_tokens[appended_start..]);
+
+        // Apply the repetition penalty before sampling the next token.
+        let logits = apply_repeat_penalty(logits, self.repeat_penalty, &repeat_tokens)?;
         logits_processor.sample(&logits).map_err(Into::into)
     }
 
@@ -262,6 +420,7 @@ fn create_generation_stats(
     generation_started: Instant,
     prefill_finished: Instant,
     decode_finished: Instant,
+    draft_token_acceptance_rate: Option<f32>,
 ) -> Result<TextGenerationStats> {
     let output_token_count = total_token_count - prompt_token_count;
     Ok(TextGenerationStats {
@@ -275,6 +434,7 @@ fn create_generation_stats(
         decode_duration_milliseconds: duration_milliseconds(
             decode_finished.duration_since(prefill_finished),
         ),
+        draft_token_acceptance_rate,
     })
 }
 

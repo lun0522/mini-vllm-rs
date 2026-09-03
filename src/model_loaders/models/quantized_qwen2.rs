@@ -309,6 +309,30 @@ impl ModelWeights {
         index_pos: usize,
         kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
+        let seq_len = x.dim(1)?;
+        let x = self.forward_hidden(x, index_pos, kv_cache)?;
+        let x = x.i((.., seq_len - 1, ..))?;
+        let _enter = self.span_output.enter();
+        self.output.forward(&x)
+    }
+
+    pub fn forward_for_speculative_verification(
+        &mut self,
+        x: &Tensor,
+        index_pos: usize,
+        kv_cache: &mut dyn KvCache,
+    ) -> Result<Tensor> {
+        let x = self.forward_hidden(x, index_pos, kv_cache)?;
+        let _enter = self.span_output.enter();
+        self.output.forward(&x)
+    }
+
+    fn forward_hidden(
+        &mut self,
+        x: &Tensor,
+        index_pos: usize,
+        kv_cache: &mut dyn KvCache,
+    ) -> Result<Tensor> {
         let (_b_sz, seq_len) = x.dims2()?;
         let mask = if seq_len == 1 {
             None
@@ -332,10 +356,7 @@ impl ModelWeights {
             let x = (x + residual)?;
             layer_in = x
         }
-        let x = self.norm.forward(&layer_in)?;
-        let x = x.i((.., seq_len - 1, ..))?;
-        let _enter = self.span_output.enter();
-        self.output.forward(&x)
+        self.norm.forward(&layer_in)
     }
 }
 
@@ -376,5 +397,15 @@ impl CausalLanguageModel for Qwen2Backend {
         self.model
             .forward(input, start_position, kv_cache)?
             .unsqueeze(1)
+    }
+
+    fn forward_for_speculative_verification(
+        &mut self,
+        input: &Tensor,
+        start_position: usize,
+        kv_cache: &mut dyn KvCache,
+    ) -> Result<Tensor> {
+        self.model
+            .forward_for_speculative_verification(input, start_position, kv_cache)
     }
 }

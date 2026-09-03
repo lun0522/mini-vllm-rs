@@ -17,6 +17,16 @@ pub(crate) trait CausalLanguageModel: Send {
         start_position: usize,
         kv_cache: &mut dyn KvCache,
     ) -> candle_core::Result<Tensor>;
+
+    /// Returns logits for every input position, shaped
+    /// `(batch_size, sequence_length, vocabulary_size)`. Speculative decoding uses these logits
+    /// to verify multiple draft tokens with one target-model forward pass.
+    fn forward_for_speculative_verification(
+        &mut self,
+        input: &Tensor,
+        start_position: usize,
+        kv_cache: &mut dyn KvCache,
+    ) -> candle_core::Result<Tensor>;
 }
 
 /// Provides request-specific key and value tensors to model layers.

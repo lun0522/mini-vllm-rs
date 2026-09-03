@@ -81,10 +81,14 @@ fn log_generation_stats(stats: &TextGenerationStats) {
         stats.output_token_count.saturating_sub(1),
         stats.decode_duration_milliseconds,
     );
+    let draft_acceptance = stats
+        .draft_token_acceptance_rate
+        .map(|rate| format!(", Draft acceptance: {:.1}%", rate * 100.0))
+        .unwrap_or_default();
     info!(
         "Generated {} tokens \
         (Prefill: {prefill_tokens_per_second} tokens/s, \
-        Decode: {decode_tokens_per_second} tokens/s)",
+        Decode: {decode_tokens_per_second} tokens/s{draft_acceptance})",
         stats.output_token_count,
     );
 }

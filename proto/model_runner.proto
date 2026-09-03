@@ -57,6 +57,8 @@ message TextGenerationStats {
   uint64 prefill_duration_milliseconds = 3;
   // Decode time in milliseconds.
   uint64 decode_duration_milliseconds = 4;
+  // Fraction of proposed draft tokens accepted during speculative decoding.
+  optional float draft_token_acceptance_rate = 5;
 }
 
 // Requests a graceful shutdown of the model runner process.

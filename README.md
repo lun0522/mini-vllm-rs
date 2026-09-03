@@ -17,10 +17,10 @@ Status: ✅ done · 🚧 in progress · ⬜ not started · ➖ out of scope
   - ✅ Preallocated, engine-owned KV caches passed into model forward calls.
   - ✅ Fixed-size KV-cache pages with per-layer allocation and block tables.
   - ➖ Attention over paged caches without rebuilding contiguous tensors.
-- ⬜ Speculative decoding.
+- ✅ Speculative decoding.
   - ✅ Draft-model loading with tokenizer compatibility and vocabulary coverage
     validation.
-  - ⬜ Draft proposal and batched target verification with cache commit and
+  - ✅ Draft proposal and batched target verification with cache commit and
     rollback.
 - ⬜ Prefix caching.
   - ⬜ Reuse KV-cache pages for prompt prefixes shared across requests.
@@ -81,9 +81,8 @@ Arguments:
   `model_filename`, and `tokenizer_id`; optionally set `model_revision`, which
   defaults to `main`.
 - `--draft-model '<textproto>'` loads a tokenizer-compatible draft model for
-  future speculative decoding.
-- `--draft-token-count <count>` sets the future proposal length and defaults to
-  `4`.
+  speculative decoding.
+- `--draft-token-count <count>` sets the proposal length and defaults to `4`.
 - `--kv-cache-type <type>` selects `contiguous` or `paged` KV-cache storage and
   defaults to `contiguous`.
 - `--kv-cache-page-token-count <count>` sets the number of tokens stored in each

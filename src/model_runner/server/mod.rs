@@ -60,6 +60,18 @@ impl ModelAndKvCache {
             .forward(input, start_position, kv_cache.as_mut())
     }
 
+    fn forward_for_speculative_verification(
+        &self,
+        input: &Tensor,
+        start_position: usize,
+    ) -> candle_core::Result<Tensor> {
+        let mut model = self.model.borrow_mut();
+        let mut kv_cache = self.kv_cache.borrow_mut();
+        model
+            .model()
+            .forward_for_speculative_verification(input, start_position, kv_cache.as_mut())
+    }
+
     fn truncate(&self, target_token_count: usize) -> Result<()> {
         self.kv_cache.borrow_mut().truncate(target_token_count)
     }
