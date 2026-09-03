@@ -13,6 +13,8 @@ use crate::proto::ModelRunnerCommand;
 use crate::utils::rpc_shutdown::RpcShutdown;
 use anyhow::Context;
 use anyhow::Result;
+use candle_core::Tensor;
+use std::cell::RefCell;
 use std::path::Path;
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
@@ -38,8 +40,25 @@ const INFERENCE_QUEUE_CAPACITY: usize = 32;
 const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
 
 pub(super) struct ModelAndKvCache {
-    pub(super) model: LoadedModel,
-    pub(super) kv_cache: Box<dyn KvCache>,
+    pub(super) model: RefCell<LoadedModel>,
+    pub(super) kv_cache: RefCell<Box<dyn KvCache>>,
+}
+
+impl ModelAndKvCache {
+    fn new(model: LoadedModel, kv_cache: Box<dyn KvCache>) -> Self {
+        Self {
+            model: RefCell::new(model),
+            kv_cache: RefCell::new(kv_cache),
+        }
+    }
+
+    fn forward(&self, input: &Tensor, start_position: usize) -> candle_core::Result<Tensor> {
+        let mut model = self.model.borrow_mut();
+        let mut kv_cache = self.kv_cache.borrow_mut();
+        model
+            .model()
+            .forward(input, start_position, kv_cache.as_mut())
+    }
 }
 
 pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {

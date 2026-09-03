@@ -80,15 +80,12 @@ impl ModelRunner {
                     ModelRole::Draft,
                     PAGED_KV_CACHE_POOL_SIZE_BYTES / 4,
                 )?;
-                Ok::<_, anyhow::Error>(ModelAndKvCache { model, kv_cache })
+                Ok::<_, anyhow::Error>(ModelAndKvCache::new(model, kv_cache))
             })
             .transpose()?;
         Ok(Self {
             tokenizer,
-            target: ModelAndKvCache {
-                model: loaded_model,
-                kv_cache: target_kv_cache,
-            },
+            target: ModelAndKvCache::new(loaded_model, target_kv_cache),
             draft,
             draft_token_count,
         })
@@ -100,14 +97,14 @@ impl ModelRunner {
         push_fragment: impl FnMut(&str) -> Result<()>,
         is_cancelled: impl FnMut() -> bool,
     ) -> Result<TextGenerationStats> {
-        self.target.kv_cache.clear();
-        if let Some(draft) = self.draft.as_mut() {
-            draft.kv_cache.clear();
+        self.target.kv_cache.borrow_mut().clear();
+        if let Some(draft) = self.draft.as_ref() {
+            draft.kv_cache.borrow_mut().clear();
         }
         text_generation::generate_text(
             &self.tokenizer,
-            &mut self.target,
-            self.draft.as_mut(),
+            &self.target,
+            self.draft.as_ref(),
             self.draft_token_count,
             command,
             push_fragment,
