@@ -4,12 +4,10 @@ use crate::model_runner::KvCacheType;
 use crate::model_runner::DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT;
 use crate::proto::model_runner::model_runner_command::Command::Shutdown as ShutdownCommand;
 use crate::proto::model_runner::model_runner_service_client::ModelRunnerServiceClient;
-use crate::proto::model_runner::ModelPaths;
 use crate::proto::model_runner::ModelRunnerCommand;
 use crate::proto::model_runner::Shutdown;
 use crate::utils::child_process::ChildProcess;
 use crate::utils::domain_socket;
-use crate::utils::textproto::format_textproto;
 use anyhow::Context;
 use anyhow::Result;
 use std::os::unix::process::CommandExt;
@@ -87,7 +85,6 @@ fn spawn(
     socket_path: &Path,
 ) -> Result<ChildProcess> {
     let executable = std::env::current_exe().context("failed to locate the current executable")?;
-    let model = format_model_paths(model_artifacts)?;
     let (kv_cache_type_arg, per_page_token_count) = match kv_cache_type {
         KvCacheType::Contiguous => ("contiguous", DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT),
         KvCacheType::Paged {
@@ -98,8 +95,8 @@ fn spawn(
     command
         .process_group(0)
         .env(server::PROCESS_ENVIRONMENT_VARIABLE, "1")
-        .arg("--model")
-        .arg(model)
+        .arg("--model-path")
+        .arg(&model_artifacts.gguf)
         .arg("--draft-token-count")
         .arg(draft_token_count.to_string())
         .arg("--kv-cache-type")
@@ -110,8 +107,8 @@ fn spawn(
         .arg(target_kv_cache_size_bytes.to_string());
     if let Some(draft_model_artifacts) = draft_model_artifacts {
         command
-            .arg("--draft-model")
-            .arg(format_model_paths(draft_model_artifacts)?);
+            .arg("--draft-model-path")
+            .arg(&draft_model_artifacts.gguf);
     }
     let child = command
         .arg("--socket-path")
@@ -119,22 +116,6 @@ fn spawn(
         .spawn()
         .context("failed to start the model runner process")?;
     Ok(ChildProcess::new(child, "model runner".to_owned()))
-}
-
-fn format_model_paths(model_artifacts: &ModelArtifacts) -> Result<String> {
-    let paths = ModelPaths {
-        tokenizer_path: model_artifacts
-            .tokenizer
-            .to_str()
-            .context("tokenizer path is not valid UTF-8")?
-            .to_owned(),
-        gguf_path: model_artifacts
-            .gguf
-            .to_str()
-            .context("GGUF path is not valid UTF-8")?
-            .to_owned(),
-    };
-    format_textproto(&paths, "model_runner.ModelPaths").map_err(anyhow::Error::msg)
 }
 
 fn create_socket() -> Result<(tempfile::TempDir, PathBuf)> {

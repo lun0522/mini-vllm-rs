@@ -85,12 +85,7 @@ impl TokenizerWrapper {
     }
 
     pub(super) fn create_token_decoder(&self) -> IncrementalTokenDecoder {
-        IncrementalTokenDecoder {
-            tokenizer: self.tokenizer.clone(),
-            token_ids: Vec::new(),
-            prefix: String::new(),
-            prefix_index: 0,
-        }
+        IncrementalTokenDecoder::new(self.tokenizer.clone())
     }
 
     fn format_chat_prompt(&self, prompt: &str) -> String {
@@ -127,6 +122,15 @@ pub(super) struct IncrementalTokenDecoder {
 }
 
 impl IncrementalTokenDecoder {
+    pub(super) fn new(tokenizer: Tokenizer) -> Self {
+        Self {
+            tokenizer,
+            token_ids: Vec::new(),
+            prefix: String::new(),
+            prefix_index: 0,
+        }
+    }
+
     pub(super) fn step(&mut self, token_id: u32) -> Result<Option<String>> {
         tokenizers::tokenizer::step_decode_stream(
             &self.tokenizer,

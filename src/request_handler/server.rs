@@ -1,8 +1,6 @@
-use crate::proto::model_runner::generate_text_event as model_runner_generate_text_event;
 use crate::proto::model_runner::model_runner_service_client::ModelRunnerServiceClient;
 use crate::proto::model_runner::GenerateTextEvent as ModelRunnerGenerateTextEvent;
 use crate::proto::model_runner::GetModelMetadataRequest;
-use crate::proto::request_handler::generate_text_event;
 use crate::proto::request_handler::request_handler_service_server::RequestHandlerService;
 use crate::proto::request_handler::request_handler_service_server::RequestHandlerServiceServer;
 use crate::proto::request_handler::CommandResult;
@@ -25,6 +23,7 @@ use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 
+use super::generation_event_processor::GenerationEventProcessor;
 use super::tokenizer::IncrementalTokenDecoder;
 use super::tokenizer::TokenizerWrapper;
 
@@ -147,72 +146,34 @@ impl RequestHandlerService for RequestHandlerRpcService {
 async fn forward_generation_events(
     mut model_events: tonic::Streaming<ModelRunnerGenerateTextEvent>,
     event_sender: mpsc::Sender<Result<GenerateTextEvent, Status>>,
-    mut decoder: IncrementalTokenDecoder,
+    decoder: IncrementalTokenDecoder,
     stream_output: bool,
 ) {
-    let mut buffered_text = String::new();
+    let mut processor = GenerationEventProcessor::new(decoder, stream_output);
     loop {
         let event = match model_events.message().await {
-            Ok(Some(event)) => event.event,
+            Ok(Some(event)) => event,
             Ok(None) => return,
             Err(error) => {
                 let _ = event_sender.send(Err(error)).await;
                 return;
             }
         };
-        let Some(event) = event else {
-            let _ = event_sender
-                .send(Err(Status::internal("model-runner event is empty")))
-                .await;
-            return;
-        };
-        match event {
-            model_runner_generate_text_event::Event::TokenId(token_id) => {
-                let fragment = match decoder.step(token_id) {
-                    Ok(fragment) => fragment,
-                    Err(error) => {
-                        let _ = event_sender
-                            .send(Err(Status::internal(format!(
-                                "failed to decode model output: {error:#}"
-                            ))))
-                            .await;
-                        return;
-                    }
-                };
-                if let Some(fragment) = fragment {
-                    if stream_output {
-                        if event_sender
-                            .send(Ok(GenerateTextEvent {
-                                event: Some(generate_text_event::Event::Text(fragment)),
-                            }))
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                    } else {
-                        buffered_text.push_str(&fragment);
-                    }
-                }
-            }
-            model_runner_generate_text_event::Event::Stats(stats) => {
-                if !stream_output
-                    && event_sender
-                        .send(Ok(GenerateTextEvent {
-                            event: Some(generate_text_event::Event::Text(buffered_text)),
-                        }))
-                        .await
-                        .is_err()
-                {
-                    return;
-                }
-                let _ = event_sender
-                    .send(Ok(GenerateTextEvent {
-                        event: Some(generate_text_event::Event::Stats(stats)),
-                    }))
-                    .await;
+
+        let processed = match processor.process(event) {
+            Ok(processed) => processed,
+            Err(error) => {
+                let _ = event_sender.send(Err(*error)).await;
                 return;
             }
+        };
+        for event in processed.events {
+            if event_sender.send(Ok(event)).await.is_err() {
+                return;
+            }
+        }
+        if processed.finished {
+            return;
         }
     }
 }

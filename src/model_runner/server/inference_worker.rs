@@ -1,5 +1,4 @@
 use crate::model_loaders::loaded_model::LoadedModel;
-use crate::model_loaders::model_downloader::ModelArtifacts;
 use crate::model_loaders::ModelInfo;
 use crate::model_loaders::ModelRole;
 use crate::model_runner::KvCacheType;
@@ -12,6 +11,7 @@ use anyhow::Context;
 use anyhow::Result;
 use candle_core::Device;
 use log::info;
+use std::path::Path;
 use tokio::sync::mpsc;
 use tonic::Status;
 
@@ -28,17 +28,17 @@ pub(super) struct ModelRunner {
 
 impl ModelRunner {
     pub(super) fn new(
-        model_artifacts: &ModelArtifacts,
-        draft_model_artifacts: Option<&ModelArtifacts>,
+        model_path: &Path,
+        draft_model_path: Option<&Path>,
         draft_token_count: usize,
         kv_cache_type: KvCacheType,
         target_kv_cache_size_bytes: usize,
     ) -> Result<Self> {
         let device = Self::get_inference_device()?;
-        let loaded_model = LoadedModel::new(model_artifacts, device)?;
-        let loaded_draft_model = draft_model_artifacts
-            .map(|draft_model_artifacts| {
-                LoadedModel::new(draft_model_artifacts, loaded_model.device().clone())
+        let loaded_model = LoadedModel::new(model_path, device)?;
+        let loaded_draft_model = draft_model_path
+            .map(|draft_model_path| {
+                LoadedModel::new(draft_model_path, loaded_model.device().clone())
             })
             .transpose()?;
         info!(

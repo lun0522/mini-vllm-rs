@@ -1,7 +1,5 @@
 use crate::model_loaders::loaded_model::LoadedModel;
-use crate::model_loaders::model_downloader::ModelArtifacts;
 use crate::model_loaders::KvCache;
-use crate::model_loaders::ModelRole;
 use crate::model_runner::KvCacheType;
 use crate::proto::model_runner::model_runner_command;
 use crate::proto::model_runner::model_runner_service_server::ModelRunnerService;
@@ -18,6 +16,7 @@ use anyhow::Result;
 use candle_core::Tensor;
 use std::cell::RefCell;
 use std::path::Path;
+use std::path::PathBuf;
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -31,7 +30,6 @@ mod inference_worker;
 mod kv_cache;
 mod text_generation;
 
-use cli::create_model_artifacts;
 pub(crate) use cli::ModelRunnerProcessArgs;
 use inference_worker::InferenceRequest;
 use inference_worker::ModelRunner;
@@ -85,14 +83,9 @@ pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
             per_page_token_count: args.kv_cache_page_token_count,
         },
     };
-    let model_artifacts = create_model_artifacts(args.model, ModelRole::Target)?;
-    let draft_model_artifacts = args
-        .draft_model
-        .map(|paths| create_model_artifacts(paths, ModelRole::Draft))
-        .transpose()?;
     run_server(
-        &model_artifacts,
-        draft_model_artifacts,
+        &args.model_path,
+        args.draft_model_path,
         args.draft_token_count,
         kv_cache_type,
         args.target_kv_cache_size_bytes,
@@ -102,8 +95,8 @@ pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
 }
 
 async fn run_server(
-    model_artifacts: &ModelArtifacts,
-    draft_model_artifacts: Option<ModelArtifacts>,
+    model_path: &Path,
+    draft_model_path: Option<PathBuf>,
     draft_token_count: usize,
     kv_cache_type: KvCacheType,
     target_kv_cache_size_bytes: usize,
@@ -112,8 +105,8 @@ async fn run_server(
     // Bind only after model initialization succeeds so the socket itself is a
     // readiness signal for the parent process.
     let model_runner = ModelRunner::new(
-        model_artifacts,
-        draft_model_artifacts.as_ref(),
+        model_path,
+        draft_model_path.as_deref(),
         draft_token_count,
         kv_cache_type,
         target_kv_cache_size_bytes,

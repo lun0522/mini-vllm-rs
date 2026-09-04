@@ -1,4 +1,3 @@
-use crate::model_loaders::model_downloader::ModelArtifacts;
 use crate::model_loaders::models::quantized_llama::LlamaBackend;
 use crate::model_loaders::models::quantized_qwen2::Qwen2Backend;
 use crate::model_loaders::CausalLanguageModel;
@@ -29,13 +28,13 @@ pub(crate) struct LoadedModel {
 
 impl LoadedModel {
     /// Loads model artifacts from disk and initializes a supported model backend once.
-    pub(crate) fn new(model_artifacts: &ModelArtifacts, device: Device) -> Result<Self> {
+    pub(crate) fn new(gguf_path: &Path, device: Device) -> Result<Self> {
         let LoadedBackend {
             model,
             architecture,
             input_vocabulary_size,
             output_vocabulary_size,
-        } = load_model_backend(&model_artifacts.gguf, &device)?;
+        } = load_model_backend(gguf_path, &device)?;
         let metadata = ModelMetadata {
             architecture: architecture.into(),
             input_vocabulary_size: u64::try_from(input_vocabulary_size)

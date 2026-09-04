@@ -28,7 +28,8 @@ flowchart LR
 
 - `client.rs` creates the socket, starts the worker, waits for readiness, and
   sends the shutdown command.
-- `server/cli.rs` parses local model paths into `ModelArtifacts`.
+- `server/cli.rs` receives target and optional draft GGUF paths from the main
+  process.
 - `server/tokenizer.rs` loads tokenizers and validates that target and draft
   vocabularies use identical token-to-ID mappings.
 - `server/kv_cache.rs` preallocates separate key/value pools for contiguous or
