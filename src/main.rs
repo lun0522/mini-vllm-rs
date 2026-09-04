@@ -11,7 +11,7 @@ use crate::model_loaders::model_downloader::ModelDownloader;
 use crate::model_loaders::ModelRole;
 use crate::model_runner::client::ModelRunnerProcess;
 use crate::model_runner::server as model_runner_server;
-use crate::request_handler::process::RequestHandlerProcess;
+use crate::request_handler::client::RequestHandlerProcess;
 use crate::request_handler::server as request_handler_server;
 use anyhow::Context;
 use anyhow::Result;

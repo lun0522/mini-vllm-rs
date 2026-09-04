@@ -23,9 +23,12 @@ use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 
-use super::generation_event_processor::GenerationEventProcessor;
-use super::tokenizer::IncrementalTokenDecoder;
-use super::tokenizer::TokenizerWrapper;
+mod generation_event_processor;
+mod tokenizer;
+
+use generation_event_processor::GenerationEventProcessor;
+use tokenizer::IncrementalTokenDecoder;
+use tokenizer::TokenizerWrapper;
 
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_REQUEST_HANDLER";
 const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
