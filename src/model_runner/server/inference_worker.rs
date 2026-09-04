@@ -7,6 +7,8 @@ use crate::proto::generate_text_event;
 use crate::proto::GenerateText;
 use crate::proto::GenerateTextEvent;
 use crate::proto::TextGenerationStats;
+use crate::request_handler::tokenizer::load_tokenizer;
+use crate::request_handler::tokenizer::validate_tokenizer_compatibility;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::Device;
@@ -17,8 +19,6 @@ use tonic::Status;
 
 use super::kv_cache::create_kv_cache;
 use super::text_generation;
-use super::tokenizer::load_tokenizer;
-use super::tokenizer::validate_tokenizer_compatibility;
 use super::ModelAndKvCache;
 
 /// Owns the loaded models and executes requests on the inference thread.

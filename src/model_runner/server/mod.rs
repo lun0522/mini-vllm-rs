@@ -28,7 +28,6 @@ mod cli;
 mod inference_worker;
 mod kv_cache;
 mod text_generation;
-mod tokenizer;
 
 use cli::create_model_artifacts;
 pub(crate) use cli::ModelRunnerProcessArgs;

@@ -83,30 +83,3 @@ impl fmt::Display for ModelRole {
         }
     }
 }
-
-#[derive(Clone, Copy)]
-pub(crate) enum ModelArchitecture {
-    Llama,
-    Qwen2,
-}
-
-impl ModelArchitecture {
-    pub(crate) fn format_chat_prompt(self, prompt: &str) -> String {
-        match self {
-            Self::Llama => format!(
-                "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n\
-                 {prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-            ),
-            Self::Qwen2 => {
-                format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
-            }
-        }
-    }
-
-    pub(crate) fn end_of_sequence_tokens(self) -> &'static [&'static str] {
-        match self {
-            Self::Llama => &["<|eot_id|>", "<|end_of_text|>"],
-            Self::Qwen2 => &["<|im_end|>", "<|endoftext|>"],
-        }
-    }
-}
