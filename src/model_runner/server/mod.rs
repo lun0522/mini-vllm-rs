@@ -9,6 +9,8 @@ use crate::proto::model_runner_service_server::ModelRunnerServiceServer;
 use crate::proto::CommandResult;
 use crate::proto::GenerateText;
 use crate::proto::GenerateTextEvent;
+use crate::proto::GetModelMetadataRequest;
+use crate::proto::GetModelMetadataResponse;
 use crate::proto::ModelRunnerCommand;
 use crate::utils::rpc_shutdown::RpcShutdown;
 use anyhow::Context;
@@ -116,6 +118,7 @@ async fn run_server(
         kv_cache_type,
         target_kv_cache_size_bytes,
     )?;
+    let model_metadata = model_runner.model_metadata();
     let listener = UnixListener::bind(socket_path)
         .context("failed to bind the model runner Unix domain socket")?;
     let (inference_sender, inference_receiver) = mpsc::channel(INFERENCE_QUEUE_CAPACITY);
@@ -126,6 +129,7 @@ async fn run_server(
     let (shutdown, shutdown_receiver) = RpcShutdown::channel();
     let service = ModelRunnerRpcService {
         inference_sender,
+        model_metadata,
         shutdown,
     };
 
@@ -144,12 +148,20 @@ async fn run_server(
 
 struct ModelRunnerRpcService {
     inference_sender: mpsc::Sender<InferenceRequest>,
+    model_metadata: GetModelMetadataResponse,
     shutdown: RpcShutdown,
 }
 
 #[tonic::async_trait]
 impl ModelRunnerService for ModelRunnerRpcService {
     type GenerateTextStream = ReceiverStream<Result<GenerateTextEvent, Status>>;
+
+    async fn get_model_metadata(
+        &self,
+        _request: Request<GetModelMetadataRequest>,
+    ) -> Result<Response<GetModelMetadataResponse>, Status> {
+        Ok(Response::new(self.model_metadata))
+    }
 
     async fn generate_text(
         &self,

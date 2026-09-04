@@ -4,7 +4,10 @@ use crate::model_loaders::models::quantized_qwen2::Qwen2Backend;
 use crate::model_loaders::CausalLanguageModel;
 use crate::model_loaders::ModelInfo;
 use crate::model_loaders::ModelRole;
-use crate::request_handler::tokenizer::ModelArchitecture;
+use crate::proto::ModelArchitecture;
+use crate::proto::ModelMetadata;
+use crate::request_handler::tokenizer::validate_model_vocabulary;
+use crate::request_handler::tokenizer::ModelArchitecture as TokenizerModelArchitecture;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
@@ -25,7 +28,7 @@ struct LoadedBackend {
 pub(crate) struct LoadedModel {
     model: Box<dyn CausalLanguageModel>,
     device: Device,
-    architecture: ModelArchitecture,
+    metadata: ModelMetadata,
 }
 
 impl LoadedModel {
@@ -42,17 +45,18 @@ impl LoadedModel {
             input_vocabulary_size,
             output_vocabulary_size,
         } = load_model_backend(&model_artifacts.gguf, &device)?;
-        validate_vocabulary(
-            input_vocabulary_size,
-            output_vocabulary_size,
-            tokenizer,
-            model_role,
-        )?;
-
+        let metadata = ModelMetadata {
+            architecture: architecture.into(),
+            input_vocabulary_size: u64::try_from(input_vocabulary_size)
+                .context("model input vocabulary size does not fit in u64")?,
+            output_vocabulary_size: u64::try_from(output_vocabulary_size)
+                .context("model output vocabulary size does not fit in u64")?,
+        };
+        validate_model_vocabulary(tokenizer, &metadata, model_role)?;
         Ok(Self {
             model,
             device,
-            architecture,
+            metadata,
         })
     }
 
@@ -64,16 +68,32 @@ impl LoadedModel {
         self.model.info()
     }
 
+    pub(crate) fn metadata(&self) -> ModelMetadata {
+        self.metadata
+    }
+
     pub(crate) fn format_chat_prompt(&self, prompt: &str) -> String {
-        self.architecture.format_chat_prompt(prompt)
+        self.architecture().format_chat_prompt(prompt)
     }
 
     pub(crate) fn end_of_sequence_tokens(&self) -> &'static [&'static str] {
-        self.architecture.end_of_sequence_tokens()
+        self.architecture().end_of_sequence_tokens()
     }
 
     pub(crate) fn model(&mut self) -> &mut dyn CausalLanguageModel {
         &mut *self.model
+    }
+
+    fn architecture(&self) -> TokenizerModelArchitecture {
+        match ModelArchitecture::try_from(self.metadata.architecture)
+            .expect("loaded model metadata contains an invalid architecture")
+        {
+            ModelArchitecture::Llama => TokenizerModelArchitecture::Llama,
+            ModelArchitecture::Qwen2 => TokenizerModelArchitecture::Qwen2,
+            ModelArchitecture::Unspecified => {
+                unreachable!("loaded model architecture is always specified")
+            }
+        }
     }
 }
 
@@ -124,38 +144,4 @@ fn load_model_backend(gguf_path: &Path, device: &Device) -> Result<LoadedBackend
         }),
         unsupported => bail!("unsupported model architecture: {unsupported}"),
     }
-}
-
-fn validate_vocabulary(
-    input_vocabulary_size: usize,
-    output_vocabulary_size: usize,
-    tokenizer: &Tokenizer,
-    model_role: ModelRole,
-) -> Result<()> {
-    // The model sizes describe the token-ID ranges accepted by its input
-    // embeddings and produced by its output projection. The tokenizer's
-    // required size is one past its highest assigned ID. A draft model must
-    // cover that entire shared range because it consumes and proposes IDs
-    // from the target model's tokenizer.
-    let required_size = tokenizer
-        .get_vocab(true)
-        .values()
-        .copied()
-        .max()
-        .map_or(0, |maximum_id| maximum_id as usize + 1);
-    if input_vocabulary_size < required_size {
-        anyhow::bail!(
-            "{model_role} model input vocabulary has {input_vocabulary_size} entries but the shared \
-             tokenizer requires token IDs through {}",
-            required_size.saturating_sub(1),
-        );
-    }
-    if output_vocabulary_size < required_size {
-        anyhow::bail!(
-            "{model_role} model output vocabulary has {output_vocabulary_size} entries but the shared \
-             tokenizer requires token IDs through {}",
-            required_size.saturating_sub(1),
-        );
-    }
-    Ok(())
 }

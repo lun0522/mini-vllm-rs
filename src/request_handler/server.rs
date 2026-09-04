@@ -4,6 +4,7 @@ use crate::proto::request_handler::request_handler_service_server::RequestHandle
 use crate::proto::CommandResult;
 use crate::proto::GenerateText;
 use crate::proto::GenerateTextEvent;
+use crate::proto::GetModelMetadataRequest;
 use crate::proto::Shutdown;
 use crate::utils::domain_socket;
 use crate::utils::rpc_shutdown::RpcShutdown;
@@ -12,12 +13,15 @@ use anyhow::Result;
 use argh::FromArgs;
 use std::path::Path;
 use std::path::PathBuf;
+use tokenizers::Tokenizer;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Channel;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
+
+use super::tokenizer::load_and_validate_tokenizer;
 
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_REQUEST_HANDLER";
 
@@ -27,14 +31,35 @@ pub(crate) struct RequestHandlerProcessArgs {
     /// model runner Unix domain socket path
     #[argh(option)]
     model_runner_socket_path: PathBuf,
+    /// target model tokenizer path
+    #[argh(option)]
+    tokenizer_path: PathBuf,
+    /// draft model tokenizer path
+    #[argh(option)]
+    draft_tokenizer_path: Option<PathBuf>,
     /// request handler Unix domain socket path
     #[argh(option)]
     request_handler_socket_path: PathBuf,
 }
 
 pub(crate) async fn run(args: RequestHandlerProcessArgs) -> Result<()> {
-    let model_runner_client = connect_to_model_runner(&args.model_runner_socket_path).await?;
-    run_server(model_runner_client, &args.request_handler_socket_path).await
+    let mut model_runner_client = connect_to_model_runner(&args.model_runner_socket_path).await?;
+    let model_metadata = model_runner_client
+        .get_model_metadata(GetModelMetadataRequest {})
+        .await
+        .context("failed to get model metadata from the model runner")?
+        .into_inner();
+    let tokenizer = load_and_validate_tokenizer(
+        &args.tokenizer_path,
+        args.draft_tokenizer_path.as_deref(),
+        &model_metadata,
+    )?;
+    run_server(
+        model_runner_client,
+        tokenizer,
+        &args.request_handler_socket_path,
+    )
+    .await
 }
 
 async fn connect_to_model_runner(socket_path: &Path) -> Result<ModelRunnerServiceClient<Channel>> {
@@ -46,6 +71,7 @@ async fn connect_to_model_runner(socket_path: &Path) -> Result<ModelRunnerServic
 
 async fn run_server(
     model_runner_client: ModelRunnerServiceClient<Channel>,
+    tokenizer: Tokenizer,
     socket_path: &Path,
 ) -> Result<()> {
     // Bind only after the upstream connection succeeds so the socket indicates
@@ -55,6 +81,7 @@ async fn run_server(
     let (shutdown, shutdown_receiver) = RpcShutdown::channel();
     let service = RequestHandlerRpcService {
         model_runner_client,
+        tokenizer,
         shutdown,
     };
 
@@ -69,6 +96,11 @@ async fn run_server(
 
 struct RequestHandlerRpcService {
     model_runner_client: ModelRunnerServiceClient<Channel>,
+    #[expect(
+        dead_code,
+        reason = "request preprocessing will use the tokenizer in a follow-up change"
+    )]
+    tokenizer: Tokenizer,
     shutdown: RpcShutdown,
 }
 

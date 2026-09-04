@@ -31,7 +31,7 @@ pub(crate) struct ModelRunnerProcess {
 impl ModelRunnerProcess {
     pub(crate) async fn start(
         model_artifacts: &ModelArtifacts,
-        draft_model_artifacts: Option<ModelArtifacts>,
+        draft_model_artifacts: Option<&ModelArtifacts>,
         draft_token_count: usize,
         kv_cache_type: KvCacheType,
         target_kv_cache_size_bytes: usize,
@@ -39,7 +39,7 @@ impl ModelRunnerProcess {
         let (socket_directory, socket_path) = create_socket()?;
         let mut child_process = spawn(
             model_artifacts,
-            draft_model_artifacts.as_ref(),
+            draft_model_artifacts,
             draft_token_count,
             kv_cache_type,
             target_kv_cache_size_bytes,

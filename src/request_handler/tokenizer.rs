@@ -1,3 +1,6 @@
+use crate::model_loaders::ModelRole;
+use crate::proto::GetModelMetadataResponse;
+use crate::proto::ModelMetadata;
 use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
@@ -38,6 +41,39 @@ pub(crate) fn load_tokenizer(path: &Path) -> Result<Tokenizer> {
         .context("failed to load the tokenizer")
 }
 
+pub(super) fn load_and_validate_tokenizer(
+    tokenizer_path: &Path,
+    draft_tokenizer_path: Option<&Path>,
+    model_metadata: &GetModelMetadataResponse,
+) -> Result<Tokenizer> {
+    let tokenizer =
+        load_tokenizer(tokenizer_path).context("failed to load the target tokenizer")?;
+    validate_model_vocabulary(
+        &tokenizer,
+        model_metadata
+            .target_model
+            .as_ref()
+            .context("model runner did not report target model metadata")?,
+        ModelRole::Target,
+    )?;
+
+    match (draft_tokenizer_path, &model_metadata.draft_model) {
+        (Some(path), Some(metadata)) => {
+            let draft_tokenizer =
+                load_tokenizer(path).context("failed to load the draft tokenizer")?;
+            validate_model_vocabulary(&tokenizer, metadata, ModelRole::Draft)?;
+            validate_tokenizer_compatibility(&tokenizer, &draft_tokenizer)?;
+            // Generation uses the target tokenizer after confirming that both tokenizers assign
+            // the same IDs, so we drop the second tokenizer after validation.
+        }
+        (None, None) => {}
+        (Some(_), None) => anyhow::bail!("a draft tokenizer was provided without a draft model"),
+        (None, Some(_)) => anyhow::bail!("the draft model does not have a tokenizer"),
+    }
+    Ok(tokenizer)
+}
+
+/// Ensures target and draft tokenizers assign the same ID to every token.
 pub(crate) fn validate_tokenizer_compatibility(
     target_tokenizer: &Tokenizer,
     draft_tokenizer: &Tokenizer,
@@ -71,6 +107,37 @@ pub(crate) fn validate_tokenizer_compatibility(
         target_vocabulary.len(),
         draft_vocabulary.len(),
     )
+}
+
+/// Checks the tokenizer's token-ID range against the model's input and output vocabulary sizes.
+pub(crate) fn validate_model_vocabulary(
+    tokenizer: &Tokenizer,
+    model_metadata: &ModelMetadata,
+    model_role: ModelRole,
+) -> Result<()> {
+    let required_size = tokenizer
+        .get_vocab(true)
+        .values()
+        .copied()
+        .max()
+        .map_or(0, |maximum_id| u64::from(maximum_id) + 1);
+    if model_metadata.input_vocabulary_size < required_size {
+        anyhow::bail!(
+            "{model_role} model input vocabulary has {} entries but the shared tokenizer requires \
+             token IDs through {}",
+            model_metadata.input_vocabulary_size,
+            required_size.saturating_sub(1),
+        );
+    }
+    if model_metadata.output_vocabulary_size < required_size {
+        anyhow::bail!(
+            "{model_role} model output vocabulary has {} entries but the shared tokenizer requires \
+             token IDs through {}",
+            model_metadata.output_vocabulary_size,
+            required_size.saturating_sub(1),
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -128,5 +195,40 @@ mod tests {
             error.contains("token \"b\" maps to None in the target tokenizer and Some(1)"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn validates_model_input_and_output_vocabulary_sizes() {
+        let tokenizer = tokenizer(&[("a", 0), ("b", 2)]);
+        let metadata = ModelMetadata {
+            architecture: 0,
+            input_vocabulary_size: 3,
+            output_vocabulary_size: 3,
+        };
+        assert!(validate_model_vocabulary(&tokenizer, &metadata, ModelRole::Target).is_ok());
+
+        let input_error = validate_model_vocabulary(
+            &tokenizer,
+            &ModelMetadata {
+                input_vocabulary_size: 2,
+                ..metadata
+            },
+            ModelRole::Target,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(input_error.contains("target model input vocabulary has 2 entries"));
+
+        let output_error = validate_model_vocabulary(
+            &tokenizer,
+            &ModelMetadata {
+                output_vocabulary_size: 2,
+                ..metadata
+            },
+            ModelRole::Draft,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(output_error.contains("draft model output vocabulary has 2 entries"));
     }
 }

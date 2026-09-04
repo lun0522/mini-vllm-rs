@@ -6,6 +6,7 @@ use crate::model_runner::KvCacheType;
 use crate::proto::generate_text_event;
 use crate::proto::GenerateText;
 use crate::proto::GenerateTextEvent;
+use crate::proto::GetModelMetadataResponse;
 use crate::proto::TextGenerationStats;
 use crate::request_handler::tokenizer::load_tokenizer;
 use crate::request_handler::tokenizer::validate_tokenizer_compatibility;
@@ -90,6 +91,18 @@ impl ModelRunner {
             draft,
             draft_token_count,
         })
+    }
+
+    pub(super) fn model_metadata(&self) -> GetModelMetadataResponse {
+        let target_model = self.target.model.borrow().metadata();
+        let draft_model = self
+            .draft
+            .as_ref()
+            .map(|draft| draft.model.borrow().metadata());
+        GetModelMetadataResponse {
+            target_model: Some(target_model),
+            draft_model,
+        }
     }
 
     fn generate_text(

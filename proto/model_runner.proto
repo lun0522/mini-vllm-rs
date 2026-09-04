@@ -3,10 +3,31 @@ syntax = "proto3";
 package model_runner;
 
 service ModelRunnerService {
+  // Returns metadata required for tokenizer validation and input processing.
+  rpc GetModelMetadata(GetModelMetadataRequest) returns (GetModelMetadataResponse);
   // Generates text and returns output events followed by final statistics.
   rpc GenerateText(.model_runner.GenerateText) returns (stream GenerateTextEvent);
   // Executes a command in the model runner process.
   rpc HandleCommand(ModelRunnerCommand) returns (CommandResult);
+}
+
+enum ModelArchitecture {
+  MODEL_ARCHITECTURE_UNSPECIFIED = 0;
+  MODEL_ARCHITECTURE_LLAMA = 1;
+  MODEL_ARCHITECTURE_QWEN2 = 2;
+}
+
+message GetModelMetadataRequest {}
+
+message ModelMetadata {
+  ModelArchitecture architecture = 1;
+  uint64 input_vocabulary_size = 2;
+  uint64 output_vocabulary_size = 3;
+}
+
+message GetModelMetadataResponse {
+  ModelMetadata target_model = 1;
+  optional ModelMetadata draft_model = 2;
 }
 
 // Local files required to load a downloaded GGUF model.

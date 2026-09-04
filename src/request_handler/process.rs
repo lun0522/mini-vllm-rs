@@ -27,6 +27,8 @@ pub(crate) struct RequestHandlerProcess {
 impl RequestHandlerProcess {
     pub(crate) async fn start(
         model_runner_socket_path: &Path,
+        tokenizer_path: &Path,
+        draft_tokenizer_path: Option<&Path>,
         request_handler_socket_path: PathBuf,
     ) -> Result<Self> {
         if request_handler_socket_path
@@ -41,6 +43,8 @@ impl RequestHandlerProcess {
 
         let mut child_process = spawn(
             model_runner_socket_path,
+            tokenizer_path,
+            draft_tokenizer_path,
             request_handler_socket_path.as_path(),
         )?;
         let channel = match domain_socket::wait_for_server(
@@ -111,13 +115,27 @@ impl Drop for RequestHandlerProcess {
     }
 }
 
-fn spawn(model_runner_socket_path: &Path, socket_path: &Path) -> Result<ChildProcess> {
+fn spawn(
+    model_runner_socket_path: &Path,
+    tokenizer_path: &Path,
+    draft_tokenizer_path: Option<&Path>,
+    socket_path: &Path,
+) -> Result<ChildProcess> {
     let executable = std::env::current_exe().context("failed to locate the current executable")?;
-    let child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .process_group(0)
         .env(server::PROCESS_ENVIRONMENT_VARIABLE, "1")
         .arg("--model-runner-socket-path")
         .arg(model_runner_socket_path)
+        .arg("--tokenizer-path")
+        .arg(tokenizer_path);
+    if let Some(draft_tokenizer_path) = draft_tokenizer_path {
+        command
+            .arg("--draft-tokenizer-path")
+            .arg(draft_tokenizer_path);
+    }
+    let child = command
         .arg("--request-handler-socket-path")
         .arg(socket_path)
         .spawn()

@@ -51,24 +51,30 @@ async fn run_main_process(args: MainProcessArgs) -> Result<()> {
         .transpose()?;
     let model_runner_process = ModelRunnerProcess::start(
         &model_artifacts,
-        draft_model_artifacts,
+        draft_model_artifacts.as_ref(),
         args.draft_token_count,
         args.kv_cache_type,
         args.target_kv_cache_size_bytes,
     )
     .await?;
-    let request_handler_process =
-        match RequestHandlerProcess::start(model_runner_process.socket_path(), args.request_socket)
-            .await
-        {
-            Ok(process) => process,
-            Err(error) => {
-                if let Err(shutdown_error) = model_runner_process.shutdown().await {
-                    error!("Failed to shut down the model runner: {shutdown_error:#}");
-                }
-                return Err(error);
+    let request_handler_process = match RequestHandlerProcess::start(
+        model_runner_process.socket_path(),
+        &model_artifacts.tokenizer,
+        draft_model_artifacts
+            .as_ref()
+            .map(|artifacts| artifacts.tokenizer.as_path()),
+        args.request_socket,
+    )
+    .await
+    {
+        Ok(process) => process,
+        Err(error) => {
+            if let Err(shutdown_error) = model_runner_process.shutdown().await {
+                error!("Failed to shut down the model runner: {shutdown_error:#}");
             }
-        };
+            return Err(error);
+        }
+    };
 
     let serving_result = async {
         let ctrl_c = tokio::signal::ctrl_c();
