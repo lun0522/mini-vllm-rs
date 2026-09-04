@@ -1,5 +1,4 @@
 use crate::model_loaders::loaded_model::LoadedModel;
-use crate::model_loaders::KvCache;
 use crate::model_runner::KvCacheType;
 use crate::proto::model_runner::model_runner_command;
 use crate::proto::model_runner::model_runner_service_server::ModelRunnerService;
@@ -33,18 +32,19 @@ mod text_generation;
 pub(crate) use cli::ModelRunnerProcessArgs;
 use inference_worker::InferenceRequest;
 use inference_worker::ModelRunner;
+use kv_cache::KvCacheBackend;
 
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_MODEL_RUNNER";
 const INFERENCE_QUEUE_CAPACITY: usize = 32;
 const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
 
 pub(super) struct ModelAndKvCache {
-    pub(super) model: RefCell<LoadedModel>,
-    pub(super) kv_cache: RefCell<Box<dyn KvCache>>,
+    model: RefCell<LoadedModel>,
+    kv_cache: RefCell<KvCacheBackend>,
 }
 
 impl ModelAndKvCache {
-    fn new(model: LoadedModel, kv_cache: Box<dyn KvCache>) -> Self {
+    fn new(model: LoadedModel, kv_cache: KvCacheBackend) -> Self {
         Self {
             model: RefCell::new(model),
             kv_cache: RefCell::new(kv_cache),
@@ -54,9 +54,7 @@ impl ModelAndKvCache {
     fn forward(&self, input: &Tensor, start_position: usize) -> candle_core::Result<Tensor> {
         let mut model = self.model.borrow_mut();
         let mut kv_cache = self.kv_cache.borrow_mut();
-        model
-            .model()
-            .forward(input, start_position, kv_cache.as_mut())
+        model.model().forward(input, start_position, &mut *kv_cache)
     }
 
     fn forward_for_speculative_verification(
@@ -68,7 +66,7 @@ impl ModelAndKvCache {
         let mut kv_cache = self.kv_cache.borrow_mut();
         model
             .model()
-            .forward_for_speculative_verification(input, start_position, kv_cache.as_mut())
+            .forward_for_speculative_verification(input, start_position, &mut *kv_cache)
     }
 
     fn truncate(&self, target_token_count: usize) -> Result<()> {

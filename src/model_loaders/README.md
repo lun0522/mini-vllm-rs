@@ -18,6 +18,9 @@ Candle 0.11.0 and adapted locally:
 - Request-specific KV tensors were removed from the model layers. `ModelRunner`
   owns the selected cache implementation for each loaded target or draft model
   and passes it through the `KvCache` trait into every model `forward` call.
+- The loader-facing `KvCache` trait contains only operations used while running
+  a model. Request lifecycle operations such as clearing and truncating caches
+  remain internal to the model runner.
 - Each backend records reusable `ModelInfo`, including its layer count, KV-head
   geometry, and activation data type, so the model runner can allocate caches
   without depending on architecture-specific model internals.

@@ -82,9 +82,21 @@ impl ContiguousKvCache {
         );
         Ok(cache)
     }
-}
 
-impl KvCache for ContiguousKvCache {
+    fn truncate(&mut self, target_token_count: usize) -> Result<()> {
+        validate_truncation(&self.layer_caches, target_token_count)?;
+        for layer_cache in &mut self.layer_caches {
+            layer_cache.token_count = target_token_count;
+        }
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        for layer_cache in &mut self.layer_caches {
+            *layer_cache = ContiguousLayerCache::default();
+        }
+    }
+
     fn token_capacity(&self) -> usize {
         self.per_layer_token_count
     }
@@ -122,20 +134,6 @@ impl KvCache for ContiguousKvCache {
             value: value_layer.narrow(TOKEN_DIMENSION, 0, cached_token_count)?,
         })
     }
-
-    fn truncate(&mut self, target_token_count: usize) -> Result<()> {
-        validate_truncation(&self.layer_caches, target_token_count)?;
-        for layer_cache in &mut self.layer_caches {
-            layer_cache.token_count = target_token_count;
-        }
-        Ok(())
-    }
-
-    fn clear(&mut self) {
-        for layer_cache in &mut self.layer_caches {
-            *layer_cache = ContiguousLayerCache::default();
-        }
-    }
 }
 
 #[derive(Default)]
@@ -150,24 +148,21 @@ impl LayerCache for PagedLayerCache {
     }
 }
 
-/// Stores KV caches in reusable physical pages addressed through per-layer block tables.
+/// Owns the physical key/value tensors and the IDs of pages available for allocation.
 ///
-/// The key and value pools are monolithic tensors whose leading dimension addresses physical
-/// pages. Each layer records the page IDs assigned to it, while the cache separately tracks page
-/// IDs that were released and can be reassigned. The pools have a fixed physical-page capacity.
-pub(super) struct PagedKvCache {
+/// "Physical" means these pages are actual storage locations in the preallocated tensor pools.
+/// They exist independently of whichever sequence currently refers to them.
+struct PhysicalPagePool {
     per_page_token_count: usize,
-    per_pool_page_count: usize,
+    page_count: usize,
     key_pool: Tensor,
     value_pool: Tensor,
     free_page_ids: Vec<usize>,
-    layer_caches: Vec<PagedLayerCache>,
 }
 
-impl PagedKvCache {
+impl PhysicalPagePool {
     fn new(
         model_info: &ModelInfo,
-        model_role: ModelRole,
         device: &Device,
         per_page_token_count: usize,
         total_size_bytes: usize,
@@ -182,9 +177,9 @@ impl PagedKvCache {
                 total_size_bytes.separate_with_commas()
             );
         }
-        let cache = Self {
+        Ok(Self {
             per_page_token_count,
-            per_pool_page_count,
+            page_count: per_pool_page_count,
             key_pool: allocate_pool(
                 model_info,
                 device,
@@ -198,20 +193,7 @@ impl PagedKvCache {
                 per_page_token_count,
             )?,
             free_page_ids: (0..per_pool_page_count).rev().collect(),
-            layer_caches: (0..model_info.layer_count)
-                .map(|_| PagedLayerCache::default())
-                .collect(),
-        };
-        let total_cached_token_count =
-            per_pool_page_count / model_info.layer_count * per_page_token_count;
-        let allocated_size_bytes = 2 * per_pool_page_count * page_size_bytes;
-        log::info!(
-            "Created {model_role} model paged KV cache with {per_pool_page_count} pages per pool \
-             and capacity for {total_cached_token_count} cached tokens using \
-             {} bytes",
-            allocated_size_bytes.separate_with_commas()
-        );
-        Ok(cache)
+        })
     }
 
     /// Allocates or reuses a key/value page pair and returns their shared page ID.
@@ -261,10 +243,63 @@ impl PagedKvCache {
             bail!(
                 "paged KV cache requires {required_page_count} additional physical pages but only \
                  {available_page_count} of {} are available",
-                self.per_pool_page_count
+                self.page_count
             );
         }
         Ok(())
+    }
+}
+
+/// Holds the block tables and token counts used by the sequence being processed.
+///
+/// "Active" means these tables only reference physical pages attached to the current sequence;
+/// they do not own the underlying key/value storage.
+struct ActiveBlockTables {
+    layers: Vec<PagedLayerCache>,
+}
+
+impl ActiveBlockTables {
+    fn new(layer_count: usize) -> Self {
+        Self {
+            layers: (0..layer_count)
+                .map(|_| PagedLayerCache::default())
+                .collect(),
+        }
+    }
+}
+
+/// Stores KV caches in reusable physical pages addressed through active per-layer block tables.
+pub(super) struct PagedKvCache {
+    physical_page_pool: PhysicalPagePool,
+    active_block_tables: ActiveBlockTables,
+}
+
+impl PagedKvCache {
+    fn new(
+        model_info: &ModelInfo,
+        model_role: ModelRole,
+        device: &Device,
+        per_page_token_count: usize,
+        total_size_bytes: usize,
+    ) -> Result<Self> {
+        let physical_page_pool =
+            PhysicalPagePool::new(model_info, device, per_page_token_count, total_size_bytes)?;
+        let total_cached_token_count =
+            physical_page_pool.page_count / model_info.layer_count * per_page_token_count;
+        let allocated_size_bytes = 2
+            * physical_page_pool.page_count
+            * model_info.kv_cache_bytes_per_token()
+            * per_page_token_count;
+        log::info!(
+            "Created {model_role} model paged KV cache with {} pages per pool and capacity for \
+             {total_cached_token_count} cached tokens using {} bytes",
+            physical_page_pool.page_count,
+            allocated_size_bytes.separate_with_commas()
+        );
+        Ok(Self {
+            physical_page_pool,
+            active_block_tables: ActiveBlockTables::new(model_info.layer_count),
+        })
     }
 
     fn append_to_pages(
@@ -276,20 +311,22 @@ impl PagedKvCache {
     ) -> Result<()> {
         let mut input_offset = 0;
         while input_offset < appending_token_count {
-            let page_offset =
-                self.layer_caches[layer_index].token_count % self.per_page_token_count;
+            let page_offset = self.active_block_tables.layers[layer_index].token_count
+                % self.physical_page_pool.per_page_token_count;
             if page_offset == 0 {
-                let page_id = self.allocate_page()?;
-                self.layer_caches[layer_index].page_ids.push(page_id);
+                let page_id = self.physical_page_pool.allocate_page()?;
+                self.active_block_tables.layers[layer_index]
+                    .page_ids
+                    .push(page_id);
             }
-            let page_id = self.layer_caches[layer_index]
+            let page_id = self.active_block_tables.layers[layer_index]
                 .page_ids
                 .last()
                 .copied()
                 .context("partial KV-cache page is missing from the block table")?;
-            let written_token_count =
-                (self.per_page_token_count - page_offset).min(appending_token_count - input_offset);
-            self.write_page(
+            let written_token_count = (self.physical_page_pool.per_page_token_count - page_offset)
+                .min(appending_token_count - input_offset);
+            self.physical_page_pool.write_page(
                 page_id,
                 page_offset,
                 key,
@@ -297,32 +334,51 @@ impl PagedKvCache {
                 input_offset,
                 written_token_count,
             )?;
-            self.layer_caches[layer_index].token_count += written_token_count;
+            self.active_block_tables.layers[layer_index].token_count += written_token_count;
             input_offset += written_token_count;
         }
         Ok(())
     }
 
     fn reconstruct_full_cache(&self, layer_index: usize) -> Result<CachedKeyValue> {
-        let layer_cache = &self.layer_caches[layer_index];
+        let layer_cache = &self.active_block_tables.layers[layer_index];
         Ok(CachedKeyValue {
             key: reconstruct_contiguous_tensor(
-                &self.key_pool,
+                &self.physical_page_pool.key_pool,
                 layer_cache,
-                self.per_page_token_count,
+                self.physical_page_pool.per_page_token_count,
             )?,
             value: reconstruct_contiguous_tensor(
-                &self.value_pool,
+                &self.physical_page_pool.value_pool,
                 layer_cache,
-                self.per_page_token_count,
+                self.physical_page_pool.per_page_token_count,
             )?,
         })
     }
-}
 
-impl KvCache for PagedKvCache {
+    fn truncate(&mut self, target_token_count: usize) -> Result<()> {
+        validate_truncation(&self.active_block_tables.layers, target_token_count)?;
+        let retained_page_count =
+            target_token_count.div_ceil(self.physical_page_pool.per_page_token_count);
+        for layer_cache in &mut self.active_block_tables.layers {
+            let released_page_ids = layer_cache.page_ids.split_off(retained_page_count);
+            layer_cache.token_count = target_token_count;
+            self.physical_page_pool.release_pages(released_page_ids);
+        }
+        Ok(())
+    }
+
+    fn reset_active_block_tables(&mut self) {
+        for layer_cache in &mut self.active_block_tables.layers {
+            let page_ids = std::mem::take(&mut layer_cache.page_ids);
+            layer_cache.token_count = 0;
+            self.physical_page_pool.release_pages(page_ids);
+        }
+    }
+
     fn token_capacity(&self) -> usize {
-        self.per_pool_page_count / self.layer_caches.len() * self.per_page_token_count
+        self.physical_page_pool.page_count / self.active_block_tables.layers.len()
+            * self.physical_page_pool.per_page_token_count
     }
 
     fn append(
@@ -332,35 +388,59 @@ impl KvCache for PagedKvCache {
         key: &Tensor,
         value: &Tensor,
     ) -> Result<CachedKeyValue> {
-        let Some(layer_cache) = self.layer_caches.get(layer_index) else {
+        let Some(layer_cache) = self.active_block_tables.layers.get(layer_index) else {
             bail!("invalid KV-cache layer {layer_index}");
         };
         let current_token_count = layer_cache.token_count;
         let appending_token_count =
             validate_cache_append(current_token_count, layer_index, start_position, key, value)?;
-        self.validate_append_capacity(current_token_count, appending_token_count)?;
+        self.physical_page_pool
+            .validate_append_capacity(current_token_count, appending_token_count)?;
         self.append_to_pages(layer_index, key, value, appending_token_count)?;
         self.reconstruct_full_cache(layer_index)
     }
+}
 
-    fn truncate(&mut self, target_token_count: usize) -> Result<()> {
-        validate_truncation(&self.layer_caches, target_token_count)?;
-        let retained_page_count = target_token_count.div_ceil(self.per_page_token_count);
-        for layer_index in 0..self.layer_caches.len() {
-            let released_page_ids = self.layer_caches[layer_index]
-                .page_ids
-                .split_off(retained_page_count);
-            self.layer_caches[layer_index].token_count = target_token_count;
-            self.release_pages(released_page_ids);
+/// Model-runner-owned cache variants and their request lifecycle operations.
+pub(super) enum KvCacheBackend {
+    Contiguous(ContiguousKvCache),
+    Paged(PagedKvCache),
+}
+
+impl KvCacheBackend {
+    pub(super) fn token_capacity(&self) -> usize {
+        match self {
+            Self::Contiguous(cache) => cache.token_capacity(),
+            Self::Paged(cache) => cache.token_capacity(),
         }
-        Ok(())
     }
 
-    fn clear(&mut self) {
-        for layer_index in 0..self.layer_caches.len() {
-            let page_ids = std::mem::take(&mut self.layer_caches[layer_index].page_ids);
-            self.layer_caches[layer_index].token_count = 0;
-            self.release_pages(page_ids);
+    pub(super) fn truncate(&mut self, target_token_count: usize) -> Result<()> {
+        match self {
+            Self::Contiguous(cache) => cache.truncate(target_token_count),
+            Self::Paged(cache) => cache.truncate(target_token_count),
+        }
+    }
+
+    pub(super) fn clear(&mut self) {
+        match self {
+            Self::Contiguous(cache) => cache.clear(),
+            Self::Paged(cache) => cache.reset_active_block_tables(),
+        }
+    }
+}
+
+impl KvCache for KvCacheBackend {
+    fn append(
+        &mut self,
+        layer_index: usize,
+        start_position: usize,
+        key: &Tensor,
+        value: &Tensor,
+    ) -> Result<CachedKeyValue> {
+        match self {
+            Self::Contiguous(cache) => cache.append(layer_index, start_position, key, value),
+            Self::Paged(cache) => cache.append(layer_index, start_position, key, value),
         }
     }
 }
@@ -466,9 +546,9 @@ pub(super) fn create_kv_cache(
     model: &LoadedModel,
     model_role: ModelRole,
     total_size_bytes: usize,
-) -> Result<Box<dyn KvCache>> {
+) -> Result<KvCacheBackend> {
     match kv_cache_type {
-        KvCacheType::Contiguous => Ok(Box::new(
+        KvCacheType::Contiguous => Ok(KvCacheBackend::Contiguous(
             ContiguousKvCache::new(model.info(), model_role, model.device(), total_size_bytes)
                 .with_context(|| {
                     format!("failed to allocate {model_role} model contiguous KV-cache pools")
@@ -478,7 +558,7 @@ pub(super) fn create_kv_cache(
             per_page_token_count,
             // TODO: Use this setting to enable prefix-aware page reuse.
             enable_prefix_caching: _,
-        } => Ok(Box::new(
+        } => Ok(KvCacheBackend::Paged(
             PagedKvCache::new(
                 model.info(),
                 model_role,
@@ -601,19 +681,31 @@ mod tests {
             let key = cache_tensor(0, token_count)?;
             let value = cache_tensor(100, token_count)?;
             let cached = cache.append(0, 0, &key, &value)?;
-            assert_eq!(cache.layer_caches[0].page_ids.len(), expected_page_count);
             assert_eq!(
-                cache.per_pool_page_count - cache.free_page_ids.len(),
+                cache.active_block_tables.layers[0].page_ids.len(),
                 expected_page_count
             );
-            assert_eq!(cache.key_pool.dim(0)?, TEST_PAGE_CAPACITY);
-            assert_eq!(cache.value_pool.dim(0)?, TEST_PAGE_CAPACITY);
             assert_eq!(
-                cache.key_pool.dim(TOKEN_DIMENSION + 1)?,
+                cache.physical_page_pool.page_count - cache.physical_page_pool.free_page_ids.len(),
+                expected_page_count
+            );
+            assert_eq!(
+                cache.physical_page_pool.key_pool.dim(0)?,
+                TEST_PAGE_CAPACITY
+            );
+            assert_eq!(
+                cache.physical_page_pool.value_pool.dim(0)?,
+                TEST_PAGE_CAPACITY
+            );
+            assert_eq!(
+                cache.physical_page_pool.key_pool.dim(TOKEN_DIMENSION + 1)?,
                 per_page_token_count
             );
             assert_eq!(
-                cache.value_pool.dim(TOKEN_DIMENSION + 1)?,
+                cache
+                    .physical_page_pool
+                    .value_pool
+                    .dim(TOKEN_DIMENSION + 1)?,
                 per_page_token_count
             );
             assert_eq!(tensor_values(&cached.key)?, tensor_values(&key)?);
@@ -665,7 +757,10 @@ mod tests {
 
         contiguous.truncate(3)?;
         paged.truncate(3)?;
-        assert_eq!(paged.free_page_ids.len(), TEST_PAGE_CAPACITY - 2);
+        assert_eq!(
+            paged.physical_page_pool.free_page_ids.len(),
+            TEST_PAGE_CAPACITY - 2
+        );
 
         let key = cache_tensor(3, 2)?;
         let value = cache_tensor(103, 2)?;
@@ -714,7 +809,7 @@ mod tests {
         )?;
         cache.append(0, 0, &cache_tensor(0, 15)?, &cache_tensor(100, 15)?)?;
         let cached = cache.append(0, 15, &cache_tensor(15, 3)?, &cache_tensor(115, 3)?)?;
-        assert_eq!(cache.layer_caches[0].page_ids.len(), 2);
+        assert_eq!(cache.active_block_tables.layers[0].page_ids.len(), 2);
         assert_eq!(tensor_values(&cached.key)?, (0..18).collect::<Vec<_>>());
         assert_eq!(
             tensor_values(&cached.value)?,
@@ -735,14 +830,14 @@ mod tests {
         cache.append(0, 0, &key, &value)?;
         cache.append(1, 0, &key, &value)?;
         assert_ne!(
-            cache.layer_caches[0].page_ids,
-            cache.layer_caches[1].page_ids
+            cache.active_block_tables.layers[0].page_ids,
+            cache.active_block_tables.layers[1].page_ids
         );
         Ok(())
     }
 
     #[test]
-    fn reuses_pages_after_clear() -> Result<()> {
+    fn reuses_pages_after_resetting_active_block_tables() -> Result<()> {
         let mut cache = paged_cache(
             /* layer_count */ 1,
             PAGE_TOKEN_COUNT,
@@ -751,14 +846,17 @@ mod tests {
         let key = cache_tensor(0, 17)?;
         let value = cache_tensor(100, 17)?;
         cache.append(0, 0, &key, &value)?;
-        let free_page_count = cache.free_page_ids.len();
-        let mut original_page_ids = cache.layer_caches[0].page_ids.clone();
-        cache.clear();
+        let free_page_count = cache.physical_page_pool.free_page_ids.len();
+        let mut original_page_ids = cache.active_block_tables.layers[0].page_ids.clone();
+        cache.reset_active_block_tables();
         cache.append(0, 0, &key, &value)?;
-        let mut reused_page_ids = cache.layer_caches[0].page_ids.clone();
+        let mut reused_page_ids = cache.active_block_tables.layers[0].page_ids.clone();
         original_page_ids.sort_unstable();
         reused_page_ids.sort_unstable();
-        assert_eq!(cache.free_page_ids.len(), free_page_count);
+        assert_eq!(
+            cache.physical_page_pool.free_page_ids.len(),
+            free_page_count
+        );
         assert_eq!(reused_page_ids, original_page_ids);
         Ok(())
     }
@@ -792,8 +890,11 @@ mod tests {
             error.contains("requires 2 additional physical pages but only 1 of 1 are available"),
             "{error}"
         );
-        assert_eq!(cache.free_page_ids.len(), cache.per_pool_page_count);
-        assert_eq!(cache.layer_caches[0].token_count, 0);
+        assert_eq!(
+            cache.physical_page_pool.free_page_ids.len(),
+            cache.physical_page_pool.page_count
+        );
+        assert_eq!(cache.active_block_tables.layers[0].token_count, 0);
         Ok(())
     }
 }
