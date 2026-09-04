@@ -1,7 +1,5 @@
 use super::server;
 use crate::proto::request_handler::request_handler_service_client::RequestHandlerServiceClient;
-use crate::proto::request_handler::GenerateText;
-use crate::proto::request_handler::GenerateTextEvent;
 use crate::proto::request_handler::Shutdown;
 use crate::utils::child_process::ChildProcess;
 use crate::utils::domain_socket;
@@ -58,18 +56,6 @@ impl RequestHandlerProcess {
             child_process,
             socket_path: request_handler_socket_path,
         })
-    }
-
-    pub(crate) async fn generate_text(
-        &self,
-        request: GenerateText,
-    ) -> Result<tonic::Streaming<GenerateTextEvent>> {
-        let mut rpc_client = self.rpc_client.clone();
-        Ok(rpc_client
-            .generate_text(request)
-            .await
-            .context("request handler generation request failed")?
-            .into_inner())
     }
 
     pub(crate) fn socket_path(&self) -> &Path {

@@ -42,7 +42,9 @@ Status: ✅ done · 🚧 in progress · ⬜ not started · ❌ out of scope
 - The model-runner process owns the loaded models, inference device, and mutable
   inference state on a dedicated thread.
 - Processes communicate through Protocol Buffers over Unix domain sockets.
-- See [Request handler architecture](src/request_handler/README.md) for text
+- See [Main process architecture](src/main_process/README.md) for startup and
+  coordinated-shutdown details,
+  [Request handler architecture](src/request_handler/README.md) for text
   preprocessing and event-flow details,
   [Model runner architecture](src/model_runner/README.md) for inference
   request-flow diagrams, and [Model loaders](src/model_loaders/README.md) for
@@ -72,17 +74,17 @@ The following architectural changes are on the way:
 
 ## Run
 
-Run the built-in example on CPU:
+Run the server on CPU:
 
 ```shell
-cargo run --release -- --run-example
+cargo run --release
 ```
 
 Optionally, set the `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` environment
 variables for this command to control the number of CPU worker threads:
 
 ```shell
-CANDLE_NUM_THREADS=8 RAYON_NUM_THREADS=8 cargo run --release -- --run-example
+CANDLE_NUM_THREADS=8 RAYON_NUM_THREADS=8 cargo run --release
 ```
 
 `CANDLE_NUM_THREADS` controls Candle's dedicated worker pool, including
@@ -95,7 +97,7 @@ necessarily improve throughput for every model or workload.
 Run it with Metal acceleration on Apple Silicon:
 
 ```shell
-cargo run --release --features metal -- --run-example
+cargo run --release --features metal
 ```
 
 Run the "Qwen2.5 7B Instruct Q4_K_M" target model with the "Qwen2.5 0.5B
@@ -104,7 +106,6 @@ tokenizer so their token IDs remain compatible):
 
 ```shell
 cargo run --release --features metal -- \
-  --run-example \
   --model 'model_id: "bartowski/Qwen2.5-7B-Instruct-GGUF" model_filename: "Qwen2.5-7B-Instruct-Q4_K_M.gguf" tokenizer_id: "Qwen/Qwen2.5-7B-Instruct"' \
   --draft-model 'model_id: "bartowski/Qwen2.5-0.5B-Instruct-GGUF" model_filename: "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" tokenizer_id: "Qwen/Qwen2.5-7B-Instruct"' \
   --draft-token-count 4
@@ -117,7 +118,6 @@ tokenizer so their token IDs remain compatible) and a paged KV cache containing
 
 ```shell
 cargo run --release --features metal -- \
-  --run-example \
   --kv-cache-type paged \
   --kv-cache-page-token-count 32 \
   --model 'model_id: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF" model_filename: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"' \
@@ -127,9 +127,6 @@ cargo run --release --features metal -- \
 
 Arguments:
 
-- `--run-example` submits the built-in request after startup. Without it, the
-  server waits for requests on `/tmp/mini-vllm-request-handler.sock` until
-  shutdown is requested.
 - `--model '<textproto>'` selects the target model. Set `model_id`,
   `model_filename`, and `tokenizer_id`; optionally set `model_revision`, which
   defaults to `main`.

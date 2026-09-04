@@ -38,9 +38,6 @@ pub(crate) struct MainProcessArgs {
     /// unix domain socket exposed to lifecycle-control clients
     #[argh(option, default = "default_control_socket()")]
     pub(crate) control_socket: PathBuf,
-    /// submit the built-in example request after startup
-    #[argh(switch)]
-    pub(crate) run_example: bool,
 }
 
 impl fmt::Display for MainProcessArgs {
@@ -69,12 +66,11 @@ impl fmt::Display for MainProcessArgs {
             "Request socket: {}",
             self.request_socket.display()
         )?;
-        writeln!(
+        write!(
             formatter,
             "Control socket: {}",
             self.control_socket.display()
-        )?;
-        write!(formatter, "Run example: {}", self.run_example)
+        )
     }
 }
 
