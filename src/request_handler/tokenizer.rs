@@ -2,7 +2,7 @@ use crate::model_loaders::ModelRole;
 use crate::proto::request_handler::GenerateText;
 use crate::proto::GenerateTextRequest;
 use crate::proto::GetModelMetadataResponse;
-use crate::proto::ModelArchitecture as ProtoModelArchitecture;
+use crate::proto::ModelArchitecture;
 use crate::proto::ModelMetadata;
 use anyhow::Context;
 use anyhow::Error;
@@ -11,114 +11,110 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
-#[derive(Clone, Copy)]
-pub(crate) enum ModelArchitecture {
-    Llama,
-    Qwen2,
+pub(super) struct TokenizerWrapper {
+    tokenizer: Tokenizer,
+    architecture: ModelArchitecture,
 }
 
-impl ModelArchitecture {
-    pub(crate) fn format_chat_prompt(self, prompt: &str) -> String {
-        match self {
-            Self::Llama => format!(
+impl TokenizerWrapper {
+    pub(super) fn new(
+        tokenizer_path: &Path,
+        draft_tokenizer_path: Option<&Path>,
+        model_metadata: &GetModelMetadataResponse,
+    ) -> Result<Self> {
+        let tokenizer =
+            load_tokenizer(tokenizer_path).context("failed to load the target tokenizer")?;
+        let target_model_metadata = model_metadata
+            .target_model
+            .as_ref()
+            .context("model runner did not report target model metadata")?;
+        validate_model_vocabulary(&tokenizer, target_model_metadata, ModelRole::Target)?;
+        let architecture = ModelArchitecture::try_from(target_model_metadata.architecture)
+            .context("model runner reported an invalid model architecture")?;
+        if architecture == ModelArchitecture::Unspecified {
+            anyhow::bail!("model architecture is unspecified");
+        }
+
+        match (draft_tokenizer_path, &model_metadata.draft_model) {
+            (Some(path), Some(metadata)) => {
+                let draft_tokenizer =
+                    load_tokenizer(path).context("failed to load the draft tokenizer")?;
+                validate_model_vocabulary(&tokenizer, metadata, ModelRole::Draft)?;
+                validate_tokenizer_compatibility(&tokenizer, &draft_tokenizer)?;
+                // Generation uses the target tokenizer after confirming that both tokenizers
+                // assign the same IDs, so we drop the second tokenizer after validation.
+            }
+            (None, None) => {}
+            (Some(_), None) => {
+                anyhow::bail!("a draft tokenizer was provided without a draft model")
+            }
+            (None, Some(_)) => anyhow::bail!("the draft model does not have a tokenizer"),
+        }
+        Ok(Self {
+            tokenizer,
+            architecture,
+        })
+    }
+
+    pub(super) fn create_generate_text_request(
+        &self,
+        request: GenerateText,
+    ) -> Result<GenerateTextRequest> {
+        let prompt = self.format_chat_prompt(&request.prompt);
+        let encoding = self
+            .tokenizer
+            .encode(prompt, true)
+            .map_err(Error::msg)
+            .context("failed to tokenize the prompt")?;
+        let input_token_ids = encoding.get_ids().to_vec();
+        if input_token_ids.is_empty() {
+            anyhow::bail!("formatted prompt produced no token IDs");
+        }
+        let end_of_sequence_token_ids = self
+            .end_of_sequence_tokens()
+            .iter()
+            .filter_map(|token| self.tokenizer.token_to_id(token))
+            .collect();
+        Ok(GenerateTextRequest {
+            input_token_ids,
+            max_new_tokens: request.max_new_tokens,
+            repeat_penalty: request.repeat_penalty,
+            repeat_last_n: request.repeat_last_n,
+            end_of_sequence_token_ids,
+            stream_output: request.stream_output,
+        })
+    }
+
+    fn format_chat_prompt(&self, prompt: &str) -> String {
+        match self.architecture {
+            ModelArchitecture::Llama => format!(
                 "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n\
                  {prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
             ),
-            Self::Qwen2 => {
+            ModelArchitecture::Qwen2 => {
                 format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
             }
-        }
-    }
-
-    pub(crate) fn end_of_sequence_tokens(self) -> &'static [&'static str] {
-        match self {
-            Self::Llama => &["<|eot_id|>", "<|end_of_text|>"],
-            Self::Qwen2 => &["<|im_end|>", "<|endoftext|>"],
-        }
-    }
-}
-
-impl TryFrom<i32> for ModelArchitecture {
-    type Error = anyhow::Error;
-
-    fn try_from(architecture: i32) -> Result<Self> {
-        let architecture = ProtoModelArchitecture::try_from(architecture)
-            .context("invalid model architecture value")?;
-        match architecture {
-            ProtoModelArchitecture::Llama => Ok(Self::Llama),
-            ProtoModelArchitecture::Qwen2 => Ok(Self::Qwen2),
-            ProtoModelArchitecture::Unspecified => {
-                anyhow::bail!("model architecture is unspecified")
+            ModelArchitecture::Unspecified => {
+                unreachable!("tokenizer model architecture is always specified")
             }
         }
     }
-}
 
-pub(super) fn create_generate_tokens_request(
-    tokenizer: &Tokenizer,
-    architecture: ModelArchitecture,
-    request: GenerateText,
-) -> Result<GenerateTextRequest> {
-    let prompt = architecture.format_chat_prompt(&request.prompt);
-    let encoding = tokenizer
-        .encode(prompt, true)
-        .map_err(Error::msg)
-        .context("failed to tokenize the prompt")?;
-    let input_token_ids = encoding.get_ids().to_vec();
-    if input_token_ids.is_empty() {
-        anyhow::bail!("formatted prompt produced no token IDs");
+    fn end_of_sequence_tokens(&self) -> &'static [&'static str] {
+        match self.architecture {
+            ModelArchitecture::Llama => &["<|eot_id|>", "<|end_of_text|>"],
+            ModelArchitecture::Qwen2 => &["<|im_end|>", "<|endoftext|>"],
+            ModelArchitecture::Unspecified => {
+                unreachable!("tokenizer model architecture is always specified")
+            }
+        }
     }
-    let end_of_sequence_token_ids = architecture
-        .end_of_sequence_tokens()
-        .iter()
-        .filter_map(|token| tokenizer.token_to_id(token))
-        .collect();
-    Ok(GenerateTextRequest {
-        input_token_ids,
-        max_new_tokens: request.max_new_tokens,
-        repeat_penalty: request.repeat_penalty,
-        repeat_last_n: request.repeat_last_n,
-        end_of_sequence_token_ids,
-        stream_output: request.stream_output,
-    })
 }
 
 pub(crate) fn load_tokenizer(path: &Path) -> Result<Tokenizer> {
     Tokenizer::from_file(path)
         .map_err(Error::msg)
         .context("failed to load the tokenizer")
-}
-
-pub(super) fn load_and_validate_tokenizer(
-    tokenizer_path: &Path,
-    draft_tokenizer_path: Option<&Path>,
-    model_metadata: &GetModelMetadataResponse,
-) -> Result<Tokenizer> {
-    let tokenizer =
-        load_tokenizer(tokenizer_path).context("failed to load the target tokenizer")?;
-    validate_model_vocabulary(
-        &tokenizer,
-        model_metadata
-            .target_model
-            .as_ref()
-            .context("model runner did not report target model metadata")?,
-        ModelRole::Target,
-    )?;
-
-    match (draft_tokenizer_path, &model_metadata.draft_model) {
-        (Some(path), Some(metadata)) => {
-            let draft_tokenizer =
-                load_tokenizer(path).context("failed to load the draft tokenizer")?;
-            validate_model_vocabulary(&tokenizer, metadata, ModelRole::Draft)?;
-            validate_tokenizer_compatibility(&tokenizer, &draft_tokenizer)?;
-            // Generation uses the target tokenizer after confirming that both tokenizers assign
-            // the same IDs, so we drop the second tokenizer after validation.
-        }
-        (None, None) => {}
-        (Some(_), None) => anyhow::bail!("a draft tokenizer was provided without a draft model"),
-        (None, Some(_)) => anyhow::bail!("the draft model does not have a tokenizer"),
-    }
-    Ok(tokenizer)
 }
 
 /// Ensures target and draft tokenizers assign the same ID to every token.
@@ -206,7 +202,10 @@ mod tests {
 
     #[test]
     fn creates_tokenized_generation_requests() {
-        let tokenizer = tokenizer(&[("[UNK]", 0), ("<|im_end|>", 1), ("<|endoftext|>", 2)]);
+        let tokenizer = TokenizerWrapper {
+            tokenizer: tokenizer(&[("[UNK]", 0), ("<|im_end|>", 1), ("<|endoftext|>", 2)]),
+            architecture: ModelArchitecture::Qwen2,
+        };
         let request = GenerateText {
             prompt: "Hello".to_owned(),
             max_new_tokens: 12,
@@ -215,8 +214,7 @@ mod tests {
             stream_output: true,
         };
 
-        let tokenized =
-            create_generate_tokens_request(&tokenizer, ModelArchitecture::Qwen2, request).unwrap();
+        let tokenized = tokenizer.create_generate_text_request(request).unwrap();
 
         assert_eq!(tokenized.input_token_ids, vec![0]);
         assert_eq!(tokenized.end_of_sequence_token_ids, vec![1, 2]);
