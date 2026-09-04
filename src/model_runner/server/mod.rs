@@ -77,17 +77,11 @@ impl ModelAndKvCache {
 }
 
 pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
-    let kv_cache_type = match args.kv_cache_type {
-        KvCacheType::Contiguous => KvCacheType::Contiguous,
-        KvCacheType::Paged { .. } => KvCacheType::Paged {
-            per_page_token_count: args.kv_cache_page_token_count,
-        },
-    };
     run_server(
         &args.model_path,
         args.draft_model_path,
         args.draft_token_count,
-        kv_cache_type,
+        args.kv_cache_type,
         args.target_kv_cache_size_bytes,
         &args.socket_path,
     )

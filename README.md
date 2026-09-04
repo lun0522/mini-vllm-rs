@@ -118,8 +118,7 @@ tokenizer so their token IDs remain compatible) and a paged KV cache containing
 
 ```shell
 cargo run --release --features metal -- \
-  --kv-cache-type paged \
-  --kv-cache-page-token-count 32 \
+  --kv-cache-type paged:32 \
   --model 'model_id: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF" model_filename: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"' \
   --draft-model 'model_id: "bartowski/Llama-3.2-1B-Instruct-GGUF" model_filename: "Llama-3.2-1B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"' \
   --draft-token-count 4
@@ -133,10 +132,11 @@ Arguments:
 - `--draft-model '<textproto>'` loads a tokenizer-compatible draft model for
   speculative decoding.
 - `--draft-token-count <count>` sets the proposal length and defaults to `4`.
-- `--kv-cache-type <type>` selects `contiguous` or `paged` KV-cache storage and
-  defaults to `contiguous`.
-- `--kv-cache-page-token-count <count>` sets the number of tokens stored in each
-  page and defaults to `16`; it only affects the `paged` KV-cache type.
+- `--kv-cache-type <type>` selects `contiguous`, `paged[:tokens-per-page]`, or
+  `paged-prefix[:tokens-per-page]` KV-cache storage and defaults to
+  `contiguous`. Paged caches contain 16 tokens per page when the count is
+  omitted. The `paged-prefix` value currently enables configuration plumbing;
+  prefix reuse will be added separately.
 - `--target-kv-cache-size-bytes <bytes>` sets the target model's total KV-cache
   allocation and defaults to 2 GiB. A draft model is allocated enough KV-cache
   memory to hold the same number of tokens.

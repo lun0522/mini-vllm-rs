@@ -476,6 +476,8 @@ pub(super) fn create_kv_cache(
         )),
         KvCacheType::Paged {
             per_page_token_count,
+            // TODO: Use this setting to enable prefix-aware page reuse.
+            enable_prefix_caching: _,
         } => Ok(Box::new(
             PagedKvCache::new(
                 model.info(),

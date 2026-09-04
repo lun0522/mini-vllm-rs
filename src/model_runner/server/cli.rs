@@ -17,9 +17,6 @@ pub(crate) struct ModelRunnerProcessArgs {
     /// KV cache implementation used for model inference
     #[argh(option)]
     pub(super) kv_cache_type: KvCacheType,
-    /// number of tokens per KV-cache page; only affects paged KV caches
-    #[argh(option)]
-    pub(super) kv_cache_page_token_count: usize,
     /// total KV-cache size in bytes for the target model
     #[argh(option)]
     pub(super) target_kv_cache_size_bytes: usize,
