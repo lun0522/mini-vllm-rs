@@ -2,10 +2,11 @@ use crate::model_loaders::model_downloader::ModelArtifacts;
 use crate::model_runner::server;
 use crate::model_runner::KvCacheType;
 use crate::model_runner::DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT;
-use crate::proto::model_runner_service_client::ModelRunnerServiceClient;
-use crate::proto::ModelPaths;
-use crate::proto::ModelRunnerCommand;
-use crate::proto::Shutdown;
+use crate::proto::model_runner::model_runner_command::Command::Shutdown as ShutdownCommand;
+use crate::proto::model_runner::model_runner_service_client::ModelRunnerServiceClient;
+use crate::proto::model_runner::ModelPaths;
+use crate::proto::model_runner::ModelRunnerCommand;
+use crate::proto::model_runner::Shutdown;
 use crate::utils::child_process::ChildProcess;
 use crate::utils::domain_socket;
 use crate::utils::textproto::format_textproto;
@@ -65,9 +66,7 @@ impl ModelRunnerProcess {
         let shutdown_result = self
             .rpc_client
             .handle_command(ModelRunnerCommand {
-                command: Some(crate::proto::model_runner_command::Command::Shutdown(
-                    Shutdown {},
-                )),
+                command: Some(ShutdownCommand(Shutdown {})),
             })
             .await
             .context("failed to shut down the model runner");

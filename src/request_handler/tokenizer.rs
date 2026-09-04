@@ -1,9 +1,9 @@
 use crate::model_loaders::ModelRole;
+use crate::proto::model_runner::GenerateTextRequest;
+use crate::proto::model_runner::GetModelMetadataResponse;
+use crate::proto::model_runner::ModelArchitecture;
+use crate::proto::model_runner::ModelMetadata;
 use crate::proto::request_handler::GenerateText;
-use crate::proto::GenerateTextRequest;
-use crate::proto::GetModelMetadataResponse;
-use crate::proto::ModelArchitecture;
-use crate::proto::ModelMetadata;
 use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
@@ -81,8 +81,16 @@ impl TokenizerWrapper {
             repeat_penalty: request.repeat_penalty,
             repeat_last_n: request.repeat_last_n,
             end_of_sequence_token_ids,
-            stream_output: request.stream_output,
         })
+    }
+
+    pub(super) fn create_token_decoder(&self) -> IncrementalTokenDecoder {
+        IncrementalTokenDecoder {
+            tokenizer: self.tokenizer.clone(),
+            token_ids: Vec::new(),
+            prefix: String::new(),
+            prefix_index: 0,
+        }
     }
 
     fn format_chat_prompt(&self, prompt: &str) -> String {
@@ -111,14 +119,36 @@ impl TokenizerWrapper {
     }
 }
 
-pub(crate) fn load_tokenizer(path: &Path) -> Result<Tokenizer> {
+pub(super) struct IncrementalTokenDecoder {
+    tokenizer: Tokenizer,
+    token_ids: Vec<u32>,
+    prefix: String,
+    prefix_index: usize,
+}
+
+impl IncrementalTokenDecoder {
+    pub(super) fn step(&mut self, token_id: u32) -> Result<Option<String>> {
+        tokenizers::tokenizer::step_decode_stream(
+            &self.tokenizer,
+            vec![token_id],
+            /* skip_special_tokens */ true,
+            &mut self.token_ids,
+            &mut self.prefix,
+            &mut self.prefix_index,
+        )
+        .map_err(Error::msg)
+        .context("failed to decode generated token")
+    }
+}
+
+fn load_tokenizer(path: &Path) -> Result<Tokenizer> {
     Tokenizer::from_file(path)
         .map_err(Error::msg)
         .context("failed to load the tokenizer")
 }
 
 /// Ensures target and draft tokenizers assign the same ID to every token.
-pub(crate) fn validate_tokenizer_compatibility(
+fn validate_tokenizer_compatibility(
     target_tokenizer: &Tokenizer,
     draft_tokenizer: &Tokenizer,
 ) -> Result<()> {
@@ -154,7 +184,7 @@ pub(crate) fn validate_tokenizer_compatibility(
 }
 
 /// Checks the tokenizer's token-ID range against the model's input and output vocabulary sizes.
-pub(crate) fn validate_model_vocabulary(
+fn validate_model_vocabulary(
     tokenizer: &Tokenizer,
     model_metadata: &ModelMetadata,
     model_role: ModelRole,
@@ -221,7 +251,6 @@ mod tests {
         assert_eq!(tokenized.max_new_tokens, 12);
         assert_eq!(tokenized.repeat_penalty, 1.1);
         assert_eq!(tokenized.repeat_last_n, 32);
-        assert!(tokenized.stream_output);
     }
 
     #[test]

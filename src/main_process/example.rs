@@ -1,7 +1,7 @@
-use crate::proto::generate_text_event;
+use crate::proto::model_runner::TextGenerationStats;
+use crate::proto::request_handler::generate_text_event;
 use crate::proto::request_handler::GenerateText;
-use crate::proto::GenerateTextEvent;
-use crate::proto::TextGenerationStats;
+use crate::proto::request_handler::GenerateTextEvent;
 use crate::request_handler::process::RequestHandlerProcess;
 use crate::utils::generated_text_output::create_generated_text_output;
 use crate::utils::generated_text_output::GeneratedTextOutput;

@@ -1,6 +1,3 @@
-pub(crate) use model_config::*;
-pub(crate) use model_runner::*;
-
 pub(crate) mod model_runner {
     include!(concat!(env!("OUT_DIR"), "/model_runner.rs"));
 }
@@ -13,7 +10,7 @@ pub(crate) mod model_config {
     include!(concat!(env!("OUT_DIR"), "/model_config.rs"));
 }
 
-impl ModelConfig {
+impl model_config::ModelConfig {
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
         if self.model_id.is_empty()
             || self.model_filename.is_empty()

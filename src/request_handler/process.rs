@@ -1,7 +1,7 @@
 use crate::proto::request_handler::request_handler_service_client::RequestHandlerServiceClient;
 use crate::proto::request_handler::GenerateText;
+use crate::proto::request_handler::GenerateTextEvent;
 use crate::proto::request_handler::Shutdown;
-use crate::proto::GenerateTextEvent;
 use crate::request_handler::server;
 use crate::utils::child_process::ChildProcess;
 use crate::utils::domain_socket;

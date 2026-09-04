@@ -57,15 +57,12 @@ message GenerateTextRequest {
   uint64 repeat_last_n = 4;
   // Token IDs that terminate generation without being emitted.
   repeated uint32 end_of_sequence_token_ids = 5;
-  // Whether text events contain incremental fragments or one buffered response.
-  bool stream_output = 6;
 }
 
 message GenerateTextEvent {
-  // The next item produced by text generation.
   oneof event {
-    // A decoded fragment, or the complete response when streaming is disabled.
-    string text = 1;
+    // A generated token ID.
+    uint32 token_id = 1;
     // Generation statistics; always the final event on successful completion.
     TextGenerationStats stats = 2;
   }

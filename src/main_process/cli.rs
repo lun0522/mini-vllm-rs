@@ -1,6 +1,6 @@
 use crate::model_runner::KvCacheType;
 use crate::model_runner::DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT;
-use crate::proto::ModelConfig;
+use crate::proto::model_config::ModelConfig;
 use crate::utils::textproto::parse_textproto;
 use argh::FromArgs;
 use std::fmt;

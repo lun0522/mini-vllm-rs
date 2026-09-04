@@ -1,7 +1,7 @@
 use crate::model_loaders::model_downloader::ModelArtifacts;
 use crate::model_loaders::ModelRole;
 use crate::model_runner::KvCacheType;
-use crate::proto::ModelPaths;
+use crate::proto::model_runner::ModelPaths;
 use crate::utils::textproto::parse_textproto;
 use anyhow::Result;
 use argh::FromArgs;

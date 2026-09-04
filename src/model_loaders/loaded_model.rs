@@ -3,10 +3,8 @@ use crate::model_loaders::models::quantized_llama::LlamaBackend;
 use crate::model_loaders::models::quantized_qwen2::Qwen2Backend;
 use crate::model_loaders::CausalLanguageModel;
 use crate::model_loaders::ModelInfo;
-use crate::model_loaders::ModelRole;
-use crate::proto::ModelArchitecture;
-use crate::proto::ModelMetadata;
-use crate::request_handler::tokenizer::validate_model_vocabulary;
+use crate::proto::model_runner::ModelArchitecture;
+use crate::proto::model_runner::ModelMetadata;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
@@ -14,7 +12,6 @@ use candle_core::quantized::gguf_file;
 use candle_core::Device;
 use std::fs::File;
 use std::path::Path;
-use tokenizers::Tokenizer;
 
 struct LoadedBackend {
     model: Box<dyn CausalLanguageModel>,
@@ -32,12 +29,7 @@ pub(crate) struct LoadedModel {
 
 impl LoadedModel {
     /// Loads model artifacts from disk and initializes a supported model backend once.
-    pub(crate) fn new(
-        model_artifacts: &ModelArtifacts,
-        device: Device,
-        tokenizer: &Tokenizer,
-        model_role: ModelRole,
-    ) -> Result<Self> {
+    pub(crate) fn new(model_artifacts: &ModelArtifacts, device: Device) -> Result<Self> {
         let LoadedBackend {
             model,
             architecture,
@@ -51,7 +43,6 @@ impl LoadedModel {
             output_vocabulary_size: u64::try_from(output_vocabulary_size)
                 .context("model output vocabulary size does not fit in u64")?,
         };
-        validate_model_vocabulary(tokenizer, &metadata, model_role)?;
         Ok(Self {
             model,
             device,

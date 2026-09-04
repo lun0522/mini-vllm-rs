@@ -3,18 +3,15 @@ use crate::model_loaders::model_downloader::ModelArtifacts;
 use crate::model_loaders::ModelInfo;
 use crate::model_loaders::ModelRole;
 use crate::model_runner::KvCacheType;
-use crate::proto::generate_text_event;
-use crate::proto::GenerateTextEvent;
-use crate::proto::GenerateTextRequest;
-use crate::proto::GetModelMetadataResponse;
-use crate::proto::TextGenerationStats;
-use crate::request_handler::tokenizer::load_tokenizer;
-use crate::request_handler::tokenizer::validate_tokenizer_compatibility;
+use crate::proto::model_runner::generate_text_event;
+use crate::proto::model_runner::GenerateTextEvent;
+use crate::proto::model_runner::GenerateTextRequest;
+use crate::proto::model_runner::GetModelMetadataResponse;
+use crate::proto::model_runner::TextGenerationStats;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::Device;
 use log::info;
-use tokenizers::Tokenizer;
 use tokio::sync::mpsc;
 use tonic::Status;
 
@@ -24,7 +21,6 @@ use super::ModelAndKvCache;
 
 /// Owns the loaded models and executes requests on the inference thread.
 pub(super) struct ModelRunner {
-    tokenizer: Tokenizer,
     target: ModelAndKvCache,
     draft: Option<ModelAndKvCache>,
     draft_token_count: usize,
@@ -39,26 +35,10 @@ impl ModelRunner {
         target_kv_cache_size_bytes: usize,
     ) -> Result<Self> {
         let device = Self::get_inference_device()?;
-        let tokenizer = load_tokenizer(&model_artifacts.tokenizer)
-            .context("failed to load the target model tokenizer")?;
-        if let Some(draft_model_artifacts) = draft_model_artifacts {
-            let draft_tokenizer = load_tokenizer(&draft_model_artifacts.tokenizer)
-                .context("failed to load the draft model tokenizer")?;
-            validate_tokenizer_compatibility(&tokenizer, &draft_tokenizer)?;
-            // Inference uses the target tokenizer after compatibility is confirmed,
-            // so the draft tokenizer is no longer needed.
-            drop(draft_tokenizer);
-        }
-        let loaded_model =
-            LoadedModel::new(model_artifacts, device, &tokenizer, ModelRole::Target)?;
+        let loaded_model = LoadedModel::new(model_artifacts, device)?;
         let loaded_draft_model = draft_model_artifacts
             .map(|draft_model_artifacts| {
-                LoadedModel::new(
-                    draft_model_artifacts,
-                    loaded_model.device().clone(),
-                    &tokenizer,
-                    ModelRole::Draft,
-                )
+                LoadedModel::new(draft_model_artifacts, loaded_model.device().clone())
             })
             .transpose()?;
         info!(
@@ -86,7 +66,6 @@ impl ModelRunner {
             })
             .transpose()?;
         Ok(Self {
-            tokenizer,
             target: ModelAndKvCache::new(loaded_model, target_kv_cache),
             draft,
             draft_token_count,
@@ -108,7 +87,7 @@ impl ModelRunner {
     fn generate_text(
         &mut self,
         request: &GenerateTextRequest,
-        push_fragment: impl FnMut(&str) -> Result<()>,
+        push_token: impl FnMut(u32) -> Result<()>,
         is_cancelled: impl FnMut() -> bool,
     ) -> Result<TextGenerationStats> {
         self.target.kv_cache.borrow_mut().clear();
@@ -116,12 +95,11 @@ impl ModelRunner {
             draft.kv_cache.borrow_mut().clear();
         }
         text_generation::generate_text(
-            &self.tokenizer,
             &self.target,
             self.draft.as_ref(),
             self.draft_token_count,
             request,
-            push_fragment,
+            push_token,
             is_cancelled,
         )
     }
@@ -166,27 +144,23 @@ pub(super) fn run(
 }
 
 fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
-    let mut buffered_text = String::new();
-    let stream_output = request.generate_text.stream_output;
     let result = model_runner.generate_text(
         &request.generate_text,
-        |fragment| {
-            if stream_output {
-                send_event(
-                    &request.event_sender,
-                    generate_text_event::Event::Text(fragment.to_owned()),
-                )
-            } else {
-                buffered_text.push_str(fragment);
-                Ok(())
-            }
+        |token_id| {
+            send_event(
+                &request.event_sender,
+                generate_text_event::Event::TokenId(token_id),
+            )
         },
         || request.event_sender.is_closed(),
     );
 
     match result {
         Ok(stats) => {
-            send_generation_result(&request.event_sender, stream_output, buffered_text, stats)
+            let _ = send_event(
+                &request.event_sender,
+                generate_text_event::Event::Stats(stats),
+            );
         }
         Err(error) => {
             let _ = request
@@ -196,24 +170,6 @@ fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
                 ))));
         }
     }
-}
-
-fn send_generation_result(
-    event_sender: &mpsc::Sender<Result<GenerateTextEvent, Status>>,
-    stream_output: bool,
-    buffered_text: String,
-    stats: TextGenerationStats,
-) {
-    if !stream_output
-        && send_event(
-            event_sender,
-            generate_text_event::Event::Text(buffered_text),
-        )
-        .is_err()
-    {
-        return;
-    }
-    let _ = send_event(event_sender, generate_text_event::Event::Stats(stats));
 }
 
 fn send_event(
@@ -242,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn generation_result_orders_buffered_text_before_final_stats() {
+    fn generation_result_follows_generated_tokens_with_final_stats() {
         let stats = TextGenerationStats {
             input_token_count: 3,
             output_token_count: 2,
@@ -250,18 +206,12 @@ mod tests {
         };
 
         let (sender, mut receiver) = mpsc::channel(2);
-        send_generation_result(&sender, false, "answer".to_owned(), stats);
+        send_event(&sender, generate_text_event::Event::TokenId(42)).unwrap();
+        send_event(&sender, generate_text_event::Event::Stats(stats)).unwrap();
         assert!(matches!(
             receive_event(&mut receiver),
-            generate_text_event::Event::Text(text) if text == "answer"
+            generate_text_event::Event::TokenId(42)
         ));
-        assert!(matches!(
-            receive_event(&mut receiver),
-            generate_text_event::Event::Stats(received) if received == stats
-        ));
-
-        let (sender, mut receiver) = mpsc::channel(1);
-        send_generation_result(&sender, true, String::new(), stats);
         assert!(matches!(
             receive_event(&mut receiver),
             generate_text_event::Event::Stats(received) if received == stats

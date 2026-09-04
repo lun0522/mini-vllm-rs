@@ -1,5 +1,5 @@
-use crate::proto::GenerateTextRequest;
-use crate::proto::TextGenerationStats;
+use crate::proto::model_runner::GenerateTextRequest;
+use crate::proto::model_runner::TextGenerationStats;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::DType;
@@ -10,7 +10,6 @@ use candle_transformers::utils::apply_repeat_penalty;
 use std::cell::RefCell;
 use std::time::Duration;
 use std::time::Instant;
-use tokenizers::Tokenizer;
 
 use super::ModelAndKvCache;
 
@@ -40,29 +39,16 @@ struct DecodeIterationResult {
 }
 
 pub(super) fn generate_text(
-    tokenizer: &Tokenizer,
     target: &ModelAndKvCache,
     draft: Option<&ModelAndKvCache>,
     draft_token_count: usize,
     request: &GenerateTextRequest,
-    mut push_fragment: impl FnMut(&str) -> Result<()>,
+    push_token: impl FnMut(u32) -> Result<()>,
     is_cancelled: impl FnMut() -> bool,
 ) -> Result<TextGenerationStats> {
     if request.input_token_ids.is_empty() {
         anyhow::bail!("input token IDs must not be empty");
     }
-    let mut token_stream = tokenizer.decode_stream(true);
-    let push_token = |next_token| {
-        if let Some(fragment) = token_stream
-            .step(next_token)
-            .map_err(anyhow::Error::msg)
-            .context("failed to decode generated token")?
-        {
-            push_fragment(&fragment)?;
-        }
-        Ok(())
-    };
-
     TextGenerator {
         tokens: request.input_token_ids.clone(),
         draft_token_count,

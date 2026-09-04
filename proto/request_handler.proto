@@ -6,7 +6,7 @@ import "model_runner.proto";
 
 service RequestHandlerService {
   // Streams a text-generation request through the model runner process.
-  rpc GenerateText(.request_handler.GenerateText) returns (stream model_runner.GenerateTextEvent);
+  rpc GenerateText(.request_handler.GenerateText) returns (stream .request_handler.GenerateTextEvent);
   // Gracefully stops the request handler process.
   rpc Shutdown(.request_handler.Shutdown) returns (.request_handler.CommandResult);
 }
@@ -22,6 +22,16 @@ message GenerateText {
   uint64 repeat_last_n = 4;
   // Whether text events contain incremental fragments or one buffered response.
   bool stream_output = 5;
+}
+
+message GenerateTextEvent {
+  // The next item produced by text generation.
+  oneof event {
+    // A decoded fragment, or the complete response when streaming is disabled.
+    string text = 1;
+    // Generation statistics; always the final event on successful completion.
+    model_runner.TextGenerationStats stats = 2;
+  }
 }
 
 // Requests a graceful shutdown of the request-handler process.
