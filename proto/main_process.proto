@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package main_process;
+
+service MainProcessService {
+  // Gracefully stops the main process and its child processes.
+  rpc Shutdown(.main_process.Shutdown) returns (.main_process.CommandResult);
+}
+
+// Requests a graceful shutdown of the main process.
+message Shutdown {}
+
+// Indicates that a main-process command completed successfully.
+message CommandResult {}

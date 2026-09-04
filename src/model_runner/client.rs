@@ -18,13 +18,13 @@ use std::time::Duration;
 use tonic::transport::Channel;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(300);
+const SOCKET_PATH: &str = "/tmp/mini-vllm-model-runner.sock";
 
 /// Owns the worker process, RPC client, and Unix domain socket lifetime.
 pub(crate) struct ModelRunnerProcess {
     rpc_client: ModelRunnerServiceClient<Channel>,
     child_process: ChildProcess,
     socket_path: PathBuf,
-    _socket_directory: tempfile::TempDir,
 }
 
 impl ModelRunnerProcess {
@@ -35,7 +35,8 @@ impl ModelRunnerProcess {
         kv_cache_type: KvCacheType,
         target_kv_cache_size_bytes: usize,
     ) -> Result<Self> {
-        let (socket_directory, socket_path) = create_socket()?;
+        let socket_path = PathBuf::from(SOCKET_PATH);
+        domain_socket::ensure_available(&socket_path, "model runner socket")?;
         let mut child_process = spawn(
             model_artifacts,
             draft_model_artifacts,
@@ -45,13 +46,20 @@ impl ModelRunnerProcess {
             &socket_path,
         )?;
         let channel =
-            domain_socket::wait_for_server(&mut child_process, &socket_path, STARTUP_TIMEOUT)
-                .await?;
+            match domain_socket::wait_for_server(&mut child_process, &socket_path, STARTUP_TIMEOUT)
+                .await
+            {
+                Ok(channel) => channel,
+                Err(error) => {
+                    let _ = child_process.stop();
+                    let _ = domain_socket::remove(&socket_path, "model runner socket");
+                    return Err(error);
+                }
+            };
         Ok(Self {
             rpc_client: ModelRunnerServiceClient::new(channel),
             child_process,
             socket_path,
-            _socket_directory: socket_directory,
         })
     }
 
@@ -70,9 +78,24 @@ impl ModelRunnerProcess {
             .context("failed to shut down the model runner");
         if let Err(error) = shutdown_result {
             self.child_process.stop()?;
+            domain_socket::remove(&self.socket_path, "model runner socket")?;
             return Err(error);
         }
-        self.child_process.wait()
+        let wait_result = self.child_process.wait();
+        let remove_result = domain_socket::remove(&self.socket_path, "model runner socket");
+        wait_result?;
+        remove_result
+    }
+}
+
+impl Drop for ModelRunnerProcess {
+    fn drop(&mut self) {
+        if let Err(error) = self.child_process.stop() {
+            log::error!("Failed to stop the model runner during cleanup: {error:#}");
+        }
+        if let Err(error) = domain_socket::remove(&self.socket_path, "model runner socket") {
+            log::error!("Failed to remove the model runner socket: {error:#}");
+        }
     }
 }
 
@@ -116,13 +139,4 @@ fn spawn(
         .spawn()
         .context("failed to start the model runner process")?;
     Ok(ChildProcess::new(child, "model runner".to_owned()))
-}
-
-fn create_socket() -> Result<(tempfile::TempDir, PathBuf)> {
-    let socket_directory = tempfile::Builder::new()
-        .prefix("mini-vllm-rs-")
-        .tempdir_in("/tmp")
-        .context("failed to create the model runner socket directory")?;
-    let socket_path = socket_directory.path().join("model-runner.sock");
-    Ok((socket_directory, socket_path))
 }

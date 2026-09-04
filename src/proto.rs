@@ -6,6 +6,10 @@ pub(crate) mod request_handler {
     include!(concat!(env!("OUT_DIR"), "/request_handler.rs"));
 }
 
+pub(crate) mod main_process {
+    include!(concat!(env!("OUT_DIR"), "/main_process.rs"));
+}
+
 pub(crate) mod model_config {
     include!(concat!(env!("OUT_DIR"), "/model_config.rs"));
 }

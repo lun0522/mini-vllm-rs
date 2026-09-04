@@ -76,17 +76,33 @@ async fn run_main_process(args: MainProcessArgs) -> Result<()> {
         }
     };
 
+    let control_server = main_process::server::ControlServer::bind(&args.control_socket)?;
     let serving_result = async {
         let ctrl_c = tokio::signal::ctrl_c();
         tokio::pin!(ctrl_c);
-        if args.run_example && run_example(&request_handler_process, ctrl_c.as_mut()).await? {
-            return Ok(());
+        let control_shutdown = control_server.wait_for_shutdown();
+        tokio::pin!(control_shutdown);
+        if args.run_example {
+            tokio::select! {
+                example_result = run_example(&request_handler_process, ctrl_c.as_mut()) => {
+                    if example_result? {
+                        return Ok(());
+                    }
+                }
+                shutdown_result = control_shutdown.as_mut() => return shutdown_result,
+            }
         }
         info!(
-            "Listening for local requests on {}. Press Ctrl-C to stop.",
-            request_handler_process.socket_path().display()
+            "Listening for local requests on {}. Send a shutdown command to {} or press Ctrl-C to stop.",
+            request_handler_process.socket_path().display(),
+            args.control_socket.display(),
         );
-        ctrl_c.await.context("failed to listen for Ctrl-C")
+        tokio::select! {
+            ctrl_c_result = ctrl_c.as_mut() => {
+                ctrl_c_result.context("failed to listen for Ctrl-C")
+            }
+            shutdown_result = control_shutdown.as_mut() => shutdown_result,
+        }
     }
     .await;
 

@@ -35,8 +35,8 @@ Status: ✅ done · 🚧 in progress · ⬜ not started · ❌ out of scope
 
 ## Process architecture
 
-- The main process downloads model artifacts and manages child-process
-  lifecycles.
+- The main process downloads model artifacts, manages child-process lifecycles,
+  and accepts shutdown requests on its control socket.
 - The request-handler process accepts local tonic requests and proxies response
   streams.
 - The model-runner process owns the loaded models, inference device, and mutable
@@ -128,7 +128,8 @@ cargo run --release --features metal -- \
 Arguments:
 
 - `--run-example` submits the built-in request after startup. Without it, the
-  server waits for requests on `/tmp/mini-vllm-rs.sock` until Ctrl-C.
+  server waits for requests on `/tmp/mini-vllm-request-handler.sock` until
+  shutdown is requested.
 - `--model '<textproto>'` selects the target model. Set `model_id`,
   `model_filename`, and `tokenizer_id`; optionally set `model_revision`, which
   defaults to `main`.
@@ -143,6 +144,9 @@ Arguments:
   allocation and defaults to 2 GiB. A draft model is allocated enough KV-cache
   memory to hold the same number of tokens.
 - `--request-socket <path>` changes the request-handler Unix socket path.
+- `--control-socket <path>` changes the main-process control socket path. It
+  defaults to `/tmp/mini-vllm-main-process.sock` and exposes the `Shutdown` RPC
+  defined in `proto/main_process.proto`.
 
 Notes:
 

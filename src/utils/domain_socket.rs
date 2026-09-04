@@ -2,6 +2,7 @@ use crate::utils::child_process::ChildProcess;
 use anyhow::Context;
 use anyhow::Result;
 use hyper_util::rt::TokioIo;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::time::Duration;
 use tokio::net::UnixStream;
@@ -11,6 +12,24 @@ use tower::service_fn;
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
 const CONNECTION_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+pub(crate) fn ensure_available(socket_path: &Path, socket_name: &str) -> Result<()> {
+    if socket_path
+        .try_exists()
+        .with_context(|| format!("failed to inspect the {socket_name} path"))?
+    {
+        anyhow::bail!("{socket_name} '{}' already exists", socket_path.display());
+    }
+    Ok(())
+}
+
+pub(crate) fn remove(socket_path: &Path, socket_name: &str) -> Result<()> {
+    match std::fs::remove_file(socket_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to remove the {socket_name}")),
+    }
+}
 
 pub(crate) async fn connect(socket_path: &Path) -> Result<Channel> {
     let connector_path = socket_path.to_owned();

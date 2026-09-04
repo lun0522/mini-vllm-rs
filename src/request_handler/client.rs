@@ -7,7 +7,6 @@ use crate::utils::child_process::ChildProcess;
 use crate::utils::domain_socket;
 use anyhow::Context;
 use anyhow::Result;
-use std::io::ErrorKind;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -31,15 +30,7 @@ impl RequestHandlerProcess {
         draft_tokenizer_path: Option<&Path>,
         request_handler_socket_path: PathBuf,
     ) -> Result<Self> {
-        if request_handler_socket_path
-            .try_exists()
-            .context("failed to inspect the request handler socket path")?
-        {
-            anyhow::bail!(
-                "request handler socket '{}' already exists",
-                request_handler_socket_path.display()
-            );
-        }
+        domain_socket::ensure_available(&request_handler_socket_path, "request handler socket")?;
 
         let mut child_process = spawn(
             model_runner_socket_path,
@@ -57,7 +48,8 @@ impl RequestHandlerProcess {
             Ok(channel) => channel,
             Err(error) => {
                 let _ = child_process.stop();
-                let _ = remove_socket(&request_handler_socket_path);
+                let _ =
+                    domain_socket::remove(&request_handler_socket_path, "request handler socket");
                 return Err(error);
             }
         };
@@ -93,12 +85,12 @@ impl RequestHandlerProcess {
             .context("failed to shut down the request handler");
         if let Err(error) = shutdown_result {
             self.child_process.stop()?;
-            remove_socket(&self.socket_path)?;
+            domain_socket::remove(&self.socket_path, "request handler socket")?;
             return Err(error);
         }
 
         let wait_result = self.child_process.wait();
-        let remove_result = remove_socket(&self.socket_path);
+        let remove_result = domain_socket::remove(&self.socket_path, "request handler socket");
         wait_result?;
         remove_result
     }
@@ -109,7 +101,7 @@ impl Drop for RequestHandlerProcess {
         if let Err(error) = self.child_process.stop() {
             log::error!("Failed to stop the request handler during cleanup: {error:#}");
         }
-        if let Err(error) = remove_socket(&self.socket_path) {
+        if let Err(error) = domain_socket::remove(&self.socket_path, "request handler socket") {
             log::error!("Failed to remove the request handler socket: {error:#}");
         }
     }
@@ -141,12 +133,4 @@ fn spawn(
         .spawn()
         .context("failed to start the request handler process")?;
     Ok(ChildProcess::new(child, "request handler".to_owned()))
-}
-
-fn remove_socket(socket_path: &Path) -> Result<()> {
-    match std::fs::remove_file(socket_path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).context("failed to remove the request handler socket"),
-    }
 }

@@ -35,6 +35,9 @@ pub(crate) struct MainProcessArgs {
     /// unix domain socket exposed to local inference clients
     #[argh(option, default = "default_request_socket()")]
     pub(crate) request_socket: PathBuf,
+    /// unix domain socket exposed to lifecycle-control clients
+    #[argh(option, default = "default_control_socket()")]
+    pub(crate) control_socket: PathBuf,
     /// submit the built-in example request after startup
     #[argh(switch)]
     pub(crate) run_example: bool,
@@ -66,6 +69,11 @@ impl fmt::Display for MainProcessArgs {
             "Request socket: {}",
             self.request_socket.display()
         )?;
+        writeln!(
+            formatter,
+            "Control socket: {}",
+            self.control_socket.display()
+        )?;
         write!(formatter, "Run example: {}", self.run_example)
     }
 }
@@ -92,7 +100,11 @@ fn default_model_config() -> ModelConfig {
 }
 
 fn default_request_socket() -> PathBuf {
-    PathBuf::from("/tmp/mini-vllm-rs.sock")
+    PathBuf::from("/tmp/mini-vllm-request-handler.sock")
+}
+
+fn default_control_socket() -> PathBuf {
+    PathBuf::from("/tmp/mini-vllm-main-process.sock")
 }
 
 fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
