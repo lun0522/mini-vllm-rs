@@ -1,5 +1,5 @@
 use crate::proto::generate_text_event;
-use crate::proto::GenerateText;
+use crate::proto::request_handler::GenerateText;
 use crate::proto::GenerateTextEvent;
 use crate::proto::TextGenerationStats;
 use crate::request_handler::process::RequestHandlerProcess;

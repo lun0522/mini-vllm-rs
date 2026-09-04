@@ -1,4 +1,4 @@
-use crate::proto::GenerateText;
+use crate::proto::GenerateTextRequest;
 use crate::proto::TextGenerationStats;
 use anyhow::Context;
 use anyhow::Result;
@@ -44,17 +44,13 @@ pub(super) fn generate_text(
     target: &ModelAndKvCache,
     draft: Option<&ModelAndKvCache>,
     draft_token_count: usize,
-    command: &GenerateText,
+    request: &GenerateTextRequest,
     mut push_fragment: impl FnMut(&str) -> Result<()>,
     is_cancelled: impl FnMut() -> bool,
 ) -> Result<TextGenerationStats> {
-    let target_model = target.model.borrow();
-    let model_prompt = target_model.format_chat_prompt(&command.prompt);
-    let eos_tokens =
-        resolve_end_of_sequence_tokens(tokenizer, target_model.end_of_sequence_tokens());
-    drop(target_model);
-
-    let tokens = tokenize_prompt(tokenizer, model_prompt)?;
+    if request.input_token_ids.is_empty() {
+        anyhow::bail!("input token IDs must not be empty");
+    }
     let mut token_stream = tokenizer.decode_stream(true);
     let push_token = |next_token| {
         if let Some(fragment) = token_stream
@@ -68,14 +64,14 @@ pub(super) fn generate_text(
     };
 
     TextGenerator {
-        tokens,
+        tokens: request.input_token_ids.clone(),
         draft_token_count,
-        max_new_token_count: usize::try_from(command.max_new_tokens)
+        max_new_token_count: usize::try_from(request.max_new_tokens)
             .context("max_new_tokens does not fit in usize")?,
-        repeat_last_n: usize::try_from(command.repeat_last_n)
+        repeat_last_n: usize::try_from(request.repeat_last_n)
             .context("repeat_last_n does not fit in usize")?,
-        repeat_penalty: command.repeat_penalty,
-        eos_tokens,
+        repeat_penalty: request.repeat_penalty,
+        eos_tokens: request.end_of_sequence_token_ids.clone(),
         target_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
         draft_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
         accepted_draft_token_count: 0,
@@ -394,24 +390,6 @@ where
         (self.push_token)(next_token)?;
         Ok(true)
     }
-}
-
-fn tokenize_prompt(tokenizer: &Tokenizer, model_prompt: String) -> Result<Vec<u32>> {
-    let encoding = tokenizer
-        .encode(model_prompt, true)
-        .map_err(anyhow::Error::msg)
-        .context("failed to tokenize the prompt")?;
-    Ok(encoding.get_ids().to_vec())
-}
-
-fn resolve_end_of_sequence_tokens(
-    tokenizer: &Tokenizer,
-    end_of_sequence_tokens: &[&str],
-) -> Vec<u32> {
-    end_of_sequence_tokens
-        .iter()
-        .filter_map(|token| tokenizer.token_to_id(token))
-        .collect()
 }
 
 fn create_generation_stats(

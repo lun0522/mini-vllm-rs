@@ -1,5 +1,8 @@
 use crate::model_loaders::ModelRole;
+use crate::proto::request_handler::GenerateText;
+use crate::proto::GenerateTextRequest;
 use crate::proto::GetModelMetadataResponse;
+use crate::proto::ModelArchitecture as ProtoModelArchitecture;
 use crate::proto::ModelMetadata;
 use anyhow::Context;
 use anyhow::Error;
@@ -33,6 +36,51 @@ impl ModelArchitecture {
             Self::Qwen2 => &["<|im_end|>", "<|endoftext|>"],
         }
     }
+}
+
+impl TryFrom<i32> for ModelArchitecture {
+    type Error = anyhow::Error;
+
+    fn try_from(architecture: i32) -> Result<Self> {
+        let architecture = ProtoModelArchitecture::try_from(architecture)
+            .context("invalid model architecture value")?;
+        match architecture {
+            ProtoModelArchitecture::Llama => Ok(Self::Llama),
+            ProtoModelArchitecture::Qwen2 => Ok(Self::Qwen2),
+            ProtoModelArchitecture::Unspecified => {
+                anyhow::bail!("model architecture is unspecified")
+            }
+        }
+    }
+}
+
+pub(super) fn create_generate_tokens_request(
+    tokenizer: &Tokenizer,
+    architecture: ModelArchitecture,
+    request: GenerateText,
+) -> Result<GenerateTextRequest> {
+    let prompt = architecture.format_chat_prompt(&request.prompt);
+    let encoding = tokenizer
+        .encode(prompt, true)
+        .map_err(Error::msg)
+        .context("failed to tokenize the prompt")?;
+    let input_token_ids = encoding.get_ids().to_vec();
+    if input_token_ids.is_empty() {
+        anyhow::bail!("formatted prompt produced no token IDs");
+    }
+    let end_of_sequence_token_ids = architecture
+        .end_of_sequence_tokens()
+        .iter()
+        .filter_map(|token| tokenizer.token_to_id(token))
+        .collect();
+    Ok(GenerateTextRequest {
+        input_token_ids,
+        max_new_tokens: request.max_new_tokens,
+        repeat_penalty: request.repeat_penalty,
+        repeat_last_n: request.repeat_last_n,
+        end_of_sequence_token_ids,
+        stream_output: request.stream_output,
+    })
 }
 
 pub(crate) fn load_tokenizer(path: &Path) -> Result<Tokenizer> {
@@ -154,6 +202,28 @@ mod tests {
             r#"{{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"normalizer":null,"pre_tokenizer":null,"post_processor":null,"decoder":null,"model":{{"type":"WordLevel","vocab":{{{vocabulary}}},"unk_token":"[UNK]"}}}}"#
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn creates_tokenized_generation_requests() {
+        let tokenizer = tokenizer(&[("[UNK]", 0), ("<|im_end|>", 1), ("<|endoftext|>", 2)]);
+        let request = GenerateText {
+            prompt: "Hello".to_owned(),
+            max_new_tokens: 12,
+            repeat_penalty: 1.1,
+            repeat_last_n: 32,
+            stream_output: true,
+        };
+
+        let tokenized =
+            create_generate_tokens_request(&tokenizer, ModelArchitecture::Qwen2, request).unwrap();
+
+        assert_eq!(tokenized.input_token_ids, vec![0]);
+        assert_eq!(tokenized.end_of_sequence_token_ids, vec![1, 2]);
+        assert_eq!(tokenized.max_new_tokens, 12);
+        assert_eq!(tokenized.repeat_penalty, 1.1);
+        assert_eq!(tokenized.repeat_last_n, 32);
+        assert!(tokenized.stream_output);
     }
 
     #[test]

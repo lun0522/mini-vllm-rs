@@ -1,11 +1,11 @@
 use crate::proto::model_runner_service_client::ModelRunnerServiceClient;
 use crate::proto::request_handler::request_handler_service_server::RequestHandlerService;
 use crate::proto::request_handler::request_handler_service_server::RequestHandlerServiceServer;
-use crate::proto::CommandResult;
-use crate::proto::GenerateText;
+use crate::proto::request_handler::CommandResult;
+use crate::proto::request_handler::GenerateText;
+use crate::proto::request_handler::Shutdown;
 use crate::proto::GenerateTextEvent;
 use crate::proto::GetModelMetadataRequest;
-use crate::proto::Shutdown;
 use crate::utils::domain_socket;
 use crate::utils::rpc_shutdown::RpcShutdown;
 use anyhow::Context;
@@ -21,7 +21,9 @@ use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 
+use super::tokenizer::create_generate_tokens_request;
 use super::tokenizer::load_and_validate_tokenizer;
+use super::tokenizer::ModelArchitecture;
 
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_REQUEST_HANDLER";
 
@@ -54,9 +56,15 @@ pub(crate) async fn run(args: RequestHandlerProcessArgs) -> Result<()> {
         args.draft_tokenizer_path.as_deref(),
         &model_metadata,
     )?;
+    let target_model_metadata = model_metadata
+        .target_model
+        .context("model runner did not report target model metadata")?;
+    let architecture = ModelArchitecture::try_from(target_model_metadata.architecture)
+        .context("model runner reported an invalid model architecture")?;
     run_server(
         model_runner_client,
         tokenizer,
+        architecture,
         &args.request_handler_socket_path,
     )
     .await
@@ -72,6 +80,7 @@ async fn connect_to_model_runner(socket_path: &Path) -> Result<ModelRunnerServic
 async fn run_server(
     model_runner_client: ModelRunnerServiceClient<Channel>,
     tokenizer: Tokenizer,
+    architecture: ModelArchitecture,
     socket_path: &Path,
 ) -> Result<()> {
     // Bind only after the upstream connection succeeds so the socket indicates
@@ -82,6 +91,7 @@ async fn run_server(
     let service = RequestHandlerRpcService {
         model_runner_client,
         tokenizer,
+        architecture,
         shutdown,
     };
 
@@ -96,11 +106,8 @@ async fn run_server(
 
 struct RequestHandlerRpcService {
     model_runner_client: ModelRunnerServiceClient<Channel>,
-    #[expect(
-        dead_code,
-        reason = "request preprocessing will use the tokenizer in a follow-up change"
-    )]
     tokenizer: Tokenizer,
+    architecture: ModelArchitecture,
     shutdown: RpcShutdown,
 }
 
@@ -112,10 +119,14 @@ impl RequestHandlerService for RequestHandlerRpcService {
         &self,
         request: Request<GenerateText>,
     ) -> Result<Response<Self::GenerateTextStream>, Status> {
+        let request = create_generate_tokens_request(
+            &self.tokenizer,
+            self.architecture,
+            request.into_inner(),
+        )
+        .map_err(|error| Status::invalid_argument(format!("failed to process input: {error:#}")))?;
         let mut model_runner_client = self.model_runner_client.clone();
-        let response = model_runner_client
-            .generate_text(request.into_inner())
-            .await?;
+        let response = model_runner_client.generate_text(request).await?;
         Ok(Response::new(response.into_inner()))
     }
 

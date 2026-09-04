@@ -4,8 +4,8 @@ use crate::model_loaders::ModelInfo;
 use crate::model_loaders::ModelRole;
 use crate::model_runner::KvCacheType;
 use crate::proto::generate_text_event;
-use crate::proto::GenerateText;
 use crate::proto::GenerateTextEvent;
+use crate::proto::GenerateTextRequest;
 use crate::proto::GetModelMetadataResponse;
 use crate::proto::TextGenerationStats;
 use crate::request_handler::tokenizer::load_tokenizer;
@@ -107,7 +107,7 @@ impl ModelRunner {
 
     fn generate_text(
         &mut self,
-        command: &GenerateText,
+        request: &GenerateTextRequest,
         push_fragment: impl FnMut(&str) -> Result<()>,
         is_cancelled: impl FnMut() -> bool,
     ) -> Result<TextGenerationStats> {
@@ -120,7 +120,7 @@ impl ModelRunner {
             &self.target,
             self.draft.as_ref(),
             self.draft_token_count,
-            command,
+            request,
             push_fragment,
             is_cancelled,
         )
@@ -150,7 +150,7 @@ fn compute_kv_cache_size_bytes(model_info: &ModelInfo, token_capacity: usize) ->
 }
 
 pub(super) struct InferenceRequest {
-    pub(super) generate_text: GenerateText,
+    pub(super) generate_text: GenerateTextRequest,
     pub(super) event_sender: mpsc::Sender<Result<GenerateTextEvent, Status>>,
 }
 

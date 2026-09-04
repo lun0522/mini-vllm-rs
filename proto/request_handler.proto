@@ -6,7 +6,26 @@ import "model_runner.proto";
 
 service RequestHandlerService {
   // Streams a text-generation request through the model runner process.
-  rpc GenerateText(model_runner.GenerateText) returns (stream model_runner.GenerateTextEvent);
+  rpc GenerateText(.request_handler.GenerateText) returns (stream model_runner.GenerateTextEvent);
   // Gracefully stops the request handler process.
-  rpc Shutdown(model_runner.Shutdown) returns (model_runner.CommandResult);
+  rpc Shutdown(.request_handler.Shutdown) returns (.request_handler.CommandResult);
 }
+
+message GenerateText {
+  // User text inserted into the model's chat template.
+  string prompt = 1;
+  // Maximum number of tokens the model may generate before stopping.
+  uint64 max_new_tokens = 2;
+  // Penalty applied to previously seen tokens; 1.0 disables it.
+  float repeat_penalty = 3;
+  // Number of recent tokens considered when applying the repetition penalty.
+  uint64 repeat_last_n = 4;
+  // Whether text events contain incremental fragments or one buffered response.
+  bool stream_output = 5;
+}
+
+// Requests a graceful shutdown of the request-handler process.
+message Shutdown {}
+
+// Indicates that a request-handler command completed successfully.
+message CommandResult {}

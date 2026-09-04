@@ -7,8 +7,8 @@ use crate::proto::model_runner_command;
 use crate::proto::model_runner_service_server::ModelRunnerService;
 use crate::proto::model_runner_service_server::ModelRunnerServiceServer;
 use crate::proto::CommandResult;
-use crate::proto::GenerateText;
 use crate::proto::GenerateTextEvent;
+use crate::proto::GenerateTextRequest;
 use crate::proto::GetModelMetadataRequest;
 use crate::proto::GetModelMetadataResponse;
 use crate::proto::ModelRunnerCommand;
@@ -165,7 +165,7 @@ impl ModelRunnerService for ModelRunnerRpcService {
 
     async fn generate_text(
         &self,
-        request: Request<GenerateText>,
+        request: Request<GenerateTextRequest>,
     ) -> Result<Response<Self::GenerateTextStream>, Status> {
         let (event_sender, event_receiver) = mpsc::channel(GENERATION_EVENT_QUEUE_CAPACITY);
         self.inference_sender

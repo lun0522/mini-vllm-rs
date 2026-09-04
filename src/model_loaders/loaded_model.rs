@@ -7,7 +7,6 @@ use crate::model_loaders::ModelRole;
 use crate::proto::ModelArchitecture;
 use crate::proto::ModelMetadata;
 use crate::request_handler::tokenizer::validate_model_vocabulary;
-use crate::request_handler::tokenizer::ModelArchitecture as TokenizerModelArchitecture;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
@@ -72,28 +71,8 @@ impl LoadedModel {
         self.metadata
     }
 
-    pub(crate) fn format_chat_prompt(&self, prompt: &str) -> String {
-        self.architecture().format_chat_prompt(prompt)
-    }
-
-    pub(crate) fn end_of_sequence_tokens(&self) -> &'static [&'static str] {
-        self.architecture().end_of_sequence_tokens()
-    }
-
     pub(crate) fn model(&mut self) -> &mut dyn CausalLanguageModel {
         &mut *self.model
-    }
-
-    fn architecture(&self) -> TokenizerModelArchitecture {
-        match ModelArchitecture::try_from(self.metadata.architecture)
-            .expect("loaded model metadata contains an invalid architecture")
-        {
-            ModelArchitecture::Llama => TokenizerModelArchitecture::Llama,
-            ModelArchitecture::Qwen2 => TokenizerModelArchitecture::Qwen2,
-            ModelArchitecture::Unspecified => {
-                unreachable!("loaded model architecture is always specified")
-            }
-        }
     }
 }
 

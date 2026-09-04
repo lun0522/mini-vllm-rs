@@ -6,7 +6,7 @@ service ModelRunnerService {
   // Returns metadata required for tokenizer validation and input processing.
   rpc GetModelMetadata(GetModelMetadataRequest) returns (GetModelMetadataResponse);
   // Generates text and returns output events followed by final statistics.
-  rpc GenerateText(.model_runner.GenerateText) returns (stream GenerateTextEvent);
+  rpc GenerateText(GenerateTextRequest) returns (stream GenerateTextEvent);
   // Executes a command in the model runner process.
   rpc HandleCommand(ModelRunnerCommand) returns (CommandResult);
 }
@@ -46,17 +46,19 @@ message ModelRunnerCommand {
   }
 }
 
-message GenerateText {
-  // User text inserted into the model's chat template.
-  string prompt = 1;
+message GenerateTextRequest {
+  // Fully formatted and tokenized input prompt.
+  repeated uint32 input_token_ids = 1;
   // Maximum number of tokens the model may generate before stopping.
   uint64 max_new_tokens = 2;
   // Penalty applied to previously seen tokens; 1.0 disables it.
   float repeat_penalty = 3;
   // Number of recent tokens considered when applying the repetition penalty.
   uint64 repeat_last_n = 4;
+  // Token IDs that terminate generation without being emitted.
+  repeated uint32 end_of_sequence_token_ids = 5;
   // Whether text events contain incremental fragments or one buffered response.
-  bool stream_output = 5;
+  bool stream_output = 6;
 }
 
 message GenerateTextEvent {
