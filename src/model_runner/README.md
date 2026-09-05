@@ -37,7 +37,8 @@ flowchart LR
   per-layer block tables, and reconstructs contiguous tensors for the existing
   attention operations. Its physical page pool owns tensor storage and free
   page IDs, while its active block tables only map the current sequence to
-  those physical pages.
+  those physical pages. Reference counts keep shared pages allocated until
+  both active sequences and cached-prefix entries release them.
 - `server/inference_worker.rs` owns the target model, optional draft model,
   tokenizer, device, and corresponding KV caches on its dedicated thread. The
   target cache uses the configured byte budget; the draft cache is sized to

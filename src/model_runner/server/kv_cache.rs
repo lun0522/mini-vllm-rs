@@ -138,7 +138,7 @@ impl ContiguousKvCache {
 
 #[derive(Default)]
 struct PagedLayerCache {
-    page_ids: Vec<usize>,
+    page_ids: Vec<PageId>,
     token_count: usize,
 }
 
@@ -148,16 +148,21 @@ impl LayerCache for PagedLayerCache {
     }
 }
 
-/// Owns the physical key/value tensors and the IDs of pages available for allocation.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct PageId(usize);
+
+/// Owns physical key/value tensors, page reference counts, and reusable page IDs.
 ///
 /// "Physical" means these pages are actual storage locations in the preallocated tensor pools.
-/// They exist independently of whichever sequence currently refers to them.
+/// They exist independently of whichever active sequence or cached prefix refers to them. A page
+/// becomes reusable only after all such owners release their references.
 struct PhysicalPagePool {
     per_page_token_count: usize,
     page_count: usize,
     key_pool: Tensor,
     value_pool: Tensor,
-    free_page_ids: Vec<usize>,
+    reference_counts: Vec<usize>,
+    free_page_ids: Vec<PageId>,
 }
 
 impl PhysicalPagePool {
@@ -192,35 +197,88 @@ impl PhysicalPagePool {
                 per_pool_page_count,
                 per_page_token_count,
             )?,
-            free_page_ids: (0..per_pool_page_count).rev().collect(),
+            reference_counts: vec![0; per_pool_page_count],
+            free_page_ids: (0..per_pool_page_count).rev().map(PageId).collect(),
         })
     }
 
-    /// Allocates or reuses a key/value page pair and returns their shared page ID.
-    fn allocate_page(&mut self) -> Result<usize> {
-        self.free_page_ids
+    /// Allocates a key/value page pair for the active block tables.
+    ///
+    /// The page's reference count is initialized to one for that active owner, so the caller must
+    /// not immediately call `retain_allocated_page` for the same ownership.
+    fn allocate_page(&mut self) -> Result<PageId> {
+        let page_id = self
+            .free_page_ids
             .pop()
-            .context("paged KV cache has no free physical pages")
+            .context("paged KV cache has no free physical pages")?;
+        self.reference_counts[page_id.0] = 1;
+        Ok(page_id)
     }
 
-    /// Returns physical key/value page pairs to the free pool.
-    fn release_pages(&mut self, page_ids: impl IntoIterator<Item = usize>) {
-        self.free_page_ids.extend(page_ids);
+    /// Adds another owner, such as a cached-prefix entry, to an allocated page.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "prefix-cache entries will retain page references in the next feature"
+        )
+    )]
+    fn retain_allocated_page(&mut self, page_id: PageId) -> Result<()> {
+        let reference_count = self
+            .reference_counts
+            .get_mut(page_id.0)
+            .with_context(|| format!("invalid physical page ID {}", page_id.0))?;
+        if *reference_count == 0 {
+            bail!("cannot retain unallocated physical page {}", page_id.0);
+        }
+        *reference_count = reference_count
+            .checked_add(1)
+            .context("physical page reference count overflow")?;
+        Ok(())
+    }
+
+    /// Releases one owner and makes the page reusable after its final reference is removed.
+    fn release_allocated_page(&mut self, page_id: PageId) -> Result<()> {
+        let reference_count = self
+            .reference_counts
+            .get_mut(page_id.0)
+            .with_context(|| format!("invalid physical page ID {}", page_id.0))?;
+        if *reference_count == 0 {
+            bail!("physical page {} was released twice", page_id.0);
+        }
+        *reference_count -= 1;
+        if *reference_count == 0 {
+            self.free_page_ids.push(page_id);
+        }
+        Ok(())
+    }
+
+    fn release_allocated_pages(
+        &mut self,
+        page_ids: impl IntoIterator<Item = PageId>,
+    ) -> Result<()> {
+        for page_id in page_ids {
+            self.release_allocated_page(page_id)?;
+        }
+        Ok(())
     }
 
     fn write_page(
         &mut self,
-        page_id: usize,
+        page_id: PageId,
         page_offset: usize,
         key: &Tensor,
         value: &Tensor,
         input_offset: usize,
         token_count: usize,
     ) -> Result<()> {
+        if self.reference_counts[page_id.0] > 1 {
+            bail!("cannot mutate shared physical page {}", page_id.0);
+        }
         let key_slice = key.narrow(TOKEN_DIMENSION, input_offset, token_count)?;
         let value_slice = value.narrow(TOKEN_DIMENSION, input_offset, token_count)?;
-        let key_page = pool_page(&self.key_pool, page_id)?;
-        let value_page = pool_page(&self.value_pool, page_id)?;
+        let key_page = pool_page(&self.key_pool, page_id.0)?;
+        let value_page = pool_page(&self.value_pool, page_id.0)?;
         key_page.slice_set(&key_slice.contiguous()?, TOKEN_DIMENSION, page_offset)?;
         value_page.slice_set(&value_slice.contiguous()?, TOKEN_DIMENSION, page_offset)?;
         Ok(())
@@ -252,8 +310,9 @@ impl PhysicalPagePool {
 
 /// Holds the block tables and token counts used by the sequence being processed.
 ///
-/// "Active" means these tables only reference physical pages attached to the current sequence;
-/// they do not own the underlying key/value storage.
+/// "Active" means these tables hold references to physical pages attached to the current
+/// sequence; they do not own the underlying key/value tensor storage. Resetting the tables
+/// releases only their references, so a future prefix-cache entry can keep shared pages resident.
 struct ActiveBlockTables {
     layers: Vec<PagedLayerCache>,
 }
@@ -363,17 +422,19 @@ impl PagedKvCache {
         for layer_cache in &mut self.active_block_tables.layers {
             let released_page_ids = layer_cache.page_ids.split_off(retained_page_count);
             layer_cache.token_count = target_token_count;
-            self.physical_page_pool.release_pages(released_page_ids);
+            self.physical_page_pool
+                .release_allocated_pages(released_page_ids)?;
         }
         Ok(())
     }
 
-    fn reset_active_block_tables(&mut self) {
+    fn reset_active_block_tables(&mut self) -> Result<()> {
         for layer_cache in &mut self.active_block_tables.layers {
             let page_ids = std::mem::take(&mut layer_cache.page_ids);
             layer_cache.token_count = 0;
-            self.physical_page_pool.release_pages(page_ids);
+            self.physical_page_pool.release_allocated_pages(page_ids)?;
         }
+        Ok(())
     }
 
     fn token_capacity(&self) -> usize {
@@ -422,9 +483,12 @@ impl KvCacheBackend {
         }
     }
 
-    pub(super) fn clear(&mut self) {
+    pub(super) fn clear(&mut self) -> Result<()> {
         match self {
-            Self::Contiguous(cache) => cache.clear(),
+            Self::Contiguous(cache) => {
+                cache.clear();
+                Ok(())
+            }
             Self::Paged(cache) => cache.reset_active_block_tables(),
         }
     }
@@ -523,7 +587,7 @@ fn reconstruct_contiguous_tensor(
     let mut page_slices = Vec::with_capacity(layer_cache.page_ids.len());
     for &page_id in &layer_cache.page_ids {
         let slice_token_count = per_page_token_count.min(remaining_token_count);
-        page_slices.push(pool_page(pool, page_id)?.narrow(
+        page_slices.push(pool_page(pool, page_id.0)?.narrow(
             TOKEN_DIMENSION,
             0,
             slice_token_count,
@@ -848,7 +912,7 @@ mod tests {
         cache.append(0, 0, &key, &value)?;
         let free_page_count = cache.physical_page_pool.free_page_ids.len();
         let mut original_page_ids = cache.active_block_tables.layers[0].page_ids.clone();
-        cache.reset_active_block_tables();
+        cache.reset_active_block_tables()?;
         cache.append(0, 0, &key, &value)?;
         let mut reused_page_ids = cache.active_block_tables.layers[0].page_ids.clone();
         original_page_ids.sort_unstable();
@@ -858,6 +922,75 @@ mod tests {
             free_page_count
         );
         assert_eq!(reused_page_ids, original_page_ids);
+        Ok(())
+    }
+
+    #[test]
+    fn retains_a_cached_page_until_its_prefix_entry_is_evicted() -> Result<()> {
+        let mut cache = paged_cache(
+            /* layer_count */ 1, /* per_page_token_count */ 2,
+            /* per_pool_page_count */ 1,
+        )?;
+        cache.append(0, 0, &cache_tensor(0, 2)?, &cache_tensor(100, 2)?)?;
+        let page_id = cache.active_block_tables.layers[0].page_ids[0];
+
+        // The future prefix-cache entry acquires its own reference before the active request ends.
+        cache.physical_page_pool.retain_allocated_page(page_id)?;
+        assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 2);
+
+        cache.reset_active_block_tables()?;
+        assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 1);
+        assert!(cache.physical_page_pool.free_page_ids.is_empty());
+
+        // Eviction releases the prefix-cache entry's reference under allocation pressure.
+        cache.physical_page_pool.release_allocated_page(page_id)?;
+        assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 0);
+        assert_eq!(cache.physical_page_pool.free_page_ids, vec![page_id]);
+
+        assert_eq!(cache.physical_page_pool.allocate_page()?, page_id);
+        assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 1);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_releasing_a_physical_page_twice() -> Result<()> {
+        let mut cache = paged_cache(
+            /* layer_count */ 1, /* per_page_token_count */ 2,
+            /* per_pool_page_count */ 1,
+        )?;
+        let page_id = cache.physical_page_pool.allocate_page()?;
+        cache.physical_page_pool.release_allocated_page(page_id)?;
+
+        let error = cache
+            .physical_page_pool
+            .release_allocated_page(page_id)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("released twice"), "{error}");
+        assert_eq!(cache.physical_page_pool.free_page_ids, vec![page_id]);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_mutating_a_shared_physical_page() -> Result<()> {
+        let mut cache = paged_cache(
+            /* layer_count */ 1, /* per_page_token_count */ 2,
+            /* per_pool_page_count */ 1,
+        )?;
+        cache.append(0, 0, &cache_tensor(0, 2)?, &cache_tensor(100, 2)?)?;
+        let page_id = cache.active_block_tables.layers[0].page_ids[0];
+        cache.physical_page_pool.retain_allocated_page(page_id)?;
+        cache.truncate(1)?;
+
+        let error = cache
+            .append(0, 1, &cache_tensor(1, 1)?, &cache_tensor(101, 1)?)
+            .err()
+            .expect("append should not mutate a shared physical page")
+            .to_string();
+        assert!(
+            error.contains("cannot mutate shared physical page"),
+            "{error}"
+        );
         Ok(())
     }
 

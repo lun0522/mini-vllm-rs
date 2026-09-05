@@ -90,9 +90,9 @@ impl ModelRunner {
         push_token: impl FnMut(u32) -> Result<()>,
         is_cancelled: impl FnMut() -> bool,
     ) -> Result<TextGenerationStats> {
-        self.target.kv_cache.borrow_mut().clear();
+        self.target.kv_cache.borrow_mut().clear()?;
         if let Some(draft) = self.draft.as_ref() {
-            draft.kv_cache.borrow_mut().clear();
+            draft.kv_cache.borrow_mut().clear()?;
         }
         text_generation::generate_text(
             &self.target,
