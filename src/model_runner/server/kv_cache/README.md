@@ -36,23 +36,27 @@ flowchart TD
     Work -->|Request finishes| Index["index_cached_sequence(cached_token_ids,<br/>cached_page_ids_by_layer)"]
     Work -->|Another physical page is needed| Available{Free page available?}
     Available -->|Yes| Work
-    Available -->|No| Evict["Evict least-recently-used prefix blocks<br/>and release their references (planned)"]
-    Evict --> Work
+    Available -->|No| Evict["evict_least_recently_used_leaf()"]
+    Evict --> Release["Release returned physical-page references (planned)"]
+    Release --> Available
     Index --> Retain["Retain newly indexed complete pages (planned)"]
     Retain --> Reset[Reset active block tables]
     Reset --> Request
 ```
 
+- Only complete immutable blocks are indexed; a final incomplete block is
+  ignored.
 - `find_longest_cached_prefix` is called for every new request before prefill.
 - `index_cached_sequence` is called after the request has populated its cache
   and before its active block tables are reset.
 - Tokens passed to `index_cached_sequence` must have KV values in every model
   layer. A newly sampled token that has not gone through a model forward pass
   must not be included.
-- Only complete immutable blocks are indexed; a final incomplete block is
-  ignored.
-- Page attachment, retention, and eviction in the chart are not implemented
-  yet.
+- `evict_least_recently_used_leaf` removes one least-recently-used leaf per call,
+  preserving the parent context of remaining blocks. A parent becomes eligible
+  after its final child is removed; `Ok(None)` means the index is empty.
+- Page attachment, retention, and connecting eviction to physical-page release
+  are not implemented yet.
 
 ## Prefix-block index example
 
@@ -123,7 +127,7 @@ PrefixBlockId(2) -> IndexedPrefixBlock {
 }
 ```
 
-The resulting `PrefixBlockIndex` conceptually contains one map:
+The resulting `blocks_map` contains:
 
 ```text
 blocks_map:
@@ -131,6 +135,10 @@ blocks_map:
   (Block 0, [3, 4]) -> Block 1, [Page 11, Page 21]
   (Block 1, [5, 6]) -> Block 2, [Page 12, Page 22]
 ```
+
+`PrefixBlockIndex` also keeps a set containing Block 2's key because it is the
+only leaf eligible for eviction. Each block records its latest lookup or
+indexing timestamp so the least recently used leaf can be selected.
 
 Including the parent prevents an identical token block in another context,
 such as `[8, 9] -> [3, 4]`, from incorrectly reusing Block 1.
