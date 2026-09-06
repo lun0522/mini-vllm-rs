@@ -1,3 +1,4 @@
+use self::prefix_block_index::PrefixBlockIndex;
 use crate::model_loaders::loaded_model::LoadedModel;
 use crate::model_loaders::CachedKeyValue;
 use crate::model_loaders::KvCache;
@@ -12,6 +13,8 @@ use candle_core::Tensor;
 use thousands::Separable;
 
 const TOKEN_DIMENSION: usize = 2;
+
+mod prefix_block_index;
 
 #[derive(Default)]
 struct ContiguousLayerCache {
@@ -149,7 +152,7 @@ impl LayerCache for PagedLayerCache {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct PageId(usize);
+pub(super) struct PageId(pub(super) usize);
 
 /// Owns physical key/value tensors, page reference counts, and reusable page IDs.
 ///
@@ -331,6 +334,11 @@ impl ActiveBlockTables {
 pub(super) struct PagedKvCache {
     physical_page_pool: PhysicalPagePool,
     active_block_tables: ActiveBlockTables,
+    #[expect(
+        dead_code,
+        reason = "sequence indexing will be connected to request processing separately"
+    )]
+    prefix_block_index: Option<PrefixBlockIndex>,
 }
 
 impl PagedKvCache {
@@ -339,6 +347,7 @@ impl PagedKvCache {
         model_role: ModelRole,
         device: &Device,
         per_page_token_count: usize,
+        enable_prefix_caching: bool,
         total_size_bytes: usize,
     ) -> Result<Self> {
         let physical_page_pool =
@@ -349,6 +358,9 @@ impl PagedKvCache {
             * physical_page_pool.page_count
             * model_info.kv_cache_bytes_per_token()
             * per_page_token_count;
+        let prefix_block_index = enable_prefix_caching
+            .then(|| PrefixBlockIndex::new(per_page_token_count))
+            .transpose()?;
         log::info!(
             "Created {model_role} model paged KV cache with {} pages per pool and capacity for \
              {total_cached_token_count} cached tokens using {} bytes",
@@ -358,6 +370,7 @@ impl PagedKvCache {
         Ok(Self {
             physical_page_pool,
             active_block_tables: ActiveBlockTables::new(model_info.layer_count),
+            prefix_block_index,
         })
     }
 
@@ -620,14 +633,14 @@ pub(super) fn create_kv_cache(
         )),
         KvCacheType::Paged {
             per_page_token_count,
-            // TODO: Use this setting to enable prefix-aware page reuse.
-            enable_prefix_caching: _,
+            enable_prefix_caching,
         } => Ok(KvCacheBackend::Paged(
             PagedKvCache::new(
                 model.info(),
                 model_role,
                 model.device(),
                 per_page_token_count,
+                enable_prefix_caching,
                 total_size_bytes,
             )
             .with_context(|| {
@@ -698,6 +711,7 @@ mod tests {
             ModelRole::Target,
             &Device::Cpu,
             per_page_token_count,
+            /* enable_prefix_caching */ false,
             total_size_bytes,
         )
     }

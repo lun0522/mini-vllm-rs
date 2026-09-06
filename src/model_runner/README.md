@@ -13,7 +13,7 @@ flowchart LR
         Server["server/mod.rs<br/>tonic service and request queues"]
         Cli["server/cli.rs<br/>Worker arguments and artifact paths"]
         Tokenizer["server/tokenizer.rs<br/>Tokenizer loading and compatibility"]
-        KvCache["server/kv_cache.rs<br/>Engine-owned KV-cache implementations"]
+        KvCache["server/kv_cache/<br/>Engine-owned KV-cache implementations"]
         InferenceWorker["server/inference_worker.rs<br/>Inference thread and model ownership"]
         TextGeneration["server/text_generation.rs<br/>Autoregressive decoding loop"]
     end
@@ -32,13 +32,16 @@ flowchart LR
   process.
 - `server/tokenizer.rs` loads tokenizers and validates that target and draft
   vocabularies use identical token-to-ID mappings.
-- `server/kv_cache.rs` preallocates separate key/value pools for contiguous or
+- [`server/kv_cache/`](server/kv_cache/README.md) preallocates separate key/value pools for contiguous or
   paged storage. Paged mode uses configurable fixed-token-count pages and
   per-layer block tables, and reconstructs contiguous tensors for the existing
   attention operations. Its physical page pool owns tensor storage and free
   page IDs, while its active block tables only map the current sequence to
   those physical pages. Reference counts keep shared pages allocated until
   both active sequences and cached-prefix entries release them.
+- Prefix-enabled paged caches create a prefix-block index. It indexes only
+  complete blocks and includes the preceding block in each identity so equal
+  token blocks from different prompt contexts cannot share incompatible pages.
 - `server/inference_worker.rs` owns the target model, optional draft model,
   tokenizer, device, and corresponding KV caches on its dedicated thread. The
   target cache uses the configured byte budget; the draft cache is sized to
