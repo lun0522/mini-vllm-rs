@@ -1,4 +1,4 @@
-use crate::model_loaders::ModelRole;
+use crate::models::ModelRole;
 use crate::proto::model_config::ModelConfig;
 use anyhow::Context;
 use anyhow::Result;

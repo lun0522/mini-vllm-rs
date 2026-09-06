@@ -1,6 +1,6 @@
 mod main_process;
-mod model_loaders;
 mod model_runner;
+mod models;
 mod proto;
 mod request_handler;
 mod utils;

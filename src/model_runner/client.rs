@@ -1,6 +1,6 @@
-use crate::model_loaders::model_downloader::ModelArtifacts;
 use crate::model_runner::server;
 use crate::model_runner::KvCacheType;
+use crate::models::model_downloader::ModelArtifacts;
 use crate::proto::model_runner::model_runner_command::Command::Shutdown as ShutdownCommand;
 use crate::proto::model_runner::model_runner_service_client::ModelRunnerServiceClient;
 use crate::proto::model_runner::ModelRunnerCommand;

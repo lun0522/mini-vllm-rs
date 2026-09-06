@@ -1,7 +1,7 @@
-use crate::model_loaders::models::quantized_llama::LlamaBackend;
-use crate::model_loaders::models::quantized_qwen2::Qwen2Backend;
-use crate::model_loaders::CausalLanguageModel;
-use crate::model_loaders::ModelInfo;
+use crate::models::backends::quantized_llama::LlamaBackend;
+use crate::models::backends::quantized_qwen2::Qwen2Backend;
+use crate::models::CausalLanguageModel;
+use crate::models::ModelInfo;
 use crate::proto::model_runner::ModelArchitecture;
 use crate::proto::model_runner::ModelMetadata;
 use anyhow::bail;

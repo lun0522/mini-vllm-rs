@@ -1,4 +1,4 @@
-# Model loaders
+# Models
 
 The model-loading code prepares GGUF artifacts, selects an implementation from
 the GGUF architecture metadata, validates tokenizer vocabulary coverage, and
@@ -6,7 +6,7 @@ returns a `LoadedModel` containing reusable model weights and its device.
 
 ## Local Candle model adaptations
 
-The quantized Llama and Qwen2 implementations under `models/` were copied from
+The quantized Llama and Qwen2 implementations under `backends/` were copied from
 Candle 0.11.0 and adapted locally:
 
 - The existing mini-vLLM backend adapters were merged into the corresponding
@@ -39,5 +39,5 @@ External cache ownership separates reusable model state from request state. It
 provides the foundation for cache allocation, paged attention, batching, and
 independent target/draft caches for speculative decoding.
 
-See the model directory's [provenance notice](models/README.md) for the exact
+See the backend directory's [provenance notice](backends/README.md) for the exact
 upstream commit and licensing information.

@@ -1,6 +1,6 @@
+mod backends;
 pub(crate) mod loaded_model;
 pub(crate) mod model_downloader;
-mod models;
 
 use candle_core::DType;
 use candle_core::Tensor;

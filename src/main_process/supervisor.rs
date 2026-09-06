@@ -1,8 +1,8 @@
 use super::cli::MainProcessArgs;
 use super::server::ControlServer;
-use crate::model_loaders::model_downloader::ModelDownloader;
-use crate::model_loaders::ModelRole;
 use crate::model_runner::client::ModelRunnerProcess;
+use crate::models::model_downloader::ModelDownloader;
+use crate::models::ModelRole;
 use crate::request_handler::client::RequestHandlerProcess;
 use anyhow::Context;
 use anyhow::Result;

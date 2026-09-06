@@ -1,4 +1,4 @@
-# Candle model source provenance
+# Model backend source provenance
 
 The model implementations in this directory were initially copied from
 [`huggingface/candle`](https://github.com/huggingface/candle) at the `0.11.0`

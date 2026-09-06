@@ -47,7 +47,7 @@ Status: ✅ done · 🚧 in progress · ⬜ not started · ❌ out of scope
   [Request handler architecture](src/request_handler/README.md) for text
   preprocessing and event-flow details,
   [Model runner architecture](src/model_runner/README.md) for inference
-  request-flow diagrams, and [Model loaders](src/model_loaders/README.md) for
+  request-flow diagrams, and [Models](src/models/README.md) for
   model and cache details.
 
 The main process is a supervisor rather than a serving stage, so there are two

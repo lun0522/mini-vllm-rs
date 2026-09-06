@@ -6,7 +6,7 @@ artifacts, starts the serving processes, and coordinates their shutdown.
 ```mermaid
 flowchart LR
     Cli["cli.rs<br/>Configuration parsing"] --> Supervisor["supervisor.rs<br/>Process orchestration"]
-    Loaders["model_loaders<br/>Artifact download and validation"] --> Supervisor
+    Models["models<br/>Artifact download and validation"] --> Supervisor
     Supervisor -->|"Starts and owns"| Runner["Model runner process"]
     Supervisor -->|"Starts and owns"| Handler["Request handler process"]
     Control["server.rs<br/>Shutdown service"] --> Supervisor
@@ -21,20 +21,20 @@ flowchart LR
   `/tmp/mini-vllm-main-process.sock` by default. The control socket is removed
   when its server is dropped.
 - Model downloading, configuration validation, architecture selection, and
-  device-specific loading are described in [Model loaders](../model_loaders/README.md).
+  device-specific loading are described in [Models](../models/README.md).
 
 Startup follows the serving processes' dependency order:
 
 ```mermaid
 sequenceDiagram
     participant Main as Main process
-    participant Loaders as Model loaders
+    participant Models
     participant Runner as Model runner
     participant Handler as Request handler
     participant Control as Control server
 
-    Main->>Loaders: Download target and optional draft artifacts
-    Loaders-->>Main: GGUF and tokenizer paths
+    Main->>Models: Download target and optional draft artifacts
+    Models-->>Main: GGUF and tokenizer paths
     Main->>Runner: Start with model paths and cache configuration
     Runner-->>Main: Model-runner socket is ready
     Main->>Handler: Start with tokenizer and model-runner socket paths

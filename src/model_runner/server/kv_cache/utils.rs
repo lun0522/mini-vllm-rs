@@ -1,5 +1,5 @@
 use super::LayerCache;
-use crate::model_loaders::ModelInfo;
+use crate::models::ModelInfo;
 use anyhow::bail;
 use anyhow::Result;
 use candle_core::Device;

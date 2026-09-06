@@ -13,9 +13,9 @@
 //! - [Model Card](https://huggingface.co/Qwen/Qwen2)
 //!
 
-use crate::model_loaders::CausalLanguageModel;
-use crate::model_loaders::KvCache;
-use crate::model_loaders::ModelInfo;
+use crate::models::CausalLanguageModel;
+use crate::models::KvCache;
+use crate::models::ModelInfo;
 use anyhow::Result as AnyhowResult;
 use candle::{
     quantized::{gguf_file, QMatMul},

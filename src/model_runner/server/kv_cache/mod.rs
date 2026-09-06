@@ -1,10 +1,10 @@
 use self::contiguous_cache::ContiguousKvCache;
 use self::paged_cache::PagedKvCache;
-use crate::model_loaders::loaded_model::LoadedModel;
-use crate::model_loaders::CachedKeyValue;
-use crate::model_loaders::KvCache;
-use crate::model_loaders::ModelRole;
 use crate::model_runner::KvCacheType;
+use crate::models::loaded_model::LoadedModel;
+use crate::models::CachedKeyValue;
+use crate::models::KvCache;
+use crate::models::ModelRole;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::Tensor;

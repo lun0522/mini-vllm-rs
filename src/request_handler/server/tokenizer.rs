@@ -1,4 +1,4 @@
-use crate::model_loaders::ModelRole;
+use crate::models::ModelRole;
 use crate::proto::model_runner::GenerateTextRequest;
 use crate::proto::model_runner::GetModelMetadataResponse;
 use crate::proto::model_runner::ModelArchitecture;

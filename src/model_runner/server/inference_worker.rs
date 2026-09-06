@@ -1,7 +1,7 @@
-use crate::model_loaders::loaded_model::LoadedModel;
-use crate::model_loaders::ModelInfo;
-use crate::model_loaders::ModelRole;
 use crate::model_runner::KvCacheType;
+use crate::models::loaded_model::LoadedModel;
+use crate::models::ModelInfo;
+use crate::models::ModelRole;
 use crate::proto::model_runner::generate_text_event;
 use crate::proto::model_runner::GenerateTextEvent;
 use crate::proto::model_runner::GenerateTextRequest;

@@ -1,5 +1,5 @@
-use crate::model_loaders::loaded_model::LoadedModel;
 use crate::model_runner::KvCacheType;
+use crate::models::loaded_model::LoadedModel;
 use crate::proto::model_runner::model_runner_command;
 use crate::proto::model_runner::model_runner_service_server::ModelRunnerService;
 use crate::proto::model_runner::model_runner_service_server::ModelRunnerServiceServer;
