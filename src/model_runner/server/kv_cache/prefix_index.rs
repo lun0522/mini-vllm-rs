@@ -1,4 +1,4 @@
-use super::PageId;
+use super::paged_cache::PageId;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
