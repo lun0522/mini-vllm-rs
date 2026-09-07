@@ -1,6 +1,5 @@
 use super::prefix_index::PrefixBlockCursor;
 use super::prefix_index::PrefixBlockIndex;
-use super::prefix_index::PrefixBlockMatch;
 use super::utils::allocate_pool;
 use super::utils::pool_page;
 use super::utils::validate_cache_append;
@@ -17,13 +16,14 @@ use candle_core::Device;
 use candle_core::Tensor;
 use thousands::Separable;
 
+/// Maps one model layer's logical token order to pages in `PhysicalPagePool`.
 #[derive(Default)]
-struct PagedLayerCache {
+struct LayerBlockTable {
     page_ids: Vec<PageId>,
     token_count: usize,
 }
 
-impl LayerCache for PagedLayerCache {
+impl LayerCache for LayerBlockTable {
     fn cached_token_count(&self) -> usize {
         self.token_count
     }
@@ -38,43 +38,100 @@ pub(super) struct PageId(pub(super) usize);
 /// sequence; they do not own the underlying key/value tensor storage. Resetting the tables
 /// releases only their references, so a future prefix-cache entry can keep shared pages resident.
 struct ActiveBlockTables {
-    layer_caches: Vec<PagedLayerCache>,
-    prefix_block_cursor: Box<PrefixBlockCursor>,
+    layer_block_tables: Vec<LayerBlockTable>,
 }
 
 impl ActiveBlockTables {
     fn new(layer_count: usize) -> Self {
         Self {
-            layer_caches: (0..layer_count)
-                .map(|_| PagedLayerCache::default())
+            layer_block_tables: (0..layer_count)
+                .map(|_| LayerBlockTable::default())
                 .collect(),
-            prefix_block_cursor: Box::new(PrefixBlockCursor::at_root()),
         }
     }
 
     fn is_populated(&self) -> bool {
-        self.layer_caches
-            .iter()
-            .any(|layer_cache| layer_cache.token_count != 0 || !layer_cache.page_ids.is_empty())
+        self.layer_block_tables.iter().any(|layer_block_table| {
+            layer_block_table.token_count != 0 || !layer_block_table.page_ids.is_empty()
+        })
     }
 
     fn cached_token_count(&self) -> usize {
-        self.layer_caches
+        self.layer_block_tables
             .first()
             .map_or(0, LayerCache::cached_token_count)
     }
 
-    fn attach_cached_prefix(&mut self, prefix_match: PrefixBlockMatch) {
-        let matched_token_count = prefix_match.cursor.matched_token_count();
-        for (layer_cache, page_ids) in self
-            .layer_caches
-            .iter_mut()
-            .zip(prefix_match.page_ids_by_layer)
+    fn layer_count(&self) -> usize {
+        self.layer_block_tables.len()
+    }
+
+    fn layer_block_table(&self, layer_index: usize) -> Option<&LayerBlockTable> {
+        self.layer_block_tables.get(layer_index)
+    }
+
+    fn layer_cached_token_count(&self, layer_index: usize) -> Option<usize> {
+        self.layer_block_table(layer_index)
+            .map(LayerCache::cached_token_count)
+    }
+
+    fn validate_truncation(&self, target_token_count: usize) -> Result<()> {
+        validate_truncation(&self.layer_block_tables, target_token_count)
+    }
+
+    fn append_page(&mut self, layer_index: usize, page_id: PageId) {
+        self.layer_block_tables[layer_index].page_ids.push(page_id);
+    }
+
+    fn last_page_id(&self, layer_index: usize) -> Option<PageId> {
+        self.layer_block_tables[layer_index]
+            .page_ids
+            .last()
+            .copied()
+    }
+
+    fn record_appended_tokens(&mut self, layer_index: usize, token_count: usize) {
+        self.layer_block_tables[layer_index].token_count += token_count;
+    }
+
+    fn page_ids_by_layer(&self) -> Vec<Vec<PageId>> {
+        self.layer_block_tables
+            .iter()
+            .map(|layer_block_table| layer_block_table.page_ids.clone())
+            .collect()
+    }
+
+    fn attach_cached_prefix(
+        &mut self,
+        page_ids_by_layer: Vec<Vec<PageId>>,
+        matched_token_count: usize,
+    ) {
+        for (layer_block_table, page_ids) in
+            self.layer_block_tables.iter_mut().zip(page_ids_by_layer)
         {
-            layer_cache.page_ids = page_ids;
-            layer_cache.token_count = matched_token_count;
+            layer_block_table.page_ids = page_ids;
+            layer_block_table.token_count = matched_token_count;
         }
-        *self.prefix_block_cursor = prefix_match.cursor;
+    }
+
+    /// Truncates every virtual table and returns the physical pages it no longer references.
+    fn truncate(&mut self, retained_page_count: usize, target_token_count: usize) -> Vec<PageId> {
+        let mut released_page_ids = Vec::new();
+        for layer_block_table in &mut self.layer_block_tables {
+            released_page_ids.extend(layer_block_table.page_ids.split_off(retained_page_count));
+            layer_block_table.token_count = target_token_count;
+        }
+        released_page_ids
+    }
+
+    /// Clears every virtual table and returns all physical pages it referenced.
+    fn reset(&mut self) -> Vec<PageId> {
+        let mut released_page_ids = Vec::new();
+        for layer_block_table in &mut self.layer_block_tables {
+            released_page_ids.extend(std::mem::take(&mut layer_block_table.page_ids));
+            layer_block_table.token_count = 0;
+        }
+        released_page_ids
     }
 }
 
@@ -253,12 +310,12 @@ impl PhysicalPagePool {
 /// concatenation so unwritten page capacity never reaches the attention calculation.
 fn reconstruct_contiguous_tensor(
     pool: &Tensor,
-    layer_cache: &PagedLayerCache,
+    layer_block_table: &LayerBlockTable,
     per_page_token_count: usize,
 ) -> Result<Tensor> {
-    let mut remaining_token_count = layer_cache.token_count;
-    let mut page_slices = Vec::with_capacity(layer_cache.page_ids.len());
-    for &page_id in &layer_cache.page_ids {
+    let mut remaining_token_count = layer_block_table.token_count;
+    let mut page_slices = Vec::with_capacity(layer_block_table.page_ids.len());
+    for &page_id in &layer_block_table.page_ids {
         let slice_token_count = per_page_token_count.min(remaining_token_count);
         page_slices.push(pool_page(pool, page_id.0)?.narrow(
             TOKEN_DIMENSION,
@@ -278,12 +335,16 @@ fn reconstruct_contiguous_tensor(
     Ok(materialized.contiguous()?)
 }
 
-/// Stores KV caches in reusable physical pages addressed through active per-layer block tables.
+/// Orchestrates physical KV pages, active virtual block tables, and reusable prefix metadata.
 pub(in crate::model_runner::server) struct PagedKvCache {
     physical_page_pool: PhysicalPagePool,
     active_block_tables: ActiveBlockTables,
     prefix_block_index: Option<PrefixBlockIndex>,
+    prefix_block_cursor: Box<PrefixBlockCursor>,
 }
+
+// TODO: After allocation-pressure eviction is implemented, move `PhysicalPagePool` and
+// `ActiveBlockTables` into dedicated files while keeping `PagedKvCache` as their orchestrator.
 
 impl PagedKvCache {
     pub(super) fn new(
@@ -315,6 +376,7 @@ impl PagedKvCache {
             physical_page_pool,
             active_block_tables: ActiveBlockTables::new(model_info.layer_count),
             prefix_block_index,
+            prefix_block_cursor: Box::new(PrefixBlockCursor::at_root()),
         })
     }
 
@@ -327,18 +389,18 @@ impl PagedKvCache {
     ) -> Result<()> {
         let mut input_offset = 0;
         while input_offset < appending_token_count {
-            let page_offset = self.active_block_tables.layer_caches[layer_index].token_count
+            let page_offset = self
+                .active_block_tables
+                .layer_cached_token_count(layer_index)
+                .context("KV-cache layer is missing from the active block tables")?
                 % self.physical_page_pool.per_page_token_count;
             if page_offset == 0 {
                 let page_id = self.physical_page_pool.allocate_page()?;
-                self.active_block_tables.layer_caches[layer_index]
-                    .page_ids
-                    .push(page_id);
+                self.active_block_tables.append_page(layer_index, page_id);
             }
-            let page_id = self.active_block_tables.layer_caches[layer_index]
-                .page_ids
-                .last()
-                .copied()
+            let page_id = self
+                .active_block_tables
+                .last_page_id(layer_index)
                 .context("partial KV-cache page is missing from the block table")?;
             let written_token_count = (self.physical_page_pool.per_page_token_count - page_offset)
                 .min(appending_token_count - input_offset);
@@ -350,23 +412,27 @@ impl PagedKvCache {
                 input_offset,
                 written_token_count,
             )?;
-            self.active_block_tables.layer_caches[layer_index].token_count += written_token_count;
+            self.active_block_tables
+                .record_appended_tokens(layer_index, written_token_count);
             input_offset += written_token_count;
         }
         Ok(())
     }
 
     fn reconstruct_full_cache(&self, layer_index: usize) -> Result<CachedKeyValue> {
-        let layer_cache = &self.active_block_tables.layer_caches[layer_index];
+        let layer_block_table = self
+            .active_block_tables
+            .layer_block_table(layer_index)
+            .context("KV-cache layer is missing from the active block tables")?;
         Ok(CachedKeyValue {
             key: reconstruct_contiguous_tensor(
                 &self.physical_page_pool.key_pool,
-                layer_cache,
+                layer_block_table,
                 self.physical_page_pool.per_page_token_count,
             )?,
             value: reconstruct_contiguous_tensor(
                 &self.physical_page_pool.value_pool,
-                layer_cache,
+                layer_block_table,
                 self.physical_page_pool.per_page_token_count,
             )?,
         })
@@ -384,7 +450,9 @@ impl PagedKvCache {
         let matched_token_count = prefix_match.cursor.matched_token_count();
         self.physical_page_pool
             .retain_allocated_pages_or_rollback(prefix_match.page_ids_by_layer.iter().flatten())?;
-        self.active_block_tables.attach_cached_prefix(prefix_match);
+        self.active_block_tables
+            .attach_cached_prefix(prefix_match.page_ids_by_layer, matched_token_count);
+        *self.prefix_block_cursor = prefix_match.cursor;
         Ok(matched_token_count)
     }
 
@@ -394,20 +462,15 @@ impl PagedKvCache {
             .get(..cached_token_count)
             .context("active KV cache contains more tokens than the completed request")?;
         if let Some(prefix_block_index) = self.prefix_block_index.as_mut() {
-            let cached_page_ids_by_layer: Vec<_> = self
-                .active_block_tables
-                .layer_caches
-                .iter()
-                .map(|layer_cache| layer_cache.page_ids.clone())
-                .collect();
+            let cached_page_ids_by_layer = self.active_block_tables.page_ids_by_layer();
             let indexing_result = prefix_block_index.index_cached_sequence(
-                &self.active_block_tables.prefix_block_cursor,
+                &self.prefix_block_cursor,
                 cached_token_ids,
                 &cached_page_ids_by_layer,
             );
             // This cursor describes only the request being finalized. Reset it so the next
             // request cannot accidentally resume indexing from the previous restored prefix.
-            *self.active_block_tables.prefix_block_cursor = PrefixBlockCursor::at_root();
+            *self.prefix_block_cursor = PrefixBlockCursor::at_root();
             let newly_indexed_pages = indexing_result?;
             self.physical_page_pool
                 .retain_allocated_pages_or_rollback(newly_indexed_pages.page_ids.iter())?;
@@ -416,30 +479,26 @@ impl PagedKvCache {
     }
 
     pub(super) fn truncate(&mut self, target_token_count: usize) -> Result<()> {
-        validate_truncation(&self.active_block_tables.layer_caches, target_token_count)?;
+        self.active_block_tables
+            .validate_truncation(target_token_count)?;
         let retained_page_count =
             target_token_count.div_ceil(self.physical_page_pool.per_page_token_count);
-        for layer_cache in &mut self.active_block_tables.layer_caches {
-            let released_page_ids = layer_cache.page_ids.split_off(retained_page_count);
-            layer_cache.token_count = target_token_count;
-            self.physical_page_pool
-                .release_allocated_pages(released_page_ids)?;
-        }
-        Ok(())
+        let released_page_ids = self
+            .active_block_tables
+            .truncate(retained_page_count, target_token_count);
+        self.physical_page_pool
+            .release_allocated_pages(released_page_ids)
     }
 
     pub(super) fn reset_active_block_tables(&mut self) -> Result<()> {
-        *self.active_block_tables.prefix_block_cursor = PrefixBlockCursor::at_root();
-        for layer_cache in &mut self.active_block_tables.layer_caches {
-            let page_ids = std::mem::take(&mut layer_cache.page_ids);
-            layer_cache.token_count = 0;
-            self.physical_page_pool.release_allocated_pages(page_ids)?;
-        }
-        Ok(())
+        *self.prefix_block_cursor = PrefixBlockCursor::at_root();
+        let released_page_ids = self.active_block_tables.reset();
+        self.physical_page_pool
+            .release_allocated_pages(released_page_ids)
     }
 
     pub(super) fn token_capacity(&self) -> usize {
-        self.physical_page_pool.page_count / self.active_block_tables.layer_caches.len()
+        self.physical_page_pool.page_count / self.active_block_tables.layer_count()
             * self.physical_page_pool.per_page_token_count
     }
 
@@ -450,10 +509,11 @@ impl PagedKvCache {
         key: &Tensor,
         value: &Tensor,
     ) -> Result<CachedKeyValue> {
-        let Some(layer_cache) = self.active_block_tables.layer_caches.get(layer_index) else {
+        let Some(layer_block_table) = self.active_block_tables.layer_block_table(layer_index)
+        else {
             bail!("invalid KV-cache layer {layer_index}");
         };
-        let current_token_count = layer_cache.token_count;
+        let current_token_count = layer_block_table.token_count;
         let appending_token_count =
             validate_cache_append(current_token_count, layer_index, start_position, key, value)?;
         self.physical_page_pool
@@ -530,9 +590,9 @@ mod tests {
     fn retain_active_pages_for_prefix(cache: &mut PagedKvCache) -> Result<Vec<Vec<PageId>>> {
         let cached_page_ids_by_layer: Vec<_> = cache
             .active_block_tables
-            .layer_caches
+            .layer_block_tables
             .iter()
-            .map(|layer_cache| layer_cache.page_ids.clone())
+            .map(|layer_block_table| layer_block_table.page_ids.clone())
             .collect();
         for &page_id in cached_page_ids_by_layer.iter().flatten() {
             cache.physical_page_pool.retain_allocated_page(page_id)?;
@@ -558,7 +618,9 @@ mod tests {
             let value = cache_tensor(100, token_count)?;
             let cached = cache.append(0, 0, &key, &value)?;
             assert_eq!(
-                cache.active_block_tables.layer_caches[0].page_ids.len(),
+                cache.active_block_tables.layer_block_tables[0]
+                    .page_ids
+                    .len(),
                 expected_page_count
             );
             assert_eq!(
@@ -634,7 +696,12 @@ mod tests {
         cache.append(0, 0, &cache_tensor(0, 15)?, &cache_tensor(100, 15)?)?;
         let cached = cache.append(0, 15, &cache_tensor(15, 3)?, &cache_tensor(115, 3)?)?;
 
-        assert_eq!(cache.active_block_tables.layer_caches[0].page_ids.len(), 2);
+        assert_eq!(
+            cache.active_block_tables.layer_block_tables[0]
+                .page_ids
+                .len(),
+            2
+        );
         assert_eq!(tensor_values(&cached.key)?, (0..18).collect::<Vec<_>>());
         assert_eq!(
             tensor_values(&cached.value)?,
@@ -652,8 +719,8 @@ mod tests {
         cache.append(1, 0, &key, &value)?;
 
         assert_ne!(
-            cache.active_block_tables.layer_caches[0].page_ids,
-            cache.active_block_tables.layer_caches[1].page_ids
+            cache.active_block_tables.layer_block_tables[0].page_ids,
+            cache.active_block_tables.layer_block_tables[1].page_ids
         );
         Ok(())
     }
@@ -665,12 +732,16 @@ mod tests {
         let value = cache_tensor(100, 17)?;
         cache.append(0, 0, &key, &value)?;
         let free_page_count = cache.physical_page_pool.free_page_ids.len();
-        let mut original_page_ids = cache.active_block_tables.layer_caches[0].page_ids.clone();
+        let mut original_page_ids = cache.active_block_tables.layer_block_tables[0]
+            .page_ids
+            .clone();
 
         cache.reset_active_block_tables()?;
         cache.append(0, 0, &key, &value)?;
 
-        let mut reused_page_ids = cache.active_block_tables.layer_caches[0].page_ids.clone();
+        let mut reused_page_ids = cache.active_block_tables.layer_block_tables[0]
+            .page_ids
+            .clone();
         original_page_ids.sort_unstable();
         reused_page_ids.sort_unstable();
         assert_eq!(
@@ -700,14 +771,14 @@ mod tests {
         cache.reset_active_block_tables()?;
 
         assert_eq!(cache.restore_cached_prefix(&[1, 2, 3, 4, 5])?, 4);
-        for (layer_cache, expected_page_ids) in cache
+        for (layer_block_table, expected_page_ids) in cache
             .active_block_tables
-            .layer_caches
+            .layer_block_tables
             .iter()
             .zip(&cached_page_ids_by_layer)
         {
-            assert_eq!(&layer_cache.page_ids, expected_page_ids);
-            assert_eq!(layer_cache.token_count, 4);
+            assert_eq!(&layer_block_table.page_ids, expected_page_ids);
+            assert_eq!(layer_block_table.token_count, 4);
             for page_id in expected_page_ids {
                 assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 2);
             }
@@ -738,10 +809,13 @@ mod tests {
 
         assert_eq!(cache.restore_cached_prefix(&[1, 2, 8, 9])?, 2);
         assert_eq!(
-            cache.active_block_tables.layer_caches[0].page_ids,
+            cache.active_block_tables.layer_block_tables[0].page_ids,
             cached_page_ids_by_layer[0][..1]
         );
-        assert_eq!(cache.active_block_tables.layer_caches[0].token_count, 2);
+        assert_eq!(
+            cache.active_block_tables.layer_block_tables[0].token_count,
+            2
+        );
         assert_eq!(
             cache.physical_page_pool.reference_counts[cached_page_ids_by_layer[0][0].0],
             2
@@ -791,9 +865,9 @@ mod tests {
         }
         let active_page_ids_by_layer: Vec<_> = cache
             .active_block_tables
-            .layer_caches
+            .layer_block_tables
             .iter()
-            .map(|layer_cache| layer_cache.page_ids.clone())
+            .map(|layer_block_table| layer_block_table.page_ids.clone())
             .collect();
 
         // The final token ID has not been processed by the model and is not part of the active
@@ -834,11 +908,15 @@ mod tests {
     fn does_not_retain_recomputed_pages_for_existing_prefix_blocks() -> Result<()> {
         let mut cache = paged_cache_with_prefix_caching(1, 2, 4, true)?;
         cache.append(0, 0, &cache_tensor(0, 4)?, &cache_tensor(100, 4)?)?;
-        let indexed_page_ids = cache.active_block_tables.layer_caches[0].page_ids.clone();
+        let indexed_page_ids = cache.active_block_tables.layer_block_tables[0]
+            .page_ids
+            .clone();
         finish_request(&mut cache, &[1, 2, 3, 4])?;
 
         cache.append(0, 0, &cache_tensor(0, 4)?, &cache_tensor(100, 4)?)?;
-        let recomputed_page_ids = cache.active_block_tables.layer_caches[0].page_ids.clone();
+        let recomputed_page_ids = cache.active_block_tables.layer_block_tables[0]
+            .page_ids
+            .clone();
         finish_request(&mut cache, &[1, 2, 3, 4])?;
 
         for page_id in &indexed_page_ids {
@@ -863,12 +941,14 @@ mod tests {
     fn resumes_indexing_after_a_restored_prefix() -> Result<()> {
         let mut cache = paged_cache_with_prefix_caching(1, 2, 4, true)?;
         cache.append(0, 0, &cache_tensor(0, 4)?, &cache_tensor(100, 4)?)?;
-        let prefix_page_ids = cache.active_block_tables.layer_caches[0].page_ids.clone();
+        let prefix_page_ids = cache.active_block_tables.layer_block_tables[0]
+            .page_ids
+            .clone();
         finish_request(&mut cache, &[1, 2, 3, 4])?;
 
         assert_eq!(cache.restore_cached_prefix(&[1, 2, 3, 4, 5, 6])?, 4);
         cache.append(0, 4, &cache_tensor(4, 2)?, &cache_tensor(104, 2)?)?;
-        let suffix_page_id = cache.active_block_tables.layer_caches[0].page_ids[2];
+        let suffix_page_id = cache.active_block_tables.layer_block_tables[0].page_ids[2];
         finish_request(&mut cache, &[1, 2, 3, 4, 5, 6])?;
 
         let prefix_match = cache
@@ -907,9 +987,9 @@ mod tests {
         );
         assert!(cache
             .active_block_tables
-            .layer_caches
+            .layer_block_tables
             .iter()
-            .all(|layer_cache| layer_cache.page_ids.is_empty()));
+            .all(|layer_block_table| layer_block_table.page_ids.is_empty()));
         Ok(())
     }
 
@@ -917,7 +997,7 @@ mod tests {
     fn retains_a_cached_page_until_its_prefix_entry_is_evicted() -> Result<()> {
         let mut cache = paged_cache(1, 2, 1)?;
         cache.append(0, 0, &cache_tensor(0, 2)?, &cache_tensor(100, 2)?)?;
-        let page_id = cache.active_block_tables.layer_caches[0].page_ids[0];
+        let page_id = cache.active_block_tables.layer_block_tables[0].page_ids[0];
 
         cache.physical_page_pool.retain_allocated_page(page_id)?;
         assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 2);
@@ -952,7 +1032,7 @@ mod tests {
     fn rejects_mutating_a_shared_physical_page() -> Result<()> {
         let mut cache = paged_cache(1, 2, 1)?;
         cache.append(0, 0, &cache_tensor(0, 2)?, &cache_tensor(100, 2)?)?;
-        let page_id = cache.active_block_tables.layer_caches[0].page_ids[0];
+        let page_id = cache.active_block_tables.layer_block_tables[0].page_ids[0];
         cache.physical_page_pool.retain_allocated_page(page_id)?;
         cache.truncate(1)?;
 
@@ -996,7 +1076,10 @@ mod tests {
             cache.physical_page_pool.free_page_ids.len(),
             cache.physical_page_pool.page_count
         );
-        assert_eq!(cache.active_block_tables.layer_caches[0].token_count, 0);
+        assert_eq!(
+            cache.active_block_tables.layer_block_tables[0].token_count,
+            0
+        );
         Ok(())
     }
 }

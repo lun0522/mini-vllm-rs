@@ -24,8 +24,9 @@ Status: ✅ done · 🚧 in progress · ⬜ not started · ❌ out of scope
     rollback.
   - ❌ Randomized sampling with distribution-preserving probabilistic draft
     verification.
-- ⬜ Prefix caching.
-  - ⬜ Reuse KV-cache pages for prompt prefixes shared across requests.
+- 🚧 Prefix caching.
+  - ✅ Reuse complete KV-cache pages for prefixes shared across requests.
+  - ⬜ Evict inactive cached prefixes when physical pages are exhausted.
 - ⬜ Continuous batching.
   - ⬜ Per-request state with dynamic admission, scheduling, and cancellation.
   - ⬜ Batched prefill and decode with chunked prefill support.
@@ -135,8 +136,9 @@ Arguments:
 - `--kv-cache-type <type>` selects `contiguous`, `paged[:tokens-per-page]`, or
   `paged-prefix[:tokens-per-page]` KV-cache storage and defaults to
   `contiguous`. Paged caches contain 16 tokens per page when the count is
-  omitted. The `paged-prefix` value currently enables configuration plumbing;
-  prefix reuse will be added separately.
+  omitted. `paged-prefix` retains and restores complete shared prefixes;
+  requests currently fail if retained prefixes exhaust the physical page pool
+  because allocation-pressure eviction is not connected yet.
 - `--target-kv-cache-size-bytes <bytes>` sets the target model's total KV-cache
   allocation and defaults to 2 GiB. A draft model is allocated enough KV-cache
   memory to hold the same number of tokens.

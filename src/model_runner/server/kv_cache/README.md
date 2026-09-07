@@ -7,13 +7,21 @@ presenting the narrow `KvCache` interface needed by model `forward` calls.
 The contiguous backend preallocates one key pool and one value pool and tracks
 the cached token count for every model layer.
 
-The paged backend separates two kinds of state:
+`PagedKvCache` orchestrates three kinds of state:
 
 - `PhysicalPagePool` owns the key/value tensor storage, page reference counts,
   and free physical page IDs.
-- `ActiveBlockTables` maps the sequence currently being processed to physical
-  pages. Resetting these tables releases the active sequence's references but
-  does not release references held by the prefix index.
+- `ActiveBlockTables` is the virtual view of the sequence currently being
+  processed. Each `LayerBlockTable` maps logical token order to physical page
+  IDs and records its cached token count; it never accesses tensors or manages
+  reference counts.
+- `PrefixBlockIndex`, when enabled, maps reusable token blocks to per-layer
+  physical-page bundles. It owns no tensors and changes no page references.
+
+`PagedKvCache` is the only component that coordinates these structures. It
+retains or releases pages through `PhysicalPagePool`, installs or removes their
+virtual mappings through `ActiveBlockTables`, and asks `PrefixBlockIndex` which
+page bundles are reusable.
 
 A physical page returns to the free list only when its final active or indexed
 reference is released. Complete shared pages are immutable.
@@ -28,22 +36,20 @@ model layer; it also avoids partial-page sharing.
 
 ```mermaid
 flowchart TD
-    Start[Create paged KV cache] --> New["PrefixBlockIndex::new(block_size)"]
-    New --> Request[Receive tokenized request]
-    Request --> Find["find_longest_cached_prefix(prompt_prefix)"]
-    Find --> Restore["restore_cached_prefix(prompt_prefix)"]
-    Restore --> Work[Prefill unmatched tokens and generate]
-    Work -->|Request succeeds| Index["index_cached_sequence(cursor, cached_token_ids,<br/>cached_page_ids_by_layer)"]
-    Work -->|Request fails or is cancelled| Clear[Clear active KV caches]
-    Clear --> Request
-    Work -->|Another physical page is needed| Available{Free page available?}
-    Available -->|Yes| Work
-    Available -->|No| Evict["evict_least_recently_used_leaf()"]
-    Evict --> Release["Release returned physical-page references (planned)"]
-    Release --> Available
-    Index --> Retain[Retain newly indexed complete pages]
-    Retain --> Reset[Reset active block tables]
+    Request[Receive tokenized request] --> Restore["PagedKvCache::restore_cached_prefix(prompt_prefix)"]
+    Restore --> Find["PrefixBlockIndex::find_longest_cached_prefix"]
+    Find --> RetainMatch["PhysicalPagePool retains matched pages"]
+    RetainMatch --> Attach["ActiveBlockTables installs virtual mappings"]
+    Attach --> Work[Prefill unmatched tokens and generate]
+    Work -->|Request succeeds| Index["PrefixBlockIndex::index_cached_sequence"]
+    Index --> RetainNew["PhysicalPagePool retains newly indexed complete pages"]
+    RetainNew --> Reset["Reset virtual mappings and release active references"]
+    Work -->|Request fails or is cancelled| Reset
+    Restore -->|Restoration fails| Reset
     Reset --> Request
+
+    Work -. "No free physical page<br/>(eviction not connected yet)" .-> Fail[Return allocation error]
+    Fail --> Reset
 ```
 
 - Only complete immutable blocks are indexed; a final incomplete block is
@@ -55,11 +61,12 @@ flowchart TD
 - Tokens passed to `index_cached_sequence` must have KV values in every model
   layer. A newly sampled token that has not gone through a model forward pass
   must not be included.
-- `evict_least_recently_used_leaf` removes one least-recently-used leaf per call,
-  preserving the parent context of remaining blocks. A parent becomes eligible
-  after its final child is removed; `Ok(None)` means the index is empty.
 - Successful requests retain newly indexed blocks before releasing their active
-  page references. Releasing evicted blocks is still pending.
+  page references. Failed and cancelled requests release only active
+  references, so previously indexed prefixes remain reusable.
+- Allocation currently fails when no free physical page remains. The prefix
+  index can select a least-recently-used leaf, but releasing its page references
+  and retrying allocation are not connected yet.
 
 ## Prefix-block index example
 
@@ -71,9 +78,9 @@ Original prompt        Generated text
 [1, 2] [3, 4]          [5, 6] [7]
 ```
 
-Only the three complete blocks are indexed. The incomplete `[7]` block remains
-active but is not reusable yet. Assume a two-layer model stored the complete
-blocks in these physical pages:
+Only the three complete blocks are indexed. The incomplete `[7]` block is not
+reusable and is released when the active block tables are reset. Assume a
+two-layer model stored the complete blocks in these physical pages:
 
 | Token block | Layer 0 | Layer 1 |
 | --- | --- | --- |
@@ -158,13 +165,12 @@ PrefixBlockMatch {
     [Page 10, Page 11],
     [Page 20, Page 21],
   ],
+  cursor: Block 1 after 4 matched tokens,
 }
 ```
 
-Each layer contains two page IDs, so the one-block-per-page invariant tells the
-caller that two prefix blocks matched. An empty outer list means no block
-matched.
-
-`PagedKvCache::attach_longest_cached_prefix` retains these physical pages and
-installs them into the active block tables. Request processing can later use its
-returned token count to prefill only the unmatched suffix.
+The cursor records the final matched block and the four-token prefill start
+position. `PagedKvCache::restore_cached_prefix` retains these physical pages,
+installs them into the active block tables, saves the cursor for completion
+indexing, and returns the token count so request processing prefills only the
+unmatched suffix. A match at the root has no pages and a zero-token cursor.

@@ -12,7 +12,6 @@ flowchart LR
     subgraph Worker[Model runner process]
         Server["server/mod.rs<br/>tonic service and request queues"]
         Cli["server/cli.rs<br/>Worker arguments and artifact paths"]
-        Tokenizer["server/tokenizer.rs<br/>Tokenizer loading and compatibility"]
         KvCache["server/kv_cache/<br/>Engine-owned KV-cache implementations"]
         InferenceWorker["server/inference_worker.rs<br/>Inference thread and model ownership"]
         TextGeneration["server/text_generation.rs<br/>Autoregressive decoding loop"]
@@ -20,7 +19,6 @@ flowchart LR
 
     Client -->|"Spawns with local paths and socket"| Cli
     Cli --> Server
-    InferenceWorker --> Tokenizer
     InferenceWorker --> KvCache
     Server -->|"Bounded request channel"| InferenceWorker
     InferenceWorker --> TextGeneration
@@ -30,8 +28,6 @@ flowchart LR
   sends the shutdown command.
 - `server/cli.rs` receives target and optional draft GGUF paths from the main
   process.
-- `server/tokenizer.rs` loads tokenizers and validates that target and draft
-  vocabularies use identical token-to-ID mappings.
 - [`server/kv_cache/`](server/kv_cache/README.md) preallocates separate key/value pools for contiguous or
   paged storage. Paged mode uses configurable fixed-token-count pages and
   per-layer block tables, and reconstructs contiguous tensors for the existing
@@ -43,14 +39,15 @@ flowchart LR
   complete blocks and includes the preceding block in each identity so equal
   token blocks from different prompt contexts cannot share incompatible pages.
 - `server/inference_worker.rs` owns the target model, optional draft model,
-  tokenizer, device, and corresponding KV caches on its dedicated thread. The
+  device, and corresponding KV caches on its dedicated thread. The
   target cache uses the configured byte budget; the draft cache is sized to
   hold the same number of tokens.
 - `server/text_generation.rs` performs prompt prefill, ordinary greedy decode,
   or speculative decode using draft proposals, batched target verification,
   cache rollback, and request-level acceptance statistics.
-- When a draft model is configured, the worker validates its tokenizer against
-  the target tokenizer and then retains only the target tokenizer.
+- Tokenization, tokenizer compatibility checks, and incremental decoding belong
+  to the request-handler process. The model runner receives and returns token
+  IDs.
 - The worker binds its socket after loading the model, so the socket signals
   readiness.
 - `client.rs` manages the worker lifecycle; it does not forward inference
@@ -72,6 +69,7 @@ sequenceDiagram
     Caller->>Handler: GenerateText request
     Handler->>Rpc: Forward GenerateText over tonic/UDS
     Rpc->>Worker: Queue InferenceRequest
+    Worker->>Worker: Restore each model's longest cached prompt prefix
     Worker->>Decode: Generate text with loaded model(s)
     alt Draft model configured
         Decode->>Target: Prefill through second-to-last prompt token
@@ -98,6 +96,7 @@ sequenceDiagram
         Handler-->>Caller: Proxy text event
     end
     Decode-->>Worker: Return TextGenerationStats
+    Worker->>Worker: Index complete cached blocks and release active references
     Worker-->>Rpc: Queue GenerateTextEvent::Stats
     Rpc-->>Handler: Stream final statistics
     Handler-->>Caller: Proxy final statistics
@@ -105,11 +104,13 @@ sequenceDiagram
 
 - `server/mod.rs` receives tonic requests and queues them on a bounded channel.
 - `inference_worker.rs` owns the loaded model and processes requests on its
-  dedicated thread, clearing its reusable caches before each request.
+  dedicated thread. It restores reusable prefixes before generation, indexes
+  complete cached blocks after success, and releases active references after
+  either success or failure.
 - `inference_worker.rs` delegates decoding to `text_generation.rs`.
-- `text_generation.rs` tokenizes prompts, samples and decodes tokens, checks
-  cancellation and stop tokens, and records prefill, decode, and speculative
-  acceptance statistics.
+- `text_generation.rs` runs prefill and decode over token IDs, samples tokens,
+  checks cancellation and stop tokens, and records prefill, decode, and
+  speculative acceptance statistics.
 - Text fragments stream immediately unless `stream_output` is false, in which
   case they are buffered.
 - A successful response ends with a `TextGenerationStats` event.

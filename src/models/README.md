@@ -26,7 +26,9 @@ Candle 0.11.0 and adapted locally:
   without depending on architecture-specific model internals.
 - Contiguous and paged caches both preallocate separate key and value pools from
   a configured total byte budget. Paged caches use a configurable number of
-  tokens per page and maintain a block table for each layer.
+  tokens per page and maintain a block table for each layer. Their physical
+  storage, virtual block tables, and reusable-prefix index are described in the
+  [KV-cache architecture](../model_runner/server/kv_cache/README.md).
 - Paged caches reconstruct contiguous tensors before calling Candle's existing
   attention operations.
 - Model backends provide logits for either the final input position or every
