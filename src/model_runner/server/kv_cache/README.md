@@ -31,7 +31,7 @@ flowchart TD
     Start[Create paged KV cache] --> New["PrefixBlockIndex::new(block_size)"]
     New --> Request[Receive tokenized request]
     Request --> Find["find_longest_cached_prefix(input_token_ids)"]
-    Find --> Attach["Attach matched pages to ActiveBlockTables<br/>and retain their references (planned)"]
+    Find --> Attach["attach_longest_cached_prefix(input_token_ids)<br/>retains and attaches matched pages"]
     Attach --> Work[Prefill unmatched input suffix and generate tokens]
     Work -->|Request finishes| Index["index_cached_sequence(cached_token_ids,<br/>cached_page_ids_by_layer)"]
     Work -->|Another physical page is needed| Available{Free page available?}
@@ -55,8 +55,9 @@ flowchart TD
 - `evict_least_recently_used_leaf` removes one least-recently-used leaf per call,
   preserving the parent context of remaining blocks. A parent becomes eligible
   after its final child is removed; `Ok(None)` means the index is empty.
-- Page attachment, retention, and connecting eviction to physical-page release
-  are not implemented yet.
+- Prefix attachment is available as a paged-cache primitive but is not connected
+  to request processing yet. Retaining newly indexed blocks and releasing evicted
+  blocks are also still pending.
 
 ## Prefix-block index example
 
@@ -162,5 +163,6 @@ Each layer contains two page IDs, so the one-block-per-page invariant tells the
 caller that two prefix blocks matched. An empty outer list means no block
 matched.
 
-The model runner can later retain these physical pages, install them into the
-active block tables, and run model prefill only for the unmatched suffix.
+`PagedKvCache::attach_longest_cached_prefix` retains these physical pages and
+installs them into the active block tables. Request processing can later use its
+returned token count to prefill only the unmatched suffix.
