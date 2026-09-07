@@ -69,11 +69,16 @@ impl ModelAndKvCache {
             .forward_for_speculative_verification(input, start_position, &mut *kv_cache)
     }
 
-    fn truncate(&self, target_token_count: usize) -> Result<()> {
+    /// Restores reusable prefix pages and returns the prefill start position.
+    fn restore_cached_prefix(&self, token_ids: &[u32]) -> Result<usize> {
+        self.kv_cache.borrow_mut().restore_cached_prefix(token_ids)
+    }
+
+    fn truncate_cache(&self, target_token_count: usize) -> Result<()> {
         self.kv_cache.borrow_mut().truncate(target_token_count)
     }
 
-    fn clear_kv_cache(&self) -> Result<()> {
+    fn clear_cache(&self) -> Result<()> {
         self.kv_cache.borrow_mut().clear()
     }
 

@@ -30,11 +30,10 @@ model layer; it also avoids partial-page sharing.
 flowchart TD
     Start[Create paged KV cache] --> New["PrefixBlockIndex::new(block_size)"]
     New --> Request[Receive tokenized request]
-    Request --> Work[Prefill and generate tokens]
-    Request -. "Prefix restoration (planned)" .-> Find["find_longest_cached_prefix(input_token_ids)"]
-    Find -.-> Attach["attach_longest_cached_prefix(input_token_ids)"]
-    Attach -.-> Work
-    Work -->|Request succeeds| Index["index_cached_sequence(cached_token_ids,<br/>cached_page_ids_by_layer)"]
+    Request --> Find["find_longest_cached_prefix(prompt_prefix)"]
+    Find --> Restore["restore_cached_prefix(prompt_prefix)"]
+    Restore --> Work[Prefill unmatched tokens and generate]
+    Work -->|Request succeeds| Index["index_cached_sequence(cursor, cached_token_ids,<br/>cached_page_ids_by_layer)"]
     Work -->|Request fails or is cancelled| Clear[Clear active KV caches]
     Clear --> Request
     Work -->|Another physical page is needed| Available{Free page available?}
@@ -49,11 +48,10 @@ flowchart TD
 
 - Only complete immutable blocks are indexed; a final incomplete block is
   ignored.
-- `index_cached_sequence` is called after the request has populated its cache
-  and before its active block tables are reset.
-- The dashed path shows the planned request-start integration for
-  `find_longest_cached_prefix` and `attach_longest_cached_prefix`; both
-  primitives exist but are not called by request processing yet.
+- Target and draft caches independently restore complete blocks from the prompt
+  prefix before prefill. The final prompt token remains pending for decoding.
+- Completion indexing resumes from the restored block cursor instead of
+  traversing the matched prefix again.
 - Tokens passed to `index_cached_sequence` must have KV values in every model
   layer. A newly sampled token that has not gone through a model forward pass
   must not be included.
@@ -61,8 +59,7 @@ flowchart TD
   preserving the parent context of remaining blocks. A parent becomes eligible
   after its final child is removed; `Ok(None)` means the index is empty.
 - Successful requests retain newly indexed blocks before releasing their active
-  page references. Prefix restoration and releasing evicted blocks are still
-  pending.
+  page references. Releasing evicted blocks is still pending.
 
 ## Prefix-block index example
 

@@ -32,6 +32,14 @@ impl KvCacheBackend {
         }
     }
 
+    /// Restores reusable prefix pages and returns the number of restored tokens.
+    pub(super) fn restore_cached_prefix(&mut self, token_ids: &[u32]) -> Result<usize> {
+        match self {
+            Self::Contiguous(_) => Ok(0),
+            Self::Paged(cache) => cache.restore_cached_prefix(token_ids),
+        }
+    }
+
     pub(super) fn truncate(&mut self, target_token_count: usize) -> Result<()> {
         match self {
             Self::Contiguous(cache) => cache.truncate(target_token_count),

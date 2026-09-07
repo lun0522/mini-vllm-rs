@@ -43,6 +43,11 @@ struct PrefillResult {
     should_decode: bool,
 }
 
+pub(super) struct PrefillStartPositions {
+    pub(super) target: usize,
+    pub(super) draft: Option<usize>,
+}
+
 pub(super) struct TextGenerationResult {
     pub(super) stats: TextGenerationStats,
     pub(super) token_ids: Vec<u32>,
@@ -52,6 +57,7 @@ pub(super) fn generate_text(
     target: &ModelAndKvCache,
     draft: Option<&ModelAndKvCache>,
     draft_token_count: usize,
+    prefill_start_positions: PrefillStartPositions,
     request: &GenerateTextRequest,
     push_token: impl FnMut(u32) -> Result<()>,
     is_cancelled: impl FnMut() -> bool,
@@ -75,7 +81,7 @@ pub(super) fn generate_text(
         push_token,
         is_cancelled,
     }
-    .run(target, draft)
+    .run(target, draft, prefill_start_positions)
 }
 
 impl<PushToken, IsCancelled> TextGenerator<PushToken, IsCancelled>
@@ -87,6 +93,7 @@ where
         mut self,
         target: &ModelAndKvCache,
         draft: Option<&ModelAndKvCache>,
+        prefill_start_positions: PrefillStartPositions,
     ) -> Result<TextGenerationResult> {
         let prompt_token_count = self.tokens.len();
         let generation_started = Instant::now();
@@ -95,7 +102,7 @@ where
             let PrefillResult {
                 generated_token_count,
                 should_decode,
-            } = self.run_prefill_phase(target, draft)?;
+            } = self.run_prefill_phase(target, draft, prefill_start_positions)?;
             prefill_finished = Some(Instant::now());
             if should_decode {
                 self.run_decode_phase(target, draft, generated_token_count)?;
@@ -121,13 +128,17 @@ where
         &mut self,
         target: &ModelAndKvCache,
         draft: Option<&ModelAndKvCache>,
+        prefill_start_positions: PrefillStartPositions,
     ) -> Result<PrefillResult> {
         if (self.is_cancelled)() {
             anyhow::bail!("generation request was cancelled");
         }
         if let Some(draft) = draft {
-            self.prefill_prompt_prefix(target)?;
-            self.prefill_prompt_prefix(draft)?;
+            self.prefill_prompt_prefix(target, prefill_start_positions.target)?;
+            let draft_start_position = prefill_start_positions
+                .draft
+                .context("draft prefill start position is missing")?;
+            self.prefill_prompt_prefix(draft, draft_start_position)?;
             return Ok(PrefillResult {
                 generated_token_count: 0,
                 should_decode: true,
@@ -136,8 +147,8 @@ where
 
         let next_token = self.sample_next_token(
             target,
-            &self.tokens,
-            /* start_position */ 0,
+            &self.tokens[prefill_start_positions.target..],
+            prefill_start_positions.target,
             /* appended_tokens */ &[],
             &mut self.target_logits_processor.borrow_mut(),
         )?;
@@ -150,13 +161,13 @@ where
 
     /// Prefills through the second-to-last prompt token, leaving the final token as the common
     /// starting point for draft proposal and target verification.
-    fn prefill_prompt_prefix(&self, model: &ModelAndKvCache) -> Result<()> {
-        let prefill_tokens = &self.tokens[..self.tokens.len() - 1];
+    fn prefill_prompt_prefix(&self, model: &ModelAndKvCache, start_position: usize) -> Result<()> {
+        let prefill_tokens = &self.tokens[start_position..self.tokens.len() - 1];
         if prefill_tokens.is_empty() {
             return Ok(());
         }
         let input = Tensor::new(prefill_tokens, model.model.borrow().device())?.unsqueeze(0)?;
-        model.forward(&input, 0)?;
+        model.forward(&input, start_position)?;
         Ok(())
     }
 
@@ -240,8 +251,8 @@ where
         let replacement_token_count = usize::from(maybe_replacement_token.is_some());
         let retained_cached_token_count =
             original_cached_token_count + accepted_token_count + replacement_token_count;
-        target.truncate(retained_cached_token_count)?;
-        draft.truncate(retained_cached_token_count)?;
+        target.truncate_cache(retained_cached_token_count)?;
+        draft.truncate_cache(retained_cached_token_count)?;
 
         // Publish the accepted draft prefix, followed by the target replacement when the models
         // disagreed. EOS is observed but never added to the generated output.

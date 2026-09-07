@@ -1,3 +1,4 @@
+use super::prefix_index::PrefixBlockCursor;
 use super::prefix_index::PrefixBlockIndex;
 use super::prefix_index::PrefixBlockMatch;
 use super::utils::allocate_pool;
@@ -38,6 +39,7 @@ pub(super) struct PageId(pub(super) usize);
 /// releases only their references, so a future prefix-cache entry can keep shared pages resident.
 struct ActiveBlockTables {
     layer_caches: Vec<PagedLayerCache>,
+    prefix_block_cursor: Box<PrefixBlockCursor>,
 }
 
 impl ActiveBlockTables {
@@ -46,6 +48,7 @@ impl ActiveBlockTables {
             layer_caches: (0..layer_count)
                 .map(|_| PagedLayerCache::default())
                 .collect(),
+            prefix_block_cursor: Box::new(PrefixBlockCursor::at_root()),
         }
     }
 
@@ -61,7 +64,8 @@ impl ActiveBlockTables {
             .map_or(0, LayerCache::cached_token_count)
     }
 
-    fn attach_cached_prefix(&mut self, prefix_match: PrefixBlockMatch, matched_token_count: usize) {
+    fn attach_cached_prefix(&mut self, prefix_match: PrefixBlockMatch) {
+        let matched_token_count = prefix_match.cursor.matched_token_count();
         for (layer_cache, page_ids) in self
             .layer_caches
             .iter_mut()
@@ -70,6 +74,7 @@ impl ActiveBlockTables {
             layer_cache.page_ids = page_ids;
             layer_cache.token_count = matched_token_count;
         }
+        *self.prefix_block_cursor = prefix_match.cursor;
     }
 }
 
@@ -368,14 +373,7 @@ impl PagedKvCache {
     }
 
     /// Attaches the longest reusable prefix to the current request and returns its token count.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "cached-prefix restoration will be connected separately"
-        )
-    )]
-    fn attach_longest_cached_prefix(&mut self, input_token_ids: &[u32]) -> Result<usize> {
+    pub(super) fn restore_cached_prefix(&mut self, input_token_ids: &[u32]) -> Result<usize> {
         let Some(prefix_block_index) = self.prefix_block_index.as_ref() else {
             return Ok(0);
         };
@@ -383,14 +381,10 @@ impl PagedKvCache {
         if self.active_block_tables.is_populated() {
             bail!("cannot attach a cached prefix to non-empty active block tables");
         }
-        let matched_block_count = prefix_match.page_ids_by_layer.first().map_or(0, Vec::len);
-        let matched_token_count = matched_block_count
-            .checked_mul(self.physical_page_pool.per_page_token_count)
-            .context("matched prefix token count overflow")?;
+        let matched_token_count = prefix_match.cursor.matched_token_count();
         self.physical_page_pool
             .retain_allocated_pages_or_rollback(prefix_match.page_ids_by_layer.iter().flatten())?;
-        self.active_block_tables
-            .attach_cached_prefix(prefix_match, matched_token_count);
+        self.active_block_tables.attach_cached_prefix(prefix_match);
         Ok(matched_token_count)
     }
 
@@ -406,10 +400,15 @@ impl PagedKvCache {
                 .iter()
                 .map(|layer_cache| layer_cache.page_ids.clone())
                 .collect();
-            // TODO: Preserve the last matched prefix block when restoring a request, then resume
-            // indexing from that block instead of walking the already-cached prefix again.
-            let newly_indexed_pages = prefix_block_index
-                .index_cached_sequence(cached_token_ids, &cached_page_ids_by_layer)?;
+            let indexing_result = prefix_block_index.index_cached_sequence(
+                &self.active_block_tables.prefix_block_cursor,
+                cached_token_ids,
+                &cached_page_ids_by_layer,
+            );
+            // This cursor describes only the request being finalized. Reset it so the next
+            // request cannot accidentally resume indexing from the previous restored prefix.
+            *self.active_block_tables.prefix_block_cursor = PrefixBlockCursor::at_root();
+            let newly_indexed_pages = indexing_result?;
             self.physical_page_pool
                 .retain_allocated_pages_or_rollback(newly_indexed_pages.page_ids.iter())?;
         }
@@ -430,6 +429,7 @@ impl PagedKvCache {
     }
 
     pub(super) fn reset_active_block_tables(&mut self) -> Result<()> {
+        *self.active_block_tables.prefix_block_cursor = PrefixBlockCursor::at_root();
         for layer_cache in &mut self.active_block_tables.layer_caches {
             let page_ids = std::mem::take(&mut layer_cache.page_ids);
             layer_cache.token_count = 0;
@@ -692,10 +692,14 @@ mod tests {
             .prefix_block_index
             .as_mut()
             .context("prefix caching should be enabled")?
-            .index_cached_sequence(&[1, 2, 3, 4], &cached_page_ids_by_layer)?;
+            .index_cached_sequence(
+                &PrefixBlockCursor::at_root(),
+                &[1, 2, 3, 4],
+                &cached_page_ids_by_layer,
+            )?;
         cache.reset_active_block_tables()?;
 
-        assert_eq!(cache.attach_longest_cached_prefix(&[1, 2, 3, 4, 5])?, 4);
+        assert_eq!(cache.restore_cached_prefix(&[1, 2, 3, 4, 5])?, 4);
         for (layer_cache, expected_page_ids) in cache
             .active_block_tables
             .layer_caches
@@ -725,10 +729,14 @@ mod tests {
             .prefix_block_index
             .as_mut()
             .context("prefix caching should be enabled")?
-            .index_cached_sequence(&[1, 2, 3, 4], &cached_page_ids_by_layer)?;
+            .index_cached_sequence(
+                &PrefixBlockCursor::at_root(),
+                &[1, 2, 3, 4],
+                &cached_page_ids_by_layer,
+            )?;
         cache.reset_active_block_tables()?;
 
-        assert_eq!(cache.attach_longest_cached_prefix(&[1, 2, 8, 9])?, 2);
+        assert_eq!(cache.restore_cached_prefix(&[1, 2, 8, 9])?, 2);
         assert_eq!(
             cache.active_block_tables.layer_caches[0].page_ids,
             cached_page_ids_by_layer[0][..1]
@@ -754,10 +762,14 @@ mod tests {
             .prefix_block_index
             .as_mut()
             .context("prefix caching should be enabled")?
-            .index_cached_sequence(&[1, 2], &cached_page_ids_by_layer)?;
+            .index_cached_sequence(
+                &PrefixBlockCursor::at_root(),
+                &[1, 2],
+                &cached_page_ids_by_layer,
+            )?;
 
         let error = cache
-            .attach_longest_cached_prefix(&[1, 2])
+            .restore_cached_prefix(&[1, 2])
             .unwrap_err()
             .to_string();
         assert_eq!(
@@ -848,6 +860,33 @@ mod tests {
     }
 
     #[test]
+    fn resumes_indexing_after_a_restored_prefix() -> Result<()> {
+        let mut cache = paged_cache_with_prefix_caching(1, 2, 4, true)?;
+        cache.append(0, 0, &cache_tensor(0, 4)?, &cache_tensor(100, 4)?)?;
+        let prefix_page_ids = cache.active_block_tables.layer_caches[0].page_ids.clone();
+        finish_request(&mut cache, &[1, 2, 3, 4])?;
+
+        assert_eq!(cache.restore_cached_prefix(&[1, 2, 3, 4, 5, 6])?, 4);
+        cache.append(0, 4, &cache_tensor(4, 2)?, &cache_tensor(104, 2)?)?;
+        let suffix_page_id = cache.active_block_tables.layer_caches[0].page_ids[2];
+        finish_request(&mut cache, &[1, 2, 3, 4, 5, 6])?;
+
+        let prefix_match = cache
+            .prefix_block_index
+            .as_ref()
+            .context("prefix caching should be enabled")?
+            .find_longest_cached_prefix(&[1, 2, 3, 4, 5, 6])?;
+        assert_eq!(
+            prefix_match.page_ids_by_layer,
+            vec![vec![prefix_page_ids[0], prefix_page_ids[1], suffix_page_id]]
+        );
+        for page_id in prefix_match.page_ids_by_layer[0].iter().copied() {
+            assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 1);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn rolls_back_retains_across_layers_when_prefix_attachment_fails() -> Result<()> {
         let mut cache = paged_cache_with_prefix_caching(2, 2, 2, true)?;
         let allocated_page_id = cache.physical_page_pool.allocate_page()?;
@@ -856,11 +895,12 @@ mod tests {
             .as_mut()
             .context("prefix caching should be enabled")?
             .index_cached_sequence(
+                &PrefixBlockCursor::at_root(),
                 &[1, 2],
                 &[vec![allocated_page_id], vec![PageId(usize::MAX)]],
             )?;
 
-        assert!(cache.attach_longest_cached_prefix(&[1, 2]).is_err());
+        assert!(cache.restore_cached_prefix(&[1, 2]).is_err());
         assert_eq!(
             cache.physical_page_pool.reference_counts[allocated_page_id.0],
             1

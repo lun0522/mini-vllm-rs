@@ -90,14 +90,32 @@ impl ModelRunner {
         push_token: impl FnMut(u32) -> Result<()>,
         is_cancelled: impl FnMut() -> bool,
     ) -> Result<TextGenerationStats> {
-        let result = match text_generation::generate_text(
-            &self.target,
-            self.draft.as_ref(),
-            self.draft_token_count,
-            request,
-            push_token,
-            is_cancelled,
-        ) {
+        let result = match (|| {
+            // Restore only the prompt tokens before the final token. The final prompt token must
+            // still pass through the model to produce the first generation logits, for both
+            // regular and speculative decoding.
+            let prompt_prefix = request
+                .input_token_ids
+                .split_last()
+                .map_or(&[][..], |(_, prefix)| prefix);
+            let prefill_start_positions = text_generation::PrefillStartPositions {
+                target: self.target.restore_cached_prefix(prompt_prefix)?,
+                draft: self
+                    .draft
+                    .as_ref()
+                    .map(|draft| draft.restore_cached_prefix(prompt_prefix))
+                    .transpose()?,
+            };
+            text_generation::generate_text(
+                &self.target,
+                self.draft.as_ref(),
+                self.draft_token_count,
+                prefill_start_positions,
+                request,
+                push_token,
+                is_cancelled,
+            )
+        })() {
             Ok(result) => result,
             Err(error) => {
                 if let Err(cleanup_error) = self.clear_kv_caches() {
@@ -132,11 +150,11 @@ impl ModelRunner {
     }
 
     fn clear_kv_caches(&self) -> Result<()> {
-        let target_result = self.target.clear_kv_cache();
+        let target_result = self.target.clear_cache();
         let draft_result = self
             .draft
             .as_ref()
-            .map(ModelAndKvCache::clear_kv_cache)
+            .map(ModelAndKvCache::clear_cache)
             .transpose();
         target_result?;
         draft_result?;
