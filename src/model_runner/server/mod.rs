@@ -72,6 +72,14 @@ impl ModelAndKvCache {
     fn truncate(&self, target_token_count: usize) -> Result<()> {
         self.kv_cache.borrow_mut().truncate(target_token_count)
     }
+
+    fn clear_kv_cache(&self) -> Result<()> {
+        self.kv_cache.borrow_mut().clear()
+    }
+
+    fn finish_request(&self, token_ids: &[u32]) -> Result<()> {
+        self.kv_cache.borrow_mut().finish_request(token_ids)
+    }
 }
 
 pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {

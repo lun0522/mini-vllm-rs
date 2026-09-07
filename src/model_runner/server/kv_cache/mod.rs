@@ -48,6 +48,16 @@ impl KvCacheBackend {
             Self::Paged(cache) => cache.reset_active_block_tables(),
         }
     }
+
+    pub(super) fn finish_request(&mut self, token_ids: &[u32]) -> Result<()> {
+        match self {
+            Self::Contiguous(cache) => {
+                cache.clear();
+                Ok(())
+            }
+            Self::Paged(cache) => cache.finish_request(token_ids),
+        }
+    }
 }
 
 impl KvCache for KvCacheBackend {

@@ -61,6 +61,11 @@ pub(super) struct EvictedPrefixBlock {
     pub(super) page_ids_by_layer: Box<[PageId]>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct NewlyIndexedPrefixPages {
+    pub(super) page_ids: Vec<PageId>,
+}
+
 pub(super) struct PrefixBlockIndex {
     // This implementation intentionally uses one prefix block per physical KV-cache page. The
     // two sizes could differ with a more complex mapping, but keeping them equal gives every
@@ -88,7 +93,10 @@ impl PrefixBlockIndex {
 
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "prefix restoration will be connected separately")
+        expect(
+            dead_code,
+            reason = "cached-prefix restoration will be connected separately"
+        )
     )]
     pub(super) fn find_longest_cached_prefix(
         &self,
@@ -121,18 +129,11 @@ impl PrefixBlockIndex {
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "sequence indexing will be connected after the index exists"
-        )
-    )]
     pub(super) fn index_cached_sequence(
         &mut self,
         sequence_token_ids: &[u32],
         cached_page_ids_by_layer: &[Vec<PageId>],
-    ) -> Result<()> {
+    ) -> Result<NewlyIndexedPrefixPages> {
         let complete_block_count = sequence_token_ids.len() / self.per_block_token_count;
         Self::validate_cached_page_counts(complete_block_count, cached_page_ids_by_layer)?;
         let current_timestamp = self.current_timestamp.borrow_mut().begin_access()?;
@@ -140,6 +141,7 @@ impl PrefixBlockIndex {
         let mut parent_id = None;
         let mut previous_block_key = None;
         let mut is_appending_new_branch = false;
+        let mut newly_indexed_page_ids = Vec::new();
         for (block_index, token_id_block) in sequence_token_ids
             .chunks_exact(self.per_block_token_count)
             .enumerate()
@@ -169,15 +171,17 @@ impl PrefixBlockIndex {
 
             let block_id = self.next_block_id.next()?;
             let has_child = block_index + 1 < complete_block_count;
+            let page_ids_by_layer: Box<_> = cached_page_ids_by_layer
+                .iter()
+                .map(|cached_page_ids| cached_page_ids[block_index])
+                .collect();
+            newly_indexed_page_ids.extend(page_ids_by_layer.iter().copied());
             self.blocks_map.insert(
                 key.clone(),
                 IndexedPrefixBlock {
                     block_id,
                     parent_key: previous_block_key,
-                    page_ids_by_layer: cached_page_ids_by_layer
-                        .iter()
-                        .map(|cached_page_ids| cached_page_ids[block_index])
-                        .collect(),
+                    page_ids_by_layer,
                     child_count: usize::from(has_child),
                     last_access_timestamp: RefCell::new(current_timestamp),
                 },
@@ -188,7 +192,9 @@ impl PrefixBlockIndex {
             parent_id = Some(block_id);
             previous_block_key = Some(key);
         }
-        Ok(())
+        Ok(NewlyIndexedPrefixPages {
+            page_ids: newly_indexed_page_ids,
+        })
     }
 
     /// Removes the least recently used leaf and returns its pages without modifying their data.

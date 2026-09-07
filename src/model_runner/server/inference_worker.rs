@@ -90,18 +90,23 @@ impl ModelRunner {
         push_token: impl FnMut(u32) -> Result<()>,
         is_cancelled: impl FnMut() -> bool,
     ) -> Result<TextGenerationStats> {
-        self.target.kv_cache.borrow_mut().clear()?;
+        self.target.clear_kv_cache()?;
         if let Some(draft) = self.draft.as_ref() {
-            draft.kv_cache.borrow_mut().clear()?;
+            draft.clear_kv_cache()?;
         }
-        text_generation::generate_text(
+        let result = text_generation::generate_text(
             &self.target,
             self.draft.as_ref(),
             self.draft_token_count,
             request,
             push_token,
             is_cancelled,
-        )
+        )?;
+        self.target.finish_request(&result.token_ids)?;
+        if let Some(draft) = self.draft.as_ref() {
+            draft.finish_request(&result.token_ids)?;
+        }
+        Ok(result.stats)
     }
 
     fn get_inference_device() -> Result<Device> {

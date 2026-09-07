@@ -38,6 +38,11 @@ struct DecodeIterationResult {
     should_continue: bool,
 }
 
+pub(super) struct TextGenerationResult {
+    pub(super) stats: TextGenerationStats,
+    pub(super) token_ids: Vec<u32>,
+}
+
 pub(super) fn generate_text(
     target: &ModelAndKvCache,
     draft: Option<&ModelAndKvCache>,
@@ -45,7 +50,7 @@ pub(super) fn generate_text(
     request: &GenerateTextRequest,
     push_token: impl FnMut(u32) -> Result<()>,
     is_cancelled: impl FnMut() -> bool,
-) -> Result<TextGenerationStats> {
+) -> Result<TextGenerationResult> {
     if request.input_token_ids.is_empty() {
         anyhow::bail!("input token IDs must not be empty");
     }
@@ -77,7 +82,7 @@ where
         mut self,
         target: &ModelAndKvCache,
         draft: Option<&ModelAndKvCache>,
-    ) -> Result<TextGenerationStats> {
+    ) -> Result<TextGenerationResult> {
         let prompt_token_count = self.tokens.len();
         let generation_started = Instant::now();
         let mut prefill_finished = None;
@@ -90,14 +95,18 @@ where
         }
         let decode_finished = Instant::now();
         let prefill_finished = prefill_finished.unwrap_or(decode_finished);
-        create_generation_stats(
+        let stats = create_generation_stats(
             prompt_token_count,
             self.tokens.len(),
             generation_started,
             prefill_finished,
             decode_finished,
             self.compute_draft_token_acceptance_rate(),
-        )
+        )?;
+        Ok(TextGenerationResult {
+            stats,
+            token_ids: self.tokens,
+        })
     }
 
     fn run_prefill_phase(

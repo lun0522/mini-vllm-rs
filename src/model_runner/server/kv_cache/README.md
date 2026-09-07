@@ -30,34 +30,37 @@ model layer; it also avoids partial-page sharing.
 flowchart TD
     Start[Create paged KV cache] --> New["PrefixBlockIndex::new(block_size)"]
     New --> Request[Receive tokenized request]
-    Request --> Find["find_longest_cached_prefix(input_token_ids)"]
-    Find --> Attach["attach_longest_cached_prefix(input_token_ids)<br/>retains and attaches matched pages"]
-    Attach --> Work[Prefill unmatched input suffix and generate tokens]
-    Work -->|Request finishes| Index["index_cached_sequence(cached_token_ids,<br/>cached_page_ids_by_layer)"]
+    Request --> Work[Prefill and generate tokens]
+    Request -. "Prefix restoration (planned)" .-> Find["find_longest_cached_prefix(input_token_ids)"]
+    Find -.-> Attach["attach_longest_cached_prefix(input_token_ids)"]
+    Attach -.-> Work
+    Work -->|Request succeeds| Index["index_cached_sequence(cached_token_ids,<br/>cached_page_ids_by_layer)"]
     Work -->|Another physical page is needed| Available{Free page available?}
     Available -->|Yes| Work
     Available -->|No| Evict["evict_least_recently_used_leaf()"]
     Evict --> Release["Release returned physical-page references (planned)"]
     Release --> Available
-    Index --> Retain["Retain newly indexed complete pages (planned)"]
+    Index --> Retain[Retain newly indexed complete pages]
     Retain --> Reset[Reset active block tables]
     Reset --> Request
 ```
 
 - Only complete immutable blocks are indexed; a final incomplete block is
   ignored.
-- `find_longest_cached_prefix` is called for every new request before prefill.
 - `index_cached_sequence` is called after the request has populated its cache
   and before its active block tables are reset.
+- The dashed path shows the planned request-start integration for
+  `find_longest_cached_prefix` and `attach_longest_cached_prefix`; both
+  primitives exist but are not called by request processing yet.
 - Tokens passed to `index_cached_sequence` must have KV values in every model
   layer. A newly sampled token that has not gone through a model forward pass
   must not be included.
 - `evict_least_recently_used_leaf` removes one least-recently-used leaf per call,
   preserving the parent context of remaining blocks. A parent becomes eligible
   after its final child is removed; `Ok(None)` means the index is empty.
-- Prefix attachment is available as a paged-cache primitive but is not connected
-  to request processing yet. Retaining newly indexed blocks and releasing evicted
-  blocks are also still pending.
+- Successful requests retain newly indexed blocks before releasing their active
+  page references. Prefix restoration and releasing evicted blocks are still
+  pending.
 
 ## Prefix-block index example
 
