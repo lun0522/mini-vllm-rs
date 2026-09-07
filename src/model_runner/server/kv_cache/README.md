@@ -47,8 +47,12 @@ flowchart TD
     Work -->|Request fails or is cancelled| Reset
     Restore -->|Restoration fails| Reset
     Reset --> Request
-
-    Work -. "No free physical page<br/>(eviction not connected yet)" .-> Fail[Return allocation error]
+    Work -->|Physical pages needed| Available{Enough free pages?}
+    Available -->|Yes| Work
+    Available -->|No| Evict["Evict least-recently-used inactive leaf"]
+    Evict -->|Leaf found| Release["Release its indexed page references"]
+    Release --> Available
+    Evict -->|No inactive leaf| Fail[Return allocation error]
     Fail --> Reset
 ```
 
@@ -64,9 +68,10 @@ flowchart TD
 - Successful requests retain newly indexed blocks before releasing their active
   page references. Failed and cancelled requests release only active
   references, so previously indexed prefixes remain reusable.
-- Allocation currently fails when no free physical page remains. The prefix
-  index can select a least-recently-used leaf, but releasing its page references
-  and retrying allocation are not connected yet.
+- When an append needs more pages than are free, `PagedKvCache` repeatedly
+  evicts least-recently-used inactive leaves and releases their indexed page
+  references. The active request's restored leaf is protected; allocation
+  fails if no other leaf can make enough space.
 
 ## Prefix-block index example
 

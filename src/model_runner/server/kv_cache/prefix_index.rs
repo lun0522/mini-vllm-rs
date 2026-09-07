@@ -75,6 +75,10 @@ impl PrefixBlockCursor {
     pub(super) fn matched_token_count(&self) -> usize {
         self.matched_token_count
     }
+
+    fn is_at_block(&self, block_key: &PrefixBlockKey) -> bool {
+        self.block_key.as_ref() == Some(block_key)
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -225,17 +229,14 @@ impl PrefixBlockIndex {
         })
     }
 
-    /// Removes the least recently used leaf and returns its pages without modifying their data.
-    /// Returns `Ok(None)` when the index is empty and has no cached block to evict.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "allocation-pressure eviction will be connected separately"
-        )
-    )]
-    pub(super) fn evict_least_recently_used_leaf(&mut self) -> Result<Option<EvictedPrefixBlock>> {
-        let Some(key) = self.find_least_recently_used_leaf_key() else {
+    /// Removes the least recently used inactive leaf and returns its pages without modifying them.
+    /// Returns `Ok(None)` when no leaf can be evicted without invalidating the active cursor.
+    pub(super) fn evict_least_recently_used_leaf(
+        &mut self,
+        // Completion indexing resumes from this cursor, so its block must remain indexed.
+        active_cursor: &PrefixBlockCursor,
+    ) -> Result<Option<EvictedPrefixBlock>> {
+        let Some(key) = self.find_least_recently_used_leaf_key(active_cursor) else {
             return Ok(None);
         };
         self.leaf_block_keys.remove(&key);
@@ -251,9 +252,14 @@ impl PrefixBlockIndex {
         }))
     }
 
-    fn find_least_recently_used_leaf_key(&self) -> Option<PrefixBlockKey> {
+    fn find_least_recently_used_leaf_key(
+        &self,
+        // Exclude the active block even if removing its final child makes it a leaf.
+        active_cursor: &PrefixBlockCursor,
+    ) -> Option<PrefixBlockKey> {
         self.leaf_block_keys
             .iter()
+            .filter(|key| !active_cursor.is_at_block(key))
             .min_by_key(|key| {
                 let block = self
                     .blocks_map
@@ -353,7 +359,10 @@ mod tests {
             index.find_longest_cached_prefix(&[1, 2])?.page_ids_by_layer,
             Vec::<Vec<PageId>>::new()
         );
-        assert_eq!(index.evict_least_recently_used_leaf()?, None);
+        assert_eq!(
+            index.evict_least_recently_used_leaf(&PrefixBlockCursor::at_root())?,
+            None
+        );
         Ok(())
     }
 
@@ -476,20 +485,70 @@ mod tests {
         )?;
 
         assert_eq!(
-            index.evict_least_recently_used_leaf()?,
+            index.evict_least_recently_used_leaf(&PrefixBlockCursor::at_root())?,
             Some(EvictedPrefixBlock {
                 page_ids_by_layer: Box::new([PageId(11), PageId(21)]),
             })
         );
         assert_eq!(index.leaf_block_keys.len(), 1);
         assert_eq!(
-            index.evict_least_recently_used_leaf()?,
+            index.evict_least_recently_used_leaf(&PrefixBlockCursor::at_root())?,
             Some(EvictedPrefixBlock {
                 page_ids_by_layer: Box::new([PageId(10), PageId(20)]),
             })
         );
         assert!(index.leaf_block_keys.is_empty());
-        assert_eq!(index.evict_least_recently_used_leaf()?, None);
+        assert_eq!(
+            index.evict_least_recently_used_leaf(&PrefixBlockCursor::at_root())?,
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn does_not_evict_the_leaf_attached_to_the_active_request() -> Result<()> {
+        let mut index = PrefixBlockIndex::new(2)?;
+        index.index_cached_sequence(
+            &PrefixBlockCursor::at_root(),
+            &[1, 2, 3, 4],
+            &pages(&[&[10, 11]]),
+        )?;
+        let active_match = index.find_longest_cached_prefix(&[1, 2, 3, 4])?;
+
+        assert_eq!(
+            index.evict_least_recently_used_leaf(&active_match.cursor)?,
+            None
+        );
+        assert_eq!(index.blocks_map.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn stops_eviction_when_an_active_internal_block_becomes_a_leaf() -> Result<()> {
+        let mut index = PrefixBlockIndex::new(2)?;
+        index.index_cached_sequence(
+            &PrefixBlockCursor::at_root(),
+            &[1, 2, 3, 4],
+            &pages(&[&[10, 11]]),
+        )?;
+        index.index_cached_sequence(
+            &PrefixBlockCursor::at_root(),
+            &[1, 2, 5, 6],
+            &pages(&[&[10, 12]]),
+        )?;
+        let active_match = index.find_longest_cached_prefix(&[1, 2, 7, 8])?;
+
+        assert!(index
+            .evict_least_recently_used_leaf(&active_match.cursor)?
+            .is_some());
+        assert!(index
+            .evict_least_recently_used_leaf(&active_match.cursor)?
+            .is_some());
+        assert_eq!(
+            index.evict_least_recently_used_leaf(&active_match.cursor)?,
+            None
+        );
+        assert_eq!(index.blocks_map.len(), 1);
         Ok(())
     }
 
@@ -512,7 +571,7 @@ mod tests {
         index.find_longest_cached_prefix(&[1, 2, 3, 4])?;
 
         assert_eq!(
-            index.evict_least_recently_used_leaf()?,
+            index.evict_least_recently_used_leaf(&PrefixBlockCursor::at_root())?,
             Some(EvictedPrefixBlock {
                 page_ids_by_layer: Box::new([PageId(12)]),
             })
@@ -542,21 +601,21 @@ mod tests {
         )?;
 
         assert_eq!(
-            index.evict_least_recently_used_leaf()?,
+            index.evict_least_recently_used_leaf(&PrefixBlockCursor::at_root())?,
             Some(EvictedPrefixBlock {
                 page_ids_by_layer: Box::new([PageId(11)]),
             })
         );
         assert_eq!(index.leaf_block_keys.len(), 1);
         assert_eq!(
-            index.evict_least_recently_used_leaf()?,
+            index.evict_least_recently_used_leaf(&PrefixBlockCursor::at_root())?,
             Some(EvictedPrefixBlock {
                 page_ids_by_layer: Box::new([PageId(12)]),
             })
         );
         assert_eq!(index.leaf_block_keys.len(), 1);
         assert_eq!(
-            index.evict_least_recently_used_leaf()?,
+            index.evict_least_recently_used_leaf(&PrefixBlockCursor::at_root())?,
             Some(EvictedPrefixBlock {
                 page_ids_by_layer: Box::new([PageId(10)]),
             })
@@ -585,7 +644,7 @@ mod tests {
         )?;
 
         assert_eq!(
-            index.evict_least_recently_used_leaf()?,
+            index.evict_least_recently_used_leaf(&PrefixBlockCursor::at_root())?,
             Some(EvictedPrefixBlock {
                 page_ids_by_layer: Box::new([PageId(12)]),
             })
