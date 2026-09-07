@@ -35,6 +35,8 @@ flowchart TD
     Find -.-> Attach["attach_longest_cached_prefix(input_token_ids)"]
     Attach -.-> Work
     Work -->|Request succeeds| Index["index_cached_sequence(cached_token_ids,<br/>cached_page_ids_by_layer)"]
+    Work -->|Request fails or is cancelled| Clear[Clear active KV caches]
+    Clear --> Request
     Work -->|Another physical page is needed| Available{Free page available?}
     Available -->|Yes| Work
     Available -->|No| Evict["evict_least_recently_used_leaf()"]

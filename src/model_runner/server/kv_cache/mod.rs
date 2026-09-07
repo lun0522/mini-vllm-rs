@@ -50,13 +50,10 @@ impl KvCacheBackend {
     }
 
     pub(super) fn finish_request(&mut self, token_ids: &[u32]) -> Result<()> {
-        match self {
-            Self::Contiguous(cache) => {
-                cache.clear();
-                Ok(())
-            }
-            Self::Paged(cache) => cache.finish_request(token_ids),
+        if let Self::Paged(cache) = self {
+            cache.retain_completed_blocks(token_ids)?;
         }
+        self.clear()
     }
 }
 

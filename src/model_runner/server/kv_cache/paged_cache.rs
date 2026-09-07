@@ -394,7 +394,7 @@ impl PagedKvCache {
         Ok(matched_token_count)
     }
 
-    pub(super) fn finish_request(&mut self, token_ids: &[u32]) -> Result<()> {
+    pub(super) fn retain_completed_blocks(&mut self, token_ids: &[u32]) -> Result<()> {
         let cached_token_count = self.active_block_tables.cached_token_count();
         let cached_token_ids = token_ids
             .get(..cached_token_count)
@@ -413,7 +413,7 @@ impl PagedKvCache {
             self.physical_page_pool
                 .retain_allocated_pages_or_rollback(newly_indexed_pages.page_ids.iter())?;
         }
-        self.reset_active_block_tables()
+        Ok(())
     }
 
     pub(super) fn truncate(&mut self, target_token_count: usize) -> Result<()> {
@@ -538,6 +538,11 @@ mod tests {
             cache.physical_page_pool.retain_allocated_page(page_id)?;
         }
         Ok(cached_page_ids_by_layer)
+    }
+
+    fn finish_request(cache: &mut PagedKvCache, token_ids: &[u32]) -> Result<()> {
+        cache.retain_completed_blocks(token_ids)?;
+        cache.reset_active_block_tables()
     }
 
     #[test]
@@ -780,8 +785,8 @@ mod tests {
             .collect();
 
         // The final token ID has not been processed by the model and is not part of the active
-        // KV cache. finish_request indexes only the five tokens that have cached values.
-        cache.finish_request(&[1, 2, 3, 4, 5, 6])?;
+        // KV cache. Request finalization indexes only the five tokens that have cached values.
+        finish_request(&mut cache, &[1, 2, 3, 4, 5, 6])?;
 
         assert!(!cache.active_block_tables.is_populated());
         for layer_page_ids in &active_page_ids_by_layer {
@@ -818,11 +823,11 @@ mod tests {
         let mut cache = paged_cache_with_prefix_caching(1, 2, 4, true)?;
         cache.append(0, 0, &cache_tensor(0, 4)?, &cache_tensor(100, 4)?)?;
         let indexed_page_ids = cache.active_block_tables.layer_caches[0].page_ids.clone();
-        cache.finish_request(&[1, 2, 3, 4])?;
+        finish_request(&mut cache, &[1, 2, 3, 4])?;
 
         cache.append(0, 0, &cache_tensor(0, 4)?, &cache_tensor(100, 4)?)?;
         let recomputed_page_ids = cache.active_block_tables.layer_caches[0].page_ids.clone();
-        cache.finish_request(&[1, 2, 3, 4])?;
+        finish_request(&mut cache, &[1, 2, 3, 4])?;
 
         for page_id in &indexed_page_ids {
             assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 1);

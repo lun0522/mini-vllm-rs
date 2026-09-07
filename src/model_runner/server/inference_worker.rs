@@ -90,23 +90,57 @@ impl ModelRunner {
         push_token: impl FnMut(u32) -> Result<()>,
         is_cancelled: impl FnMut() -> bool,
     ) -> Result<TextGenerationStats> {
-        self.target.clear_kv_cache()?;
-        if let Some(draft) = self.draft.as_ref() {
-            draft.clear_kv_cache()?;
-        }
-        let result = text_generation::generate_text(
+        let result = match text_generation::generate_text(
             &self.target,
             self.draft.as_ref(),
             self.draft_token_count,
             request,
             push_token,
             is_cancelled,
-        )?;
-        self.target.finish_request(&result.token_ids)?;
-        if let Some(draft) = self.draft.as_ref() {
-            draft.finish_request(&result.token_ids)?;
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                if let Err(cleanup_error) = self.clear_kv_caches() {
+                    return Err(error.context(format!(
+                        "additionally failed to clear KV caches: {cleanup_error:#}"
+                    )));
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.finish_requests(&result.token_ids) {
+            if let Err(cleanup_error) = self.clear_kv_caches() {
+                return Err(error.context(format!(
+                    "additionally failed to clear KV caches: {cleanup_error:#}"
+                )));
+            }
+            return Err(error);
         }
         Ok(result.stats)
+    }
+
+    fn finish_requests(&self, token_ids: &[u32]) -> Result<()> {
+        let target_result = self.target.finish_request(token_ids);
+        let draft_result = self
+            .draft
+            .as_ref()
+            .map(|draft| draft.finish_request(token_ids))
+            .transpose();
+        target_result?;
+        draft_result?;
+        Ok(())
+    }
+
+    fn clear_kv_caches(&self) -> Result<()> {
+        let target_result = self.target.clear_kv_cache();
+        let draft_result = self
+            .draft
+            .as_ref()
+            .map(ModelAndKvCache::clear_kv_cache)
+            .transpose();
+        target_result?;
+        draft_result?;
+        Ok(())
     }
 
     fn get_inference_device() -> Result<Device> {
