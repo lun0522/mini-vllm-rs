@@ -9,8 +9,10 @@ use anyhow::Context;
 use anyhow::Result;
 use candle_core::Tensor;
 
+mod active_block_tables;
 mod contiguous_cache;
 mod paged_cache;
+mod physical_page_pool;
 mod prefix_index;
 mod utils;
 

@@ -23,6 +23,16 @@ retains or releases pages through `PhysicalPagePool`, installs or removes their
 virtual mappings through `ActiveBlockTables`, and asks `PrefixBlockIndex` which
 page bundles are reusable.
 
+The production files follow the same boundary:
+
+- `physical_page_pool.rs` implements tensor storage, allocation, reference
+  counting, and physical page reads and writes.
+- `active_block_tables.rs` implements the current sequence's virtual block
+  tables without accessing tensors.
+- `prefix_index.rs` implements reusable-prefix lookup and LRU leaf selection.
+- `paged_cache.rs` orchestrates the other components and presents the paged
+  cache backend to model execution.
+
 A physical page returns to the free list only when its final active or indexed
 reference is released. Complete shared pages are immutable.
 
