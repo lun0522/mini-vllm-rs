@@ -38,6 +38,11 @@ struct DecodeIterationResult {
     should_continue: bool,
 }
 
+struct PrefillResult {
+    generated_token_count: usize,
+    should_decode: bool,
+}
+
 pub(super) struct TextGenerationResult {
     pub(super) stats: TextGenerationStats,
     pub(super) token_ids: Vec<u32>,
@@ -87,10 +92,13 @@ where
         let generation_started = Instant::now();
         let mut prefill_finished = None;
         if self.max_new_token_count > 0 {
-            let should_decode = self.run_prefill_phase(target, draft)?;
+            let PrefillResult {
+                generated_token_count,
+                should_decode,
+            } = self.run_prefill_phase(target, draft)?;
             prefill_finished = Some(Instant::now());
             if should_decode {
-                self.run_decode_phase(target, draft)?;
+                self.run_decode_phase(target, draft, generated_token_count)?;
             }
         }
         let decode_finished = Instant::now();
@@ -113,17 +121,19 @@ where
         &mut self,
         target: &ModelAndKvCache,
         draft: Option<&ModelAndKvCache>,
-    ) -> Result<bool> {
+    ) -> Result<PrefillResult> {
         if (self.is_cancelled)() {
             anyhow::bail!("generation request was cancelled");
         }
         if let Some(draft) = draft {
-            let input =
-                Tensor::new(&self.tokens[..], draft.model.borrow().device())?.unsqueeze(0)?;
-            // Prefill the draft KV cache only. Draft-token proposals are generated during
-            // decoding, so the prompt logits are not sampled here.
-            draft.forward(&input, 0)?;
+            self.prefill_prompt_prefix(target)?;
+            self.prefill_prompt_prefix(draft)?;
+            return Ok(PrefillResult {
+                generated_token_count: 0,
+                should_decode: true,
+            });
         }
+
         let next_token = self.sample_next_token(
             target,
             &self.tokens,
@@ -131,15 +141,31 @@ where
             /* appended_tokens */ &[],
             &mut self.target_logits_processor.borrow_mut(),
         )?;
-        self.commit_next_token(next_token)
+        let should_decode = self.commit_next_token(next_token)?;
+        Ok(PrefillResult {
+            generated_token_count: usize::from(should_decode),
+            should_decode,
+        })
+    }
+
+    /// Prefills through the second-to-last prompt token, leaving the final token as the common
+    /// starting point for draft proposal and target verification.
+    fn prefill_prompt_prefix(&self, model: &ModelAndKvCache) -> Result<()> {
+        let prefill_tokens = &self.tokens[..self.tokens.len() - 1];
+        if prefill_tokens.is_empty() {
+            return Ok(());
+        }
+        let input = Tensor::new(prefill_tokens, model.model.borrow().device())?.unsqueeze(0)?;
+        model.forward(&input, 0)?;
+        Ok(())
     }
 
     fn run_decode_phase(
         &mut self,
         target: &ModelAndKvCache,
         draft: Option<&ModelAndKvCache>,
+        mut generated_token_count: usize,
     ) -> Result<()> {
-        let mut generated_token_count = 1;
         while generated_token_count < self.max_new_token_count {
             if (self.is_cancelled)() {
                 anyhow::bail!("generation request was cancelled");
@@ -183,8 +209,8 @@ where
         draft: &ModelAndKvCache,
         remaining_max_token_count: usize,
     ) -> Result<DecodeIterationResult> {
-        // Generate draft proposals autoregressively, starting with the pending token that has
-        // not yet been written to either model's KV cache.
+        // Generate draft proposals autoregressively, starting with the pending prompt or output
+        // token that has not yet been written to either model's KV cache.
         let original_cached_token_count = self.tokens.len() - 1;
         let draft_tokens = self.generate_draft_tokens(
             draft,

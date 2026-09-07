@@ -73,13 +73,15 @@ sequenceDiagram
     Handler->>Rpc: Forward GenerateText over tonic/UDS
     Rpc->>Worker: Queue InferenceRequest
     Worker->>Decode: Generate text with loaded model(s)
-    opt Draft model configured
-        Decode->>Draft: Prefill prompt without sampling
+    alt Draft model configured
+        Decode->>Target: Prefill through second-to-last prompt token
+        Decode->>Draft: Prefill through second-to-last prompt token
+    else Target-only generation
+        Decode->>Target: Prefill prompt and sample first token
     end
-    Decode->>Target: Prefill prompt and sample first token
     loop Until stop token, limit, or cancellation
         alt Draft model configured
-            Decode->>Draft: Generate draft proposals autoregressively
+            Decode->>Draft: Generate proposals from pending prompt/output token
             Draft-->>Decode: Proposed token IDs
             Decode->>Target: Verify proposal batch in one forward pass
             Target-->>Decode: Logits for every proposal position
