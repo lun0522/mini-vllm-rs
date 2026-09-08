@@ -219,19 +219,19 @@ fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
     let input_token_count = request.generate_text.input_token_ids.len();
     let execution_started = Instant::now();
     let queue_duration = execution_started.duration_since(request.queued_at);
-    // This worker currently runs one request at a time, so the change in the caches'
-    // cumulative eviction counters belongs entirely to this request. Continuous batching
-    // will require eviction accounting to be associated with individual requests instead.
+    log::info!(
+        "Worker state: request_id={} status=started input_tokens={} queue_us={}",
+        request.request_id,
+        input_token_count,
+        queue_duration.as_micros().separate_with_commas(),
+    );
     let previous_evicted_cached_token_count = model_runner.evicted_cached_token_count();
     let mut first_token_at = None;
     let mut output_token_count = 0;
     let result = model_runner.generate_text(
         &request.generate_text,
         |token_id| {
-            send_event(
-                &request.event_sender,
-                generate_text_event::Event::TokenId(token_id),
-            )?;
+            send_token_event(&request.event_sender, token_id)?;
             if first_token_at.is_none() {
                 first_token_at = Some(Instant::now());
             }
@@ -249,7 +249,7 @@ fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
     match result {
         Ok(result) => {
             log::info!(
-                "request_id={} status=completed input_tokens={} output_tokens={} queue_us={} \
+                "Worker state: request_id={} status=completed input_tokens={} output_tokens={} queue_us={} \
                  prefill_us={} ttft_us={} decode_us={} target_cached_tokens={} \
                  draft_cached_tokens={} evicted_cached_tokens={} draft_accepted={} \
                  draft_proposed={}",
@@ -280,7 +280,7 @@ fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
         Err(error) => {
             let status = generation_error_status(&error);
             log::info!(
-                "request_id={} status={} input_tokens={} output_tokens={} queue_us={} \
+                "Worker state: request_id={} status={} input_tokens={} output_tokens={} queue_us={} \
                  ttft_us={} evicted_cached_tokens={}",
                 request.request_id,
                 if status.code() == tonic::Code::Cancelled {
@@ -319,6 +319,14 @@ fn duration_to_microseconds_string(duration: Option<Duration>) -> String {
 
 fn count_to_string(count: Option<usize>) -> String {
     count.map_or_else(|| "none".to_owned(), |count| count.to_string())
+}
+
+fn send_token_event(
+    event_sender: &mpsc::Sender<Result<GenerateTextEvent, Status>>,
+    token_id: u32,
+) -> Result<()> {
+    send_event(event_sender, generate_text_event::Event::TokenId(token_id))
+        .map_err(|_| text_generation::GenerationCancelled.into())
 }
 
 fn send_event(
@@ -376,6 +384,18 @@ mod tests {
 
         assert_eq!(status.code(), tonic::Code::Cancelled);
         assert_eq!(status.message(), "generation request was cancelled");
+    }
+
+    #[test]
+    fn treats_a_dropped_generation_stream_as_cancellation() {
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+
+        let error = send_token_event(&sender, 42).expect_err("token send should fail");
+
+        assert!(error
+            .downcast_ref::<text_generation::GenerationCancelled>()
+            .is_some());
     }
 
     #[test]
