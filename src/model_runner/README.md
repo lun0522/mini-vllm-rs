@@ -24,8 +24,8 @@ flowchart LR
     InferenceWorker --> TextGeneration
 ```
 
-- `client.rs` creates the socket, starts the worker, waits for readiness, and
-  sends the shutdown command.
+- `client.rs` checks that the socket path is available, starts the worker, waits
+  for the worker to bind the socket, and sends the shutdown command.
 - `server/cli.rs` receives target and optional draft GGUF paths from the main
   process.
 - [`server/kv_cache/`](server/kv_cache/README.md) preallocates separate key/value pools for contiguous or
@@ -90,10 +90,11 @@ sequenceDiagram
             Decode->>Target: Forward the pending token
             Target-->>Decode: Next-token logits
         end
-        Decode-->>Worker: Push decoded text fragment
-        Worker-->>Rpc: Queue GenerateTextEvent::Text
-        Rpc-->>Handler: Stream text event
-        Handler-->>Caller: Proxy text event
+        Decode-->>Worker: Push generated token ID
+        Worker-->>Rpc: Queue GenerateTextEvent::TokenId
+        Rpc-->>Handler: Stream token-ID event
+        Handler->>Handler: Incrementally decode token ID
+        Handler-->>Caller: Stream text event
     end
     Decode-->>Worker: Return TextGenerationStats
     Worker->>Worker: Index complete cached blocks and release active references
@@ -102,7 +103,9 @@ sequenceDiagram
     Handler-->>Caller: Proxy final statistics
 ```
 
-- `server/mod.rs` receives tonic requests and queues them on a bounded channel.
+- `server/mod.rs` rejects inputs that cannot fit the configured KV-cache
+  capacity, limits the requested output length to the remaining capacity, then
+  queues valid tonic requests on a bounded channel.
 - `inference_worker.rs` owns the loaded model and processes requests on its
   dedicated thread. It restores reusable prefixes before generation, indexes
   complete cached blocks after success, and releases active references after
@@ -111,6 +114,6 @@ sequenceDiagram
 - `text_generation.rs` runs prefill and decode over token IDs, samples tokens,
   checks cancellation and stop tokens, and records prefill, decode, and
   speculative acceptance statistics.
-- Text fragments stream immediately unless `stream_output` is false, in which
-  case they are buffered.
+- The request handler decodes generated token IDs. It streams text fragments
+  immediately unless `stream_output` is false, in which case it buffers them.
 - A successful response ends with a `TextGenerationStats` event.

@@ -14,6 +14,7 @@ use tokenizers::Tokenizer;
 pub(super) struct TokenizerWrapper {
     tokenizer: Tokenizer,
     architecture: ModelArchitecture,
+    end_of_sequence_token_ids: Vec<u32>,
 }
 
 impl TokenizerWrapper {
@@ -34,6 +35,8 @@ impl TokenizerWrapper {
         if architecture == ModelArchitecture::Unspecified {
             anyhow::bail!("model architecture is unspecified");
         }
+        let end_of_sequence_token_ids =
+            resolve_end_of_sequence_token_ids(&tokenizer, architecture)?;
 
         match (draft_tokenizer_path, &model_metadata.draft_model) {
             (Some(path), Some(metadata)) => {
@@ -53,6 +56,7 @@ impl TokenizerWrapper {
         Ok(Self {
             tokenizer,
             architecture,
+            end_of_sequence_token_ids,
         })
     }
 
@@ -60,6 +64,7 @@ impl TokenizerWrapper {
         &self,
         request: GenerateText,
     ) -> Result<GenerateTextRequest> {
+        validate_generation_parameters(&request)?;
         let prompt = self.format_chat_prompt(&request.prompt);
         let encoding = self
             .tokenizer
@@ -70,17 +75,12 @@ impl TokenizerWrapper {
         if input_token_ids.is_empty() {
             anyhow::bail!("formatted prompt produced no token IDs");
         }
-        let end_of_sequence_token_ids = self
-            .end_of_sequence_tokens()
-            .iter()
-            .filter_map(|token| self.tokenizer.token_to_id(token))
-            .collect();
         Ok(GenerateTextRequest {
             input_token_ids,
             max_new_tokens: request.max_new_tokens,
             repeat_penalty: request.repeat_penalty,
             repeat_last_n: request.repeat_last_n,
-            end_of_sequence_token_ids,
+            end_of_sequence_token_ids: self.end_of_sequence_token_ids.clone(),
         })
     }
 
@@ -97,16 +97,6 @@ impl TokenizerWrapper {
             ModelArchitecture::Qwen2 => {
                 format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
             }
-            ModelArchitecture::Unspecified => {
-                unreachable!("tokenizer model architecture is always specified")
-            }
-        }
-    }
-
-    fn end_of_sequence_tokens(&self) -> &'static [&'static str] {
-        match self.architecture {
-            ModelArchitecture::Llama => &["<|eot_id|>", "<|end_of_text|>"],
-            ModelArchitecture::Qwen2 => &["<|im_end|>", "<|endoftext|>"],
             ModelArchitecture::Unspecified => {
                 unreachable!("tokenizer model architecture is always specified")
             }
@@ -149,6 +139,38 @@ fn load_tokenizer(path: &Path) -> Result<Tokenizer> {
     Tokenizer::from_file(path)
         .map_err(Error::msg)
         .context("failed to load the tokenizer")
+}
+
+fn validate_generation_parameters(request: &GenerateText) -> Result<()> {
+    if !request.repeat_penalty.is_finite() || request.repeat_penalty <= 0.0 {
+        anyhow::bail!("repeat_penalty must be finite and greater than zero");
+    }
+    Ok(())
+}
+
+fn resolve_end_of_sequence_token_ids(
+    tokenizer: &Tokenizer,
+    architecture: ModelArchitecture,
+) -> Result<Vec<u32>> {
+    let tokens: &[&str] = match architecture {
+        ModelArchitecture::Llama => &["<|eot_id|>", "<|end_of_text|>"],
+        ModelArchitecture::Qwen2 => &["<|im_end|>", "<|endoftext|>"],
+        ModelArchitecture::Unspecified => {
+            unreachable!("tokenizer model architecture is always specified")
+        }
+    };
+    let token_ids: Vec<_> = tokens
+        .iter()
+        .filter_map(|token| tokenizer.token_to_id(token))
+        .collect();
+    if token_ids.is_empty() {
+        anyhow::bail!(
+            "tokenizer does not contain any supported end-of-sequence token for {architecture:?}: \
+             {}",
+            tokens.join(", ")
+        );
+    }
+    Ok(token_ids)
 }
 
 /// Ensures target and draft tokenizers assign the same ID to every token.
@@ -239,6 +261,7 @@ mod tests {
         let tokenizer = TokenizerWrapper {
             tokenizer: tokenizer(&[("[UNK]", 0), ("<|im_end|>", 1), ("<|endoftext|>", 2)]),
             architecture: ModelArchitecture::Qwen2,
+            end_of_sequence_token_ids: vec![1, 2],
         };
         let request = GenerateText {
             prompt: "Hello".to_owned(),
@@ -255,6 +278,32 @@ mod tests {
         assert_eq!(tokenized.max_new_tokens, 12);
         assert_eq!(tokenized.repeat_penalty, 1.1);
         assert_eq!(tokenized.repeat_last_n, 32);
+    }
+
+    #[test]
+    fn rejects_invalid_repeat_penalties() {
+        for repeat_penalty in [0.0, -1.0, f32::INFINITY, f32::NAN] {
+            let request = GenerateText {
+                repeat_penalty,
+                ..Default::default()
+            };
+
+            assert!(validate_generation_parameters(&request).is_err());
+        }
+    }
+
+    #[test]
+    fn requires_a_supported_end_of_sequence_token() {
+        let tokenizer = tokenizer(&[("[UNK]", 0)]);
+
+        let error = resolve_end_of_sequence_token_ids(&tokenizer, ModelArchitecture::Qwen2)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("does not contain any supported end-of-sequence token"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -8,10 +8,23 @@ use candle_core::Tensor;
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::utils::apply_repeat_penalty;
 use std::cell::RefCell;
+use std::error::Error;
+use std::fmt;
 use std::time::Duration;
 use std::time::Instant;
 
 use super::ModelAndKvCache;
+
+#[derive(Debug)]
+pub(super) struct GenerationCancelled;
+
+impl fmt::Display for GenerationCancelled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("generation request was cancelled")
+    }
+}
+
+impl Error for GenerationCancelled {}
 
 struct TextGenerator<PushToken, IsCancelled> {
     tokens: Vec<u32>,
@@ -131,7 +144,7 @@ where
         prefill_start_positions: PrefillStartPositions,
     ) -> Result<PrefillResult> {
         if (self.is_cancelled)() {
-            anyhow::bail!("generation request was cancelled");
+            return Err(GenerationCancelled.into());
         }
         if let Some(draft) = draft {
             self.prefill_prompt_prefix(target, prefill_start_positions.target)?;
@@ -179,7 +192,7 @@ where
     ) -> Result<()> {
         while generated_token_count < self.max_new_token_count {
             if (self.is_cancelled)() {
-                anyhow::bail!("generation request was cancelled");
+                return Err(GenerationCancelled.into());
             }
             let should_continue = match draft {
                 Some(draft) => {
@@ -273,7 +286,7 @@ where
         let mut draft_tokens = Vec::with_capacity(draft_token_count);
         for _ in 0..draft_token_count {
             if (self.is_cancelled)() {
-                anyhow::bail!("generation request was cancelled");
+                return Err(GenerationCancelled.into());
             }
             let start_position = original_cached_token_count + draft_tokens.len();
             let input_token = draft_tokens

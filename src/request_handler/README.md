@@ -24,13 +24,15 @@ flowchart LR
     Events -->|"Text and final statistics"| Server
 ```
 
-- `client.rs` starts the request-handler process, waits for its socket, exposes
-  the public generation client, and manages shutdown and socket cleanup.
+- `client.rs` starts the request-handler process, waits for its public socket,
+  and manages shutdown and socket cleanup. Inference clients connect to that
+  socket directly.
 - `server/mod.rs` connects to the model runner before binding its public socket,
   so the socket indicates that the request handler is ready to serve requests.
 - `server/tokenizer.rs` loads the target tokenizer, validates the optional draft
   tokenizer and both models' vocabulary sizes, formats chat prompts, tokenizes
-  model input, and incrementally decodes generated token IDs.
+  model input, validates generation parameters and stop-token support, and
+  incrementally decodes generated token IDs.
 - `server/generation_event_processor.rs` converts model-runner token events into
   public text events. It emits fragments immediately for streaming requests or
   buffers them into one response when streaming is disabled.

@@ -117,6 +117,7 @@ async fn run_server(
         target_kv_cache_size_bytes,
     )?;
     let model_metadata = model_runner.model_metadata();
+    let token_capacity = model_runner.token_capacity();
     let listener = UnixListener::bind(socket_path)
         .context("failed to bind the model runner Unix domain socket")?;
     let (inference_sender, inference_receiver) = mpsc::channel(INFERENCE_QUEUE_CAPACITY);
@@ -128,6 +129,7 @@ async fn run_server(
     let service = ModelRunnerRpcService {
         inference_sender,
         model_metadata,
+        token_capacity,
         shutdown,
     };
 
@@ -147,6 +149,7 @@ async fn run_server(
 struct ModelRunnerRpcService {
     inference_sender: mpsc::Sender<InferenceRequest>,
     model_metadata: GetModelMetadataResponse,
+    token_capacity: usize,
     shutdown: RpcShutdown,
 }
 
@@ -165,10 +168,13 @@ impl ModelRunnerService for ModelRunnerRpcService {
         &self,
         request: Request<GenerateTextRequest>,
     ) -> Result<Response<Self::GenerateTextStream>, Status> {
+        let mut request = request.into_inner();
+        normalize_generate_text_request(&mut request, self.token_capacity)
+            .map_err(Status::invalid_argument)?;
         let (event_sender, event_receiver) = mpsc::channel(GENERATION_EVENT_QUEUE_CAPACITY);
         self.inference_sender
             .send(InferenceRequest {
-                generate_text: request.into_inner(),
+                generate_text: request,
                 event_sender,
             })
             .await
@@ -188,5 +194,91 @@ impl ModelRunnerService for ModelRunnerRpcService {
             model_runner_command::Command::Shutdown(_) => self.shutdown.trigger()?,
         }
         Ok(Response::new(CommandResult {}))
+    }
+}
+
+fn normalize_generate_text_request(
+    request: &mut GenerateTextRequest,
+    token_capacity: usize,
+) -> Result<(), String> {
+    if request.input_token_ids.is_empty() {
+        return Err("input token IDs must not be empty".to_owned());
+    }
+    let input_token_count = request.input_token_ids.len();
+    if input_token_count > token_capacity {
+        return Err(format!(
+            "request input contains {input_token_count} tokens but the configured KV-cache \
+             capacity is {token_capacity}"
+        ));
+    }
+
+    // The final generated token remains pending rather than being written to the cache, so one
+    // output token can be generated even when the input already fills the cache.
+    let maximum_new_token_count = u64::try_from(token_capacity - input_token_count + 1)
+        .map_err(|_| "maximum new token count does not fit in u64".to_owned())?;
+    if request.max_new_tokens > maximum_new_token_count {
+        log::warn!(
+            "Requested {} new tokens, but the KV cache can hold at most {} for this input; \
+             reducing max_new_tokens to {}",
+            request.max_new_tokens,
+            maximum_new_token_count,
+            maximum_new_token_count,
+        );
+        request.max_new_tokens = maximum_new_token_count;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_generate_text_request;
+    use crate::proto::model_runner::GenerateTextRequest;
+
+    #[test]
+    fn limits_generation_to_the_available_cache_capacity() {
+        let mut request = GenerateTextRequest {
+            input_token_ids: vec![1, 2, 3],
+            max_new_tokens: 3,
+            ..Default::default()
+        };
+
+        normalize_generate_text_request(&mut request, 4).unwrap();
+
+        assert_eq!(request.max_new_tokens, 2);
+    }
+
+    #[test]
+    fn rejects_empty_model_input() {
+        let mut request = GenerateTextRequest::default();
+
+        let error = normalize_generate_text_request(&mut request, 16).unwrap_err();
+
+        assert_eq!(error, "input token IDs must not be empty");
+    }
+
+    #[test]
+    fn rejects_input_that_exceeds_cache_capacity() {
+        let mut request = GenerateTextRequest {
+            input_token_ids: vec![1; 17],
+            max_new_tokens: 0,
+            ..Default::default()
+        };
+
+        let error = normalize_generate_text_request(&mut request, 16).unwrap_err();
+
+        assert!(error.contains("input contains 17 tokens"));
+    }
+
+    #[test]
+    fn allows_one_output_token_when_input_fills_cache() {
+        let mut request = GenerateTextRequest {
+            input_token_ids: vec![1; 16],
+            max_new_tokens: 8,
+            ..Default::default()
+        };
+
+        normalize_generate_text_request(&mut request, 16).unwrap();
+
+        assert_eq!(request.max_new_tokens, 1);
     }
 }

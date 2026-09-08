@@ -13,7 +13,7 @@ Status: ✅ done · 🚧 in progress · ⬜ not started · ❌ out of scope
     inference thread.
   - ✅ Streaming or buffered output with generation statistics.
   - ✅ Separate request-handling and model-inference processes.
-- ✅ Paged attention.
+- ✅ Paged KV-cache management.
   - ✅ Preallocated, engine-owned KV caches passed into model forward calls.
   - ✅ Fixed-size KV-cache pages with per-layer allocation and block tables.
   - ❌ Attention over paged caches without rebuilding contiguous tensors.
@@ -60,9 +60,8 @@ clear benefit while there is only one device worker.
 
 The following architectural changes are on the way:
 
-- Move chat formatting, tokenization, and incremental decoding into bounded
-  worker threads in the request-handler process, and use token-level RPCs with
-  the model runner.
+- Move CPU-heavy tokenization and incremental decoding work from async RPC tasks
+  into bounded worker threads in the request-handler process.
 - Add a scheduler component inside the model-runner process and implement
   continuous batching with one local Metal worker.
 - Define a narrow model-worker interface before adding more execution backends.

@@ -84,6 +84,10 @@ impl ModelRunner {
         }
     }
 
+    pub(super) fn token_capacity(&self) -> usize {
+        self.target.kv_cache.borrow().token_capacity()
+    }
+
     fn generate_text(
         &mut self,
         request: &GenerateTextRequest,
@@ -222,10 +226,19 @@ fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
         Err(error) => {
             let _ = request
                 .event_sender
-                .blocking_send(Err(Status::internal(format!(
-                    "model runner generation failed: {error:#}"
-                ))));
+                .blocking_send(Err(generation_error_status(error)));
         }
+    }
+}
+
+fn generation_error_status(error: anyhow::Error) -> Status {
+    if error
+        .downcast_ref::<text_generation::GenerationCancelled>()
+        .is_some()
+    {
+        Status::cancelled(error.to_string())
+    } else {
+        Status::internal(format!("model runner generation failed: {error:#}"))
     }
 }
 
@@ -274,6 +287,14 @@ mod tests {
             generate_text_event::Event::Stats(received) if received == stats
         ));
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn reports_generation_cancellation_with_the_cancelled_status() {
+        let status = generation_error_status(text_generation::GenerationCancelled.into());
+
+        assert_eq!(status.code(), tonic::Code::Cancelled);
+        assert_eq!(status.message(), "generation request was cancelled");
     }
 
     #[test]
