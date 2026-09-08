@@ -74,19 +74,20 @@ The following architectural changes are on the way:
 
 ## Run
 
-Run the server on CPU:
+Run the server on GPU using Metal:
 
 ```shell
 cargo run --release
 ```
 
-Optionally, set the `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` environment
-variables for this command to control the number of CPU worker threads:
+Run the server on CPU:
 
 ```shell
-CANDLE_NUM_THREADS=8 RAYON_NUM_THREADS=8 cargo run --release
+cargo run --release -- --inference-device cpu
 ```
 
+Optionally, set the `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` environment
+variables for CPU inference to control the number of CPU worker threads.
 `CANDLE_NUM_THREADS` controls Candle's dedicated worker pool, including
 quantized matrix multiplication, while `RAYON_NUM_THREADS` controls
 Rayon-based operations. On Apple Silicon, Candle defaults to the number of
@@ -94,18 +95,12 @@ performance-core logical CPUs, so the efficiency cores are not used by
 default. Adjust both values for the machine's CPU; using more threads does not
 necessarily improve throughput for every model or workload.
 
-Run it with Metal acceleration on Apple Silicon:
-
-```shell
-cargo run --release --features metal
-```
-
 Run the "Qwen2.5 7B Instruct Q4_K_M" target model with the "Qwen2.5 0.5B
 Instruct Q4_K_M" draft model for speculative decoding (both use the same
 tokenizer so their token IDs remain compatible):
 
 ```shell
-cargo run --release --features metal -- \
+cargo run --release -- \
   --model 'model_id: "bartowski/Qwen2.5-7B-Instruct-GGUF" model_filename: "Qwen2.5-7B-Instruct-Q4_K_M.gguf" tokenizer_id: "Qwen/Qwen2.5-7B-Instruct"' \
   --draft-model 'model_id: "bartowski/Qwen2.5-0.5B-Instruct-GGUF" model_filename: "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" tokenizer_id: "Qwen/Qwen2.5-7B-Instruct"' \
   --draft-token-count 4
@@ -117,7 +112,7 @@ tokenizer so their token IDs remain compatible) and a paged KV cache containing
 32 tokens per page:
 
 ```shell
-cargo run --release --features metal -- \
+cargo run --release -- \
   --kv-cache-type paged:32 \
   --model 'model_id: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF" model_filename: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"' \
   --draft-model 'model_id: "bartowski/Llama-3.2-1B-Instruct-GGUF" model_filename: "Llama-3.2-1B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"' \
@@ -132,6 +127,7 @@ Arguments:
 - `--draft-model '<textproto>'` loads a tokenizer-compatible draft model for
   speculative decoding.
 - `--draft-token-count <count>` sets the proposal length and defaults to `4`.
+- `--inference-device <device>` selects `gpu` or `cpu` and defaults to `gpu`.
 - `--kv-cache-type <type>` selects `contiguous`, `paged[:tokens-per-page]`, or
   `paged-prefix[:tokens-per-page]` KV-cache storage and defaults to
   `contiguous`. Paged caches contain 16 tokens per page when the count is

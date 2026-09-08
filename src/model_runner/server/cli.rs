@@ -1,3 +1,4 @@
+use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
 use argh::FromArgs;
 use std::path::PathBuf;
@@ -14,6 +15,9 @@ pub(crate) struct ModelRunnerProcessArgs {
     /// number of tokens proposed by the draft model per speculative decoding step
     #[argh(option)]
     pub(super) draft_token_count: usize,
+    /// device used for model inference
+    #[argh(option)]
+    pub(super) inference_device: InferenceDevice,
     /// KV cache implementation used for model inference
     #[argh(option)]
     pub(super) kv_cache_type: KvCacheType,

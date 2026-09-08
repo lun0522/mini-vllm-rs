@@ -1,3 +1,4 @@
+use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
 use crate::proto::model_config::ModelConfig;
 use crate::utils::textproto::parse_textproto;
@@ -22,6 +23,9 @@ pub(crate) struct MainProcessArgs {
     /// number of tokens proposed by the draft model per speculative decoding step
     #[argh(option, default = "DEFAULT_DRAFT_TOKEN_COUNT")]
     pub(crate) draft_token_count: usize,
+    /// device used for model inference
+    #[argh(option, default = "InferenceDevice::Gpu")]
+    pub(crate) inference_device: InferenceDevice,
     /// KV cache implementation used for model inference
     #[argh(option, default = "KvCacheType::Contiguous")]
     pub(crate) kv_cache_type: KvCacheType,
@@ -51,6 +55,7 @@ impl fmt::Display for MainProcessArgs {
         } else {
             writeln!(formatter, "Draft model: disabled")?;
         }
+        writeln!(formatter, "Inference device: {}", self.inference_device)?;
         writeln!(formatter, "KV cache type: {}", self.kv_cache_type)?;
         writeln!(
             formatter,
@@ -121,4 +126,25 @@ fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
         }
     }
     args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_to_gpu_inference() {
+        let args = MainProcessArgs::from_args(&["mini-vllm-rs"], &[])
+            .expect("default arguments should parse");
+
+        assert_eq!(args.inference_device, InferenceDevice::Gpu);
+    }
+
+    #[test]
+    fn selects_cpu_inference() {
+        let args = MainProcessArgs::from_args(&["mini-vllm-rs"], &["--inference-device", "cpu"])
+            .expect("CPU arguments should parse");
+
+        assert_eq!(args.inference_device, InferenceDevice::Cpu);
+    }
 }

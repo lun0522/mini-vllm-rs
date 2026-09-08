@@ -12,8 +12,8 @@ flowchart LR
     Control["server.rs<br/>Shutdown service"] --> Supervisor
 ```
 
-- `cli.rs` parses model, KV-cache, and socket configuration and normalizes
-  invalid or omitted values.
+- `cli.rs` parses model, inference-device, KV-cache, and socket configuration
+  and normalizes invalid or omitted values.
 - `supervisor.rs` downloads the configured artifacts, starts the model runner
   and request handler in dependency order, waits for Ctrl-C or a control RPC,
   and shuts both child processes down.
@@ -35,7 +35,7 @@ sequenceDiagram
 
     Main->>Models: Download target and optional draft artifacts
     Models-->>Main: GGUF and tokenizer paths
-    Main->>Runner: Start with model paths and cache configuration
+    Main->>Runner: Start with model paths, device, and cache configuration
     Runner-->>Main: Model-runner socket is ready
     Main->>Handler: Start with tokenizer and model-runner socket paths
     Handler->>Runner: Connect and validate model metadata

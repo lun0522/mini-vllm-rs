@@ -23,6 +23,7 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
         &model_artifacts,
         draft_model_artifacts.as_ref(),
         args.draft_token_count,
+        args.inference_device,
         args.kv_cache_type,
         args.target_kv_cache_size_bytes,
     )

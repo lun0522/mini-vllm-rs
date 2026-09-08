@@ -26,8 +26,8 @@ flowchart LR
 
 - `client.rs` checks that the socket path is available, starts the worker, waits
   for the worker to bind the socket, and sends the shutdown command.
-- `server/cli.rs` receives target and optional draft GGUF paths from the main
-  process.
+- `server/cli.rs` receives target and optional draft GGUF paths and the selected
+  inference device from the main process.
 - [`server/kv_cache/`](server/kv_cache/README.md) preallocates separate key/value pools for contiguous or
   paged storage. Paged mode uses configurable fixed-token-count pages and
   per-layer block tables, and reconstructs contiguous tensors for the existing

@@ -1,3 +1,4 @@
+use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
 use crate::models::loaded_model::LoadedModel;
 use crate::models::ModelInfo;
@@ -33,10 +34,11 @@ impl ModelRunner {
         model_path: &Path,
         draft_model_path: Option<&Path>,
         draft_token_count: usize,
+        inference_device: InferenceDevice,
         kv_cache_type: KvCacheType,
         target_kv_cache_size_bytes: usize,
     ) -> Result<Self> {
-        let device = Self::get_inference_device()?;
+        let device = Self::get_inference_device(inference_device)?;
         let loaded_model = LoadedModel::new(model_path, device)?;
         let loaded_draft_model = draft_model_path
             .map(|draft_model_path| {
@@ -176,16 +178,12 @@ impl ModelRunner {
         Ok(())
     }
 
-    fn get_inference_device() -> Result<Device> {
-        #[cfg(feature = "metal")]
-        {
-            Device::new_metal(0).context("failed to initialize the Metal device")
-        }
-
-        #[cfg(not(feature = "metal"))]
-        {
-            log::warn!("Metal support is disabled; CPU inference will be slower");
-            Ok(Device::Cpu)
+    fn get_inference_device(inference_device: InferenceDevice) -> Result<Device> {
+        match inference_device {
+            InferenceDevice::Cpu => Ok(Device::Cpu),
+            InferenceDevice::Gpu => {
+                Device::new_metal(0).context("failed to initialize the Metal device")
+            }
         }
     }
 }

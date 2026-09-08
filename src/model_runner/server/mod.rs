@@ -1,3 +1,4 @@
+use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
 use crate::models::loaded_model::LoadedModel;
 use crate::proto::model_runner::model_runner_command;
@@ -99,6 +100,7 @@ pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
         &args.model_path,
         args.draft_model_path,
         args.draft_token_count,
+        args.inference_device,
         args.kv_cache_type,
         args.target_kv_cache_size_bytes,
         &args.socket_path,
@@ -110,6 +112,7 @@ async fn run_server(
     model_path: &Path,
     draft_model_path: Option<PathBuf>,
     draft_token_count: usize,
+    inference_device: InferenceDevice,
     kv_cache_type: KvCacheType,
     target_kv_cache_size_bytes: usize,
     socket_path: &Path,
@@ -120,6 +123,7 @@ async fn run_server(
         model_path,
         draft_model_path.as_deref(),
         draft_token_count,
+        inference_device,
         kv_cache_type,
         target_kv_cache_size_bytes,
     )?;

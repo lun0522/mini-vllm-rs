@@ -9,8 +9,8 @@ license = "MIT"
 [dependencies]
 anyhow = "1.0"
 argh = "0.1"
-candle-core = "0.11.0"
-candle-nn = "0.11.0"
+candle-core = { version = "0.11.0", features = ["metal"] }
+candle-nn = { version = "0.11.0", features = ["metal"] }
 candle-transformers = "0.11.0"
 env_logger = "0.11"
 hf-hub = "0.4.1"
@@ -29,10 +29,6 @@ tracing = "0.1"
 
 [build-dependencies]
 tonic-build = "0.12"
-
-[features]
-default = []
-metal = ["candle-core/metal", "candle-nn/metal"]
 
 [profile.release]
 lto = "thin"

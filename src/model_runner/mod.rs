@@ -7,6 +7,42 @@ use std::str::FromStr;
 pub(crate) const DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InferenceDevice {
+    Cpu,
+    Gpu,
+}
+
+impl InferenceDevice {
+    fn cli_value(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+        }
+    }
+}
+
+impl fmt::Display for InferenceDevice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cpu => formatter.write_str("CPU"),
+            Self::Gpu => formatter.write_str("GPU"),
+        }
+    }
+}
+
+impl FromStr for InferenceDevice {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "cpu" => Ok(Self::Cpu),
+            "gpu" => Ok(Self::Gpu),
+            unsupported => Err(format!("unsupported inference device: {unsupported}")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum KvCacheType {
     Contiguous,
     Paged {
@@ -73,6 +109,15 @@ impl FromStr for KvCacheType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_inference_devices() {
+        assert_eq!("cpu".parse(), Ok(InferenceDevice::Cpu));
+        assert_eq!("gpu".parse(), Ok(InferenceDevice::Gpu));
+        assert!("mixed".parse::<InferenceDevice>().is_err());
+        assert_eq!(InferenceDevice::Cpu.to_string(), "CPU");
+        assert_eq!(InferenceDevice::Gpu.to_string(), "GPU");
+    }
 
     #[test]
     fn parses_kv_cache_types() {

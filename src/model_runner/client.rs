@@ -1,4 +1,5 @@
 use crate::model_runner::server;
+use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
 use crate::models::model_downloader::ModelArtifacts;
 use crate::proto::model_runner::model_runner_command::Command::Shutdown as ShutdownCommand;
@@ -31,6 +32,7 @@ impl ModelRunnerProcess {
         model_artifacts: &ModelArtifacts,
         draft_model_artifacts: Option<&ModelArtifacts>,
         draft_token_count: usize,
+        inference_device: InferenceDevice,
         kv_cache_type: KvCacheType,
         target_kv_cache_size_bytes: usize,
     ) -> Result<Self> {
@@ -40,6 +42,7 @@ impl ModelRunnerProcess {
             model_artifacts,
             draft_model_artifacts,
             draft_token_count,
+            inference_device,
             kv_cache_type,
             target_kv_cache_size_bytes,
             &socket_path,
@@ -102,6 +105,7 @@ fn spawn(
     model_artifacts: &ModelArtifacts,
     draft_model_artifacts: Option<&ModelArtifacts>,
     draft_token_count: usize,
+    inference_device: InferenceDevice,
     kv_cache_type: KvCacheType,
     target_kv_cache_size_bytes: usize,
     socket_path: &Path,
@@ -115,6 +119,8 @@ fn spawn(
         .arg(&model_artifacts.gguf)
         .arg("--draft-token-count")
         .arg(draft_token_count.to_string())
+        .arg("--inference-device")
+        .arg(inference_device.cli_value())
         .arg("--kv-cache-type")
         .arg(kv_cache_type.to_string())
         .arg("--target-kv-cache-size-bytes")
