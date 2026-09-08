@@ -6,12 +6,14 @@ use crate::proto::model_runner::generate_text_event;
 use crate::proto::model_runner::GenerateTextEvent;
 use crate::proto::model_runner::GenerateTextRequest;
 use crate::proto::model_runner::GetModelMetadataResponse;
-use crate::proto::model_runner::TextGenerationStats;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::Device;
 use log::info;
 use std::path::Path;
+use std::time::Duration;
+use std::time::Instant;
+use thousands::Separable;
 use tokio::sync::mpsc;
 use tonic::Status;
 
@@ -88,12 +90,20 @@ impl ModelRunner {
         self.target.kv_cache.borrow().token_capacity()
     }
 
+    pub(super) fn evicted_cached_token_count(&self) -> usize {
+        self.target.evicted_cached_token_count().saturating_add(
+            self.draft
+                .as_ref()
+                .map_or(0, ModelAndKvCache::evicted_cached_token_count),
+        )
+    }
+
     fn generate_text(
         &mut self,
         request: &GenerateTextRequest,
         push_token: impl FnMut(u32) -> Result<()>,
         is_cancelled: impl FnMut() -> bool,
-    ) -> Result<TextGenerationStats> {
+    ) -> Result<text_generation::TextGenerationResult> {
         let result = match (|| {
             // Restore only the prompt tokens before the final token. The final prompt token must
             // still pass through the model to produce the first generation logits, for both
@@ -110,7 +120,7 @@ impl ModelRunner {
                     .map(|draft| draft.restore_cached_prefix(prompt_prefix))
                     .transpose()?,
             };
-            text_generation::generate_text(
+            let result = text_generation::generate_text(
                 &self.target,
                 self.draft.as_ref(),
                 self.draft_token_count,
@@ -118,7 +128,8 @@ impl ModelRunner {
                 request,
                 push_token,
                 is_cancelled,
-            )
+            )?;
+            Ok::<_, anyhow::Error>(result)
         })() {
             Ok(result) => result,
             Err(error) => {
@@ -138,7 +149,7 @@ impl ModelRunner {
             }
             return Err(error);
         }
-        Ok(result.stats)
+        Ok(result)
     }
 
     fn finish_requests(&self, token_ids: &[u32]) -> Result<()> {
@@ -189,6 +200,8 @@ fn compute_kv_cache_size_bytes(model_info: &ModelInfo, token_capacity: usize) ->
 }
 
 pub(super) struct InferenceRequest {
+    pub(super) request_id: u64,
+    pub(super) queued_at: Instant,
     pub(super) generate_text: GenerateTextRequest,
     pub(super) event_sender: mpsc::Sender<Result<GenerateTextEvent, Status>>,
 }
@@ -205,33 +218,90 @@ pub(super) fn run(
 }
 
 fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
+    let input_token_count = request.generate_text.input_token_ids.len();
+    let execution_started = Instant::now();
+    let queue_duration = execution_started.duration_since(request.queued_at);
+    // This worker currently runs one request at a time, so the change in the caches'
+    // cumulative eviction counters belongs entirely to this request. Continuous batching
+    // will require eviction accounting to be associated with individual requests instead.
+    let previous_evicted_cached_token_count = model_runner.evicted_cached_token_count();
+    let mut first_token_at = None;
+    let mut output_token_count = 0;
     let result = model_runner.generate_text(
         &request.generate_text,
         |token_id| {
             send_event(
                 &request.event_sender,
                 generate_text_event::Event::TokenId(token_id),
-            )
+            )?;
+            if first_token_at.is_none() {
+                first_token_at = Some(Instant::now());
+            }
+            output_token_count += 1;
+            Ok(())
         },
         || request.event_sender.is_closed(),
     );
+    let evicted_cached_token_count = model_runner
+        .evicted_cached_token_count()
+        .saturating_sub(previous_evicted_cached_token_count);
+    let time_to_first_token =
+        first_token_at.map(|first_token_at| first_token_at.duration_since(request.queued_at));
 
     match result {
-        Ok(stats) => {
+        Ok(result) => {
+            log::info!(
+                "request_id={} status=completed input_tokens={} output_tokens={} queue_us={} \
+                 prefill_us={} ttft_us={} decode_us={} target_cached_tokens={} \
+                 draft_cached_tokens={} evicted_cached_tokens={} draft_accepted={} \
+                 draft_proposed={}",
+                request.request_id,
+                input_token_count,
+                result.stats.output_token_count,
+                queue_duration.as_micros().separate_with_commas(),
+                result
+                    .stats
+                    .prefill_duration_microseconds
+                    .separate_with_commas(),
+                duration_to_microseconds_string(time_to_first_token),
+                result
+                    .stats
+                    .decode_duration_microseconds
+                    .separate_with_commas(),
+                result.target_cached_token_count,
+                count_to_string(result.draft_cached_token_count),
+                evicted_cached_token_count,
+                result.accepted_draft_token_count,
+                result.proposed_draft_token_count,
+            );
             let _ = send_event(
                 &request.event_sender,
-                generate_text_event::Event::Stats(stats),
+                generate_text_event::Event::Stats(result.stats),
             );
         }
         Err(error) => {
-            let _ = request
-                .event_sender
-                .blocking_send(Err(generation_error_status(error)));
+            let status = generation_error_status(&error);
+            log::info!(
+                "request_id={} status={} input_tokens={} output_tokens={} queue_us={} \
+                 ttft_us={} evicted_cached_tokens={}",
+                request.request_id,
+                if status.code() == tonic::Code::Cancelled {
+                    "cancelled"
+                } else {
+                    "failed"
+                },
+                input_token_count,
+                output_token_count,
+                queue_duration.as_micros().separate_with_commas(),
+                duration_to_microseconds_string(time_to_first_token),
+                evicted_cached_token_count,
+            );
+            let _ = request.event_sender.blocking_send(Err(status));
         }
     }
 }
 
-fn generation_error_status(error: anyhow::Error) -> Status {
+fn generation_error_status(error: &anyhow::Error) -> Status {
     if error
         .downcast_ref::<text_generation::GenerationCancelled>()
         .is_some()
@@ -240,6 +310,17 @@ fn generation_error_status(error: anyhow::Error) -> Status {
     } else {
         Status::internal(format!("model runner generation failed: {error:#}"))
     }
+}
+
+fn duration_to_microseconds_string(duration: Option<Duration>) -> String {
+    duration.map_or_else(
+        || "none".to_owned(),
+        |duration| duration.as_micros().separate_with_commas(),
+    )
+}
+
+fn count_to_string(count: Option<usize>) -> String {
+    count.map_or_else(|| "none".to_owned(), |count| count.to_string())
 }
 
 fn send_event(
@@ -254,6 +335,7 @@ fn send_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::model_runner::TextGenerationStats;
     use candle_core::DType;
 
     fn receive_event(
@@ -291,7 +373,8 @@ mod tests {
 
     #[test]
     fn reports_generation_cancellation_with_the_cancelled_status() {
-        let status = generation_error_status(text_generation::GenerationCancelled.into());
+        let error = anyhow::Error::new(text_generation::GenerationCancelled);
+        let status = generation_error_status(&error);
 
         assert_eq!(status.code(), tonic::Code::Cancelled);
         assert_eq!(status.message(), "generation request was cancelled");

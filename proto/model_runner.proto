@@ -65,10 +65,10 @@ message TextGenerationStats {
   uint64 input_token_count = 1;
   // Number of generated tokens, excluding the terminal end-of-sequence token.
   uint64 output_token_count = 2;
-  // Prefill time in milliseconds.
-  uint64 prefill_duration_milliseconds = 3;
-  // Decode time in milliseconds.
-  uint64 decode_duration_milliseconds = 4;
+  // Prefill time in microseconds.
+  uint64 prefill_duration_microseconds = 3;
+  // Decode time in microseconds.
+  uint64 decode_duration_microseconds = 4;
   // Fraction of proposed draft tokens accepted during speculative decoding.
   optional float draft_token_acceptance_rate = 5;
 }

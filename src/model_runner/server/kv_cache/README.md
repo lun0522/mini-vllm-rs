@@ -66,22 +66,11 @@ flowchart TD
     Fail --> Reset
 ```
 
-- Only complete immutable blocks are indexed; a final incomplete block is
-  ignored.
-- Target and draft caches independently restore complete blocks from the prompt
-  prefix before prefill. The final prompt token remains pending for decoding.
-- Completion indexing resumes from the restored block cursor instead of
-  traversing the matched prefix again.
-- Tokens passed to `index_cached_sequence` must have KV values in every model
-  layer. A newly sampled token that has not gone through a model forward pass
-  must not be included.
-- Successful requests retain newly indexed blocks before releasing their active
-  page references. Failed and cancelled requests release only active
-  references, so previously indexed prefixes remain reusable.
-- When an append needs more pages than are free, `PagedKvCache` repeatedly
-  evicts least-recently-used inactive leaves and releases their indexed page
-  references. The active request's restored leaf is protected; allocation
-  fails if no other leaf can make enough space.
+- Only complete blocks whose KV values exist in every model layer are indexed.
+- Target and draft caches restore prefixes independently. The final prompt token
+  remains pending so it can produce the first generation logits.
+- Eviction removes only inactive prefixes; the active request's prefix remains
+  protected.
 
 ## Prefix-block index example
 

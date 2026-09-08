@@ -56,6 +56,7 @@ struct PrefillResult {
     should_decode: bool,
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct PrefillStartPositions {
     pub(super) target: usize,
     pub(super) draft: Option<usize>,
@@ -64,6 +65,10 @@ pub(super) struct PrefillStartPositions {
 pub(super) struct TextGenerationResult {
     pub(super) stats: TextGenerationStats,
     pub(super) token_ids: Vec<u32>,
+    pub(super) target_cached_token_count: usize,
+    pub(super) draft_cached_token_count: Option<usize>,
+    pub(super) accepted_draft_token_count: usize,
+    pub(super) proposed_draft_token_count: usize,
 }
 
 pub(super) fn generate_text(
@@ -134,6 +139,10 @@ where
         Ok(TextGenerationResult {
             stats,
             token_ids: self.tokens,
+            target_cached_token_count: prefill_start_positions.target,
+            draft_cached_token_count: prefill_start_positions.draft,
+            accepted_draft_token_count: self.accepted_draft_token_count,
+            proposed_draft_token_count: self.proposed_draft_token_count,
         })
     }
 
@@ -451,18 +460,18 @@ fn create_generation_stats(
             .context("input token count does not fit in u64")?,
         output_token_count: u64::try_from(output_token_count)
             .context("output token count does not fit in u64")?,
-        prefill_duration_milliseconds: duration_milliseconds(
+        prefill_duration_microseconds: duration_microseconds(
             prefill_finished.duration_since(generation_started),
         ),
-        decode_duration_milliseconds: duration_milliseconds(
+        decode_duration_microseconds: duration_microseconds(
             decode_finished.duration_since(prefill_finished),
         ),
         draft_token_acceptance_rate,
     })
 }
 
-fn duration_milliseconds(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or_default()
+fn duration_microseconds(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or_default()
 }
 
 #[cfg(test)]
