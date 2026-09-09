@@ -86,6 +86,9 @@ Run the server on CPU:
 cargo run --release -- --inference-device cpu
 ```
 
+Input preprocessing uses four request-handler worker threads by default. Use
+`--input-preprocessing-thread-count` to change the pool size.
+
 The future continuous-batching scheduler can be configured with
 `--max-batched-token-count`, `--max-active-request-count`, and
 `--scheduling-policy`. The current single-request worker is inherently

@@ -14,6 +14,7 @@ const DEFAULT_DRAFT_TOKEN_COUNT: usize = 4;
 const DEFAULT_TARGET_KV_CACHE_SIZE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_BATCHED_TOKEN_COUNT: usize = 512;
 const DEFAULT_MAX_ACTIVE_REQUEST_COUNT: usize = 4;
+const DEFAULT_INPUT_PREPROCESSING_THREAD_COUNT: usize = 4;
 
 /// Runs text generation with a model from Hugging Face.
 #[derive(FromArgs)]
@@ -45,6 +46,9 @@ pub(crate) struct MainProcessArgs {
     /// policy used to choose requests for the next model batch
     #[argh(option, default = "SchedulingPolicy::FirstComeFirstServed")]
     pub(crate) scheduling_policy: SchedulingPolicy,
+    /// number of request-handler threads used for concurrent input preprocessing
+    #[argh(option, default = "DEFAULT_INPUT_PREPROCESSING_THREAD_COUNT")]
+    pub(crate) input_preprocessing_thread_count: usize,
     /// unix domain socket exposed to local inference clients
     #[argh(option, default = "default_request_socket()")]
     pub(crate) request_socket: PathBuf,
@@ -86,6 +90,11 @@ impl fmt::Display for MainProcessArgs {
             self.max_active_request_count.separate_with_commas()
         )?;
         writeln!(formatter, "Scheduling policy: {}", self.scheduling_policy)?;
+        writeln!(
+            formatter,
+            "Input preprocessing thread count: {}",
+            self.input_preprocessing_thread_count
+        )?;
         writeln!(
             formatter,
             "Request socket: {}",
@@ -160,6 +169,13 @@ fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
         );
         args.max_active_request_count = DEFAULT_MAX_ACTIVE_REQUEST_COUNT;
     }
+    if args.input_preprocessing_thread_count == 0 {
+        log::warn!(
+            "Invalid input preprocessing thread count 0; using default value \
+             {DEFAULT_INPUT_PREPROCESSING_THREAD_COUNT}"
+        );
+        args.input_preprocessing_thread_count = DEFAULT_INPUT_PREPROCESSING_THREAD_COUNT;
+    }
     if args.model.model_revision.is_empty() {
         args.model.model_revision = "main".to_owned();
     }
@@ -215,5 +231,13 @@ mod tests {
             args.scheduling_policy,
             SchedulingPolicy::ShortestPrefillFirst
         );
+    }
+
+    #[test]
+    fn defaults_to_four_input_preprocessing_threads() {
+        let args = MainProcessArgs::from_args(&["mini-vllm-rs"], &[])
+            .expect("default arguments should parse");
+
+        assert_eq!(args.input_preprocessing_thread_count, 4);
     }
 }

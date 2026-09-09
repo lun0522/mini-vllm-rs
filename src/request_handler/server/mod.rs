@@ -24,9 +24,11 @@ use tonic::Response;
 use tonic::Status;
 
 mod generation_event_processor;
+mod input_preprocessing_pool;
 mod tokenizer;
 
 use generation_event_processor::GenerationEventProcessor;
+use input_preprocessing_pool::InputPreprocessingPool;
 use tokenizer::IncrementalTokenDecoder;
 use tokenizer::TokenizerWrapper;
 
@@ -45,6 +47,9 @@ pub(crate) struct RequestHandlerProcessArgs {
     /// draft model tokenizer path
     #[argh(option)]
     draft_tokenizer_path: Option<PathBuf>,
+    /// number of threads used for concurrent input preprocessing
+    #[argh(option)]
+    input_preprocessing_thread_count: usize,
     /// request handler Unix domain socket path
     #[argh(option)]
     request_handler_socket_path: PathBuf,
@@ -62,9 +67,11 @@ pub(crate) async fn run(args: RequestHandlerProcessArgs) -> Result<()> {
         args.draft_tokenizer_path.as_deref(),
         &model_metadata,
     )?;
+    let input_preprocessing_pool =
+        InputPreprocessingPool::new(tokenizer, args.input_preprocessing_thread_count)?;
     run_server(
         model_runner_client,
-        tokenizer,
+        input_preprocessing_pool,
         &args.request_handler_socket_path,
     )
     .await
@@ -79,7 +86,7 @@ async fn connect_to_model_runner(socket_path: &Path) -> Result<ModelRunnerServic
 
 async fn run_server(
     model_runner_client: ModelRunnerServiceClient<Channel>,
-    tokenizer: TokenizerWrapper,
+    input_preprocessing_pool: InputPreprocessingPool,
     socket_path: &Path,
 ) -> Result<()> {
     // Bind only after the upstream connection succeeds so the socket indicates
@@ -89,7 +96,7 @@ async fn run_server(
     let (shutdown, shutdown_receiver) = RpcShutdown::channel();
     let service = RequestHandlerRpcService {
         model_runner_client,
-        tokenizer,
+        input_preprocessing_pool,
         shutdown,
     };
 
@@ -104,7 +111,7 @@ async fn run_server(
 
 struct RequestHandlerRpcService {
     model_runner_client: ModelRunnerServiceClient<Channel>,
-    tokenizer: TokenizerWrapper,
+    input_preprocessing_pool: InputPreprocessingPool,
     shutdown: RpcShutdown,
 }
 
@@ -116,23 +123,23 @@ impl RequestHandlerService for RequestHandlerRpcService {
         &self,
         request: Request<GenerateText>,
     ) -> Result<Response<Self::GenerateTextStream>, Status> {
-        let request = request.into_inner();
-        let stream_output = request.stream_output;
         let request = self
-            .tokenizer
-            .create_generate_text_request(request)
+            .input_preprocessing_pool
+            .preprocess(request.into_inner())
+            .await
             .map_err(|error| {
                 Status::invalid_argument(format!("failed to process input: {error:#}"))
             })?;
         let mut model_runner_client = self.model_runner_client.clone();
-        let response = model_runner_client.generate_text(request).await?;
+        let response = model_runner_client
+            .generate_text(request.generate_text_request)
+            .await?;
         let (event_sender, event_receiver) = mpsc::channel(GENERATION_EVENT_QUEUE_CAPACITY);
-        let decoder = self.tokenizer.create_token_decoder();
         tokio::spawn(forward_generation_events(
             response.into_inner(),
             event_sender,
-            decoder,
-            stream_output,
+            request.token_decoder,
+            request.stream_output,
         ));
         Ok(Response::new(ReceiverStream::new(event_receiver)))
     }

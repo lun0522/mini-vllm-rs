@@ -11,6 +11,7 @@ flowchart LR
 
     subgraph Handler[Request handler process]
         Server["server/mod.rs<br/>Public tonic service"]
+        Preprocessing["server/input_preprocessing_pool.rs<br/>Concurrent preprocessing workers"]
         Tokenizer["server/tokenizer.rs<br/>Chat formatting and tokenization"]
         Events["server/generation_event_processor.rs<br/>Token decoding and event conversion"]
     end
@@ -18,7 +19,8 @@ flowchart LR
     Runner["Model runner process"]
 
     Client -->|"Spawns with tokenizer and socket paths"| Server
-    Server --> Tokenizer
+    Server --> Preprocessing
+    Preprocessing --> Tokenizer
     Server -->|"Token-level RPC"| Runner
     Runner -->|"Token IDs and final statistics"| Events
     Events -->|"Text and final statistics"| Server
@@ -29,6 +31,8 @@ flowchart LR
   socket directly.
 - `server/mod.rs` connects to the model runner before binding its public socket,
   so the socket indicates that the request handler is ready to serve requests.
+- `server/input_preprocessing_pool.rs` runs input validation, chat formatting, and
+  tokenization concurrently on a fixed-size worker pool.
 - `server/tokenizer.rs` loads the target tokenizer, validates the optional draft
   tokenizer and both models' vocabulary sizes, formats chat prompts, tokenizes
   model input, validates generation parameters and stop-token support, and
@@ -46,13 +50,13 @@ The generation path is:
 sequenceDiagram
     participant Caller as Inference client
     participant Handler as Request handler
-    participant Tokenizer as Tokenizer
+    participant Preprocessing as Preprocessing pool
     participant Runner as Model runner
     participant Events as Event processor
 
     Caller->>Handler: GenerateText(prompt, parameters)
-    Handler->>Tokenizer: Format and tokenize prompt
-    Tokenizer-->>Handler: Input and stop token IDs
+    Handler->>Preprocessing: Submit input preprocessing
+    Preprocessing-->>Handler: Input and stop token IDs
     Handler->>Runner: GenerateTextRequest(token IDs)
     loop Generated tokens
         Runner-->>Handler: Token ID

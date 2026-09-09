@@ -39,6 +39,7 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
         draft_model_artifacts
             .as_ref()
             .map(|artifacts| artifacts.tokenizer.as_path()),
+        args.input_preprocessing_thread_count,
         args.request_socket,
     )
     .await

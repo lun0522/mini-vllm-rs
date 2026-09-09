@@ -26,6 +26,7 @@ impl RequestHandlerProcess {
         model_runner_socket_path: &Path,
         tokenizer_path: &Path,
         draft_tokenizer_path: Option<&Path>,
+        input_preprocessing_thread_count: usize,
         request_handler_socket_path: PathBuf,
     ) -> Result<Self> {
         domain_socket::ensure_available(&request_handler_socket_path, "request handler socket")?;
@@ -34,6 +35,7 @@ impl RequestHandlerProcess {
             model_runner_socket_path,
             tokenizer_path,
             draft_tokenizer_path,
+            input_preprocessing_thread_count,
             request_handler_socket_path.as_path(),
         )?;
         let channel = match domain_socket::wait_for_server(
@@ -97,6 +99,7 @@ fn spawn(
     model_runner_socket_path: &Path,
     tokenizer_path: &Path,
     draft_tokenizer_path: Option<&Path>,
+    input_preprocessing_thread_count: usize,
     socket_path: &Path,
 ) -> Result<ChildProcess> {
     let executable = std::env::current_exe().context("failed to locate the current executable")?;
@@ -107,7 +110,9 @@ fn spawn(
         .arg("--model-runner-socket-path")
         .arg(model_runner_socket_path)
         .arg("--tokenizer-path")
-        .arg(tokenizer_path);
+        .arg(tokenizer_path)
+        .arg("--input-preprocessing-thread-count")
+        .arg(input_preprocessing_thread_count.to_string());
     if let Some(draft_tokenizer_path) = draft_tokenizer_path {
         command
             .arg("--draft-tokenizer-path")
