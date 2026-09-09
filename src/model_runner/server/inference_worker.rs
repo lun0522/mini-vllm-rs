@@ -14,7 +14,6 @@ use super::model_runner::ModelRunner;
 use super::text_generation;
 
 pub(super) struct InferenceRequest {
-    pub(super) request_id: u64,
     pub(super) queued_at: Instant,
     pub(super) generate_text: GenerateTextRequest,
     pub(super) event_sender: mpsc::Sender<Result<GenerateTextEvent, Status>>,
@@ -51,7 +50,7 @@ fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
     let queue_duration = execution_started.duration_since(request.queued_at);
     log::info!(
         "Worker state: request_id={} status=started input_tokens={} ignore_eos_tokens={} queue_us={}",
-        request.request_id,
+        request.generate_text.request_id,
         input_token_count,
         request.generate_text.end_of_sequence_token_ids.is_empty(),
         queue_duration.as_micros().separate_with_commas(),
@@ -84,7 +83,7 @@ fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
                  prefill_us={} ttft_us={} decode_us={} target_cached_tokens={} \
                  draft_cached_tokens={} evicted_cached_tokens={} draft_accepted={} \
                  draft_proposed={}",
-                request.request_id,
+                request.generate_text.request_id,
                 input_token_count,
                 result.stats.output_token_count,
                 queue_duration.as_micros().separate_with_commas(),
@@ -113,7 +112,7 @@ fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
             log::info!(
                 "Worker state: request_id={} status={} input_tokens={} output_tokens={} queue_us={} \
                  ttft_us={} evicted_cached_tokens={}",
-                request.request_id,
+                request.generate_text.request_id,
                 if status.code() == tonic::Code::Cancelled {
                     "cancelled"
                 } else {

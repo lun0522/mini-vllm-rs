@@ -31,6 +31,7 @@ flowchart LR
   socket directly.
 - `server/mod.rs` connects to the model runner before binding its public socket,
   so the socket indicates that the request handler is ready to serve requests.
+  It assigns each request the ID used in preprocessing and model-runner logs.
 - `server/input_preprocessing_pool.rs` runs input validation, chat formatting, and
   tokenization concurrently on a fixed-size worker pool.
 - `server/tokenizer.rs` loads the target tokenizer, validates the optional draft
@@ -55,7 +56,8 @@ sequenceDiagram
     participant Events as Event processor
 
     Caller->>Handler: GenerateText(prompt, parameters)
-    Handler->>Preprocessing: Submit input preprocessing
+    Handler->>Handler: Assign request ID
+    Handler->>Preprocessing: Submit input preprocessing with request ID
     Preprocessing-->>Handler: Input and stop token IDs
     Handler->>Runner: GenerateTextRequest(token IDs)
     loop Generated tokens

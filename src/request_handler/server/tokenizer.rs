@@ -86,6 +86,7 @@ impl TokenizerWrapper {
             repeat_penalty: request.repeat_penalty,
             repeat_last_n: request.repeat_last_n,
             end_of_sequence_token_ids,
+            request_id: request.request_id,
         })
     }
 
@@ -269,6 +270,7 @@ mod tests {
             end_of_sequence_token_ids: vec![1, 2],
         };
         let request = GenerateText {
+            request_id: 42,
             prompt: "Hello".to_owned(),
             max_new_tokens: 12,
             repeat_penalty: 1.1,
@@ -284,6 +286,7 @@ mod tests {
         assert_eq!(tokenized.max_new_tokens, 12);
         assert_eq!(tokenized.repeat_penalty, 1.1);
         assert_eq!(tokenized.repeat_last_n, 32);
+        assert_eq!(tokenized.request_id, 42);
     }
 
     #[test]
@@ -294,6 +297,7 @@ mod tests {
             end_of_sequence_token_ids: vec![1],
         };
         let request = GenerateText {
+            request_id: 42,
             prompt: "Hello".to_owned(),
             repeat_penalty: 1.0,
             ignore_eos_tokens: true,

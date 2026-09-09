@@ -14,6 +14,8 @@ use anyhow::Result;
 use argh::FromArgs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -97,6 +99,7 @@ async fn run_server(
     let service = RequestHandlerRpcService {
         model_runner_client,
         input_preprocessing_pool,
+        request_id: RequestId::new(),
         shutdown,
     };
 
@@ -112,7 +115,25 @@ async fn run_server(
 struct RequestHandlerRpcService {
     model_runner_client: ModelRunnerServiceClient<Channel>,
     input_preprocessing_pool: InputPreprocessingPool,
+    request_id: RequestId,
     shutdown: RpcShutdown,
+}
+
+struct RequestId(AtomicU64);
+
+impl RequestId {
+    fn new() -> Self {
+        Self(AtomicU64::new(1))
+    }
+
+    /// Returns the current request ID and advances to the next one.
+    fn next(&self) -> Result<u64, &'static str> {
+        self.0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |request_id| {
+                request_id.checked_add(1)
+            })
+            .map_err(|_| "request ID space is exhausted")
+    }
 }
 
 #[tonic::async_trait]
@@ -123,9 +144,13 @@ impl RequestHandlerService for RequestHandlerRpcService {
         &self,
         request: Request<GenerateText>,
     ) -> Result<Response<Self::GenerateTextStream>, Status> {
+        let mut request = request.into_inner();
+        let request_id = self.request_id.next().map_err(Status::resource_exhausted)?;
+        request.request_id = request_id;
+        log::info!("Request handler state: request_id={request_id} status=arrived");
         let request = self
             .input_preprocessing_pool
-            .preprocess(request.into_inner())
+            .preprocess(request)
             .await
             .map_err(|error| {
                 Status::invalid_argument(format!("failed to process input: {error:#}"))
@@ -185,5 +210,18 @@ async fn forward_generation_events(
         if processed.finished {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RequestId;
+
+    #[test]
+    fn request_id_returns_the_current_value_before_incrementing() {
+        let request_id = RequestId::new();
+
+        assert_eq!(request_id.next(), Ok(1));
+        assert_eq!(request_id.next(), Ok(2));
     }
 }

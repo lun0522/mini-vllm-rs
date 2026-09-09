@@ -105,7 +105,10 @@ fn run_worker(
                 request,
                 result_sender,
             } => {
-                log::info!("Input preprocessing state: worker_index={worker_index} status=started");
+                let request_id = request.request_id;
+                log::info!(
+                    "Input preprocessing state: request_id={request_id} worker_index={worker_index} status=started"
+                );
                 let stream_output = request.stream_output;
                 let result =
                     tokenizer
@@ -116,7 +119,7 @@ fn run_worker(
                             stream_output,
                         });
                 log::info!(
-                    "Input preprocessing state: worker_index={worker_index} status=finished success={}",
+                    "Input preprocessing state: request_id={request_id} worker_index={worker_index} status=finished success={}",
                     result.is_ok()
                 );
                 // A dropped receiver means the RPC was cancelled while preprocessing was running;

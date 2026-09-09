@@ -12,18 +12,20 @@ service RequestHandlerService {
 }
 
 message GenerateText {
+  // Identifier assigned by the request handler before preprocessing.
+  uint64 request_id = 1;
   // User text inserted into the model's chat template.
-  string prompt = 1;
+  string prompt = 2;
   // Maximum number of tokens the model may generate before stopping.
-  uint64 max_new_tokens = 2;
+  uint64 max_new_tokens = 3;
   // Positive finite penalty applied to previously seen tokens; 1.0 disables it.
-  float repeat_penalty = 3;
+  float repeat_penalty = 4;
   // Number of recent tokens considered when applying the repetition penalty.
-  uint64 repeat_last_n = 4;
+  uint64 repeat_last_n = 5;
   // Whether text events contain incremental fragments or one buffered response.
-  bool stream_output = 5;
+  bool stream_output = 6;
   // Benchmarking only: ignore end-of-sequence tokens and generate until max_new_tokens is reached.
-  bool ignore_eos_tokens = 6;
+  bool ignore_eos_tokens = 7;
 }
 
 message GenerateTextEvent {

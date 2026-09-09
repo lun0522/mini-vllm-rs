@@ -39,16 +39,18 @@ message ModelRunnerCommand {
 }
 
 message GenerateTextRequest {
+  // Request-handler-assigned identifier used to correlate request lifecycle logs.
+  uint64 request_id = 1;
   // Fully formatted and tokenized input prompt.
-  repeated uint32 input_token_ids = 1;
+  repeated uint32 input_token_ids = 2;
   // Maximum number of tokens the model may generate before stopping.
-  uint64 max_new_tokens = 2;
+  uint64 max_new_tokens = 3;
   // Positive finite penalty applied to previously seen tokens; 1.0 disables it.
-  float repeat_penalty = 3;
+  float repeat_penalty = 4;
   // Number of recent tokens considered when applying the repetition penalty.
-  uint64 repeat_last_n = 4;
+  uint64 repeat_last_n = 5;
   // Token IDs that terminate generation without being emitted.
-  repeated uint32 end_of_sequence_token_ids = 5;
+  repeated uint32 end_of_sequence_token_ids = 6;
 }
 
 message GenerateTextEvent {

@@ -11,8 +11,6 @@ use crate::proto::model_runner::ModelRunnerCommand;
 use crate::utils::rpc_shutdown::RpcShutdown;
 use anyhow::Context;
 use anyhow::Result;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
@@ -76,7 +74,6 @@ async fn run_server(args: ModelRunnerProcessArgs) -> Result<()> {
         inference_sender,
         model_metadata,
         token_capacity,
-        request_id: RequestId::new(),
         shutdown,
     };
 
@@ -97,24 +94,7 @@ struct ModelRunnerRpcService {
     inference_sender: mpsc::Sender<InferenceRequest>,
     model_metadata: GetModelMetadataResponse,
     token_capacity: usize,
-    request_id: RequestId,
     shutdown: RpcShutdown,
-}
-
-struct RequestId(AtomicU64);
-
-impl RequestId {
-    fn new() -> Self {
-        Self(AtomicU64::new(1))
-    }
-
-    fn next(&self) -> Result<u64, &'static str> {
-        self.0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |request_id| {
-                request_id.checked_add(1)
-            })
-            .map_err(|_| "request ID space is exhausted")
-    }
 }
 
 #[tonic::async_trait]
@@ -135,18 +115,18 @@ impl ModelRunnerService for ModelRunnerRpcService {
         let mut request = request.into_inner();
         normalize_generate_text_request(&mut request, self.token_capacity)
             .map_err(Status::invalid_argument)?;
-        let request_id = self.request_id.next().map_err(Status::resource_exhausted)?;
+        let request_id = request.request_id;
         let queued_at = Instant::now();
         let (event_sender, event_receiver) = mpsc::channel(GENERATION_EVENT_QUEUE_CAPACITY);
         self.inference_sender
             .send(InferenceRequest {
-                request_id,
                 queued_at,
                 generate_text: request,
                 event_sender,
             })
             .await
             .map_err(|_| Status::unavailable("model runner inference thread stopped"))?;
+        log::info!("Model runner queue state: request_id={request_id} status=queued");
         Ok(Response::new(ReceiverStream::new(event_receiver)))
     }
 
