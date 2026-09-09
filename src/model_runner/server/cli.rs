@@ -1,5 +1,6 @@
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
+use crate::model_runner::SchedulingPolicy;
 use argh::FromArgs;
 use std::path::PathBuf;
 
@@ -24,6 +25,15 @@ pub(crate) struct ModelRunnerProcessArgs {
     /// total KV-cache size in bytes for the target model
     #[argh(option)]
     pub(super) target_kv_cache_size_bytes: usize,
+    /// maximum number of tokens processed in one model batch
+    #[argh(option)]
+    pub(super) max_batched_token_count: usize,
+    /// maximum number of requests that may hold active inference state
+    #[argh(option)]
+    pub(super) max_active_request_count: usize,
+    /// policy used to choose requests for the next model batch
+    #[argh(option)]
+    pub(super) scheduling_policy: SchedulingPolicy,
     /// unix domain socket path used by the model runner worker
     #[argh(option)]
     pub(super) socket_path: PathBuf,

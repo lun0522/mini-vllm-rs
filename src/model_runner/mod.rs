@@ -7,6 +7,46 @@ use std::str::FromStr;
 pub(crate) const DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SchedulingPolicy {
+    FirstComeFirstServed,
+    ShortestPrefillFirst,
+}
+
+impl SchedulingPolicy {
+    fn cli_value(self) -> &'static str {
+        match self {
+            Self::FirstComeFirstServed => "first-come-first-served",
+            Self::ShortestPrefillFirst => "shortest-prefill-first",
+        }
+    }
+}
+
+impl fmt::Display for SchedulingPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.cli_value())
+    }
+}
+
+impl FromStr for SchedulingPolicy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "first-come-first-served" => Ok(Self::FirstComeFirstServed),
+            "shortest-prefill-first" => Ok(Self::ShortestPrefillFirst),
+            unsupported => Err(format!("unsupported scheduling policy: {unsupported}")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SchedulerConfig {
+    pub(crate) max_batched_token_count: usize,
+    pub(crate) max_active_request_count: usize,
+    pub(crate) scheduling_policy: SchedulingPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InferenceDevice {
     Cpu,
     Gpu,
@@ -117,6 +157,19 @@ mod tests {
         assert!("mixed".parse::<InferenceDevice>().is_err());
         assert_eq!(InferenceDevice::Cpu.to_string(), "CPU");
         assert_eq!(InferenceDevice::Gpu.to_string(), "GPU");
+    }
+
+    #[test]
+    fn parses_scheduling_policies() {
+        assert_eq!(
+            "first-come-first-served".parse(),
+            Ok(SchedulingPolicy::FirstComeFirstServed)
+        );
+        assert_eq!(
+            "shortest-prefill-first".parse(),
+            Ok(SchedulingPolicy::ShortestPrefillFirst)
+        );
+        assert!("unknown".parse::<SchedulingPolicy>().is_err());
     }
 
     #[test]

@@ -1,5 +1,7 @@
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
+use crate::model_runner::SchedulerConfig;
+use crate::model_runner::SchedulingPolicy;
 use crate::proto::model_config::ModelConfig;
 use crate::utils::textproto::parse_textproto;
 use argh::FromArgs;
@@ -10,6 +12,8 @@ use thousands::Separable;
 
 const DEFAULT_DRAFT_TOKEN_COUNT: usize = 4;
 const DEFAULT_TARGET_KV_CACHE_SIZE_BYTES: usize = 2 * 1024 * 1024 * 1024;
+const DEFAULT_MAX_BATCHED_TOKEN_COUNT: usize = 512;
+const DEFAULT_MAX_ACTIVE_REQUEST_COUNT: usize = 4;
 
 /// Runs text generation with a model from Hugging Face.
 #[derive(FromArgs)]
@@ -32,6 +36,15 @@ pub(crate) struct MainProcessArgs {
     /// total KV-cache size in bytes for the target model
     #[argh(option, default = "DEFAULT_TARGET_KV_CACHE_SIZE_BYTES")]
     pub(crate) target_kv_cache_size_bytes: usize,
+    /// maximum number of tokens processed in one model batch
+    #[argh(option, default = "DEFAULT_MAX_BATCHED_TOKEN_COUNT")]
+    pub(crate) max_batched_token_count: usize,
+    /// maximum number of requests that may hold active inference state
+    #[argh(option, default = "DEFAULT_MAX_ACTIVE_REQUEST_COUNT")]
+    pub(crate) max_active_request_count: usize,
+    /// policy used to choose requests for the next model batch
+    #[argh(option, default = "SchedulingPolicy::FirstComeFirstServed")]
+    pub(crate) scheduling_policy: SchedulingPolicy,
     /// unix domain socket exposed to local inference clients
     #[argh(option, default = "default_request_socket()")]
     pub(crate) request_socket: PathBuf,
@@ -64,6 +77,17 @@ impl fmt::Display for MainProcessArgs {
         )?;
         writeln!(
             formatter,
+            "Maximum batched token count: {}",
+            self.max_batched_token_count.separate_with_commas()
+        )?;
+        writeln!(
+            formatter,
+            "Maximum active request count: {}",
+            self.max_active_request_count.separate_with_commas()
+        )?;
+        writeln!(formatter, "Scheduling policy: {}", self.scheduling_policy)?;
+        writeln!(
+            formatter,
             "Request socket: {}",
             self.request_socket.display()
         )?;
@@ -85,6 +109,16 @@ impl FromStr for ModelConfig {
 
 pub(crate) fn parse() -> MainProcessArgs {
     normalize(argh::from_env())
+}
+
+impl MainProcessArgs {
+    pub(crate) fn scheduler_config(&self) -> SchedulerConfig {
+        SchedulerConfig {
+            max_batched_token_count: self.max_batched_token_count,
+            max_active_request_count: self.max_active_request_count,
+            scheduling_policy: self.scheduling_policy,
+        }
+    }
 }
 
 fn default_model_config() -> ModelConfig {
@@ -113,6 +147,18 @@ fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
             DEFAULT_TARGET_KV_CACHE_SIZE_BYTES.separate_with_commas()
         );
         args.target_kv_cache_size_bytes = DEFAULT_TARGET_KV_CACHE_SIZE_BYTES;
+    }
+    if args.max_batched_token_count == 0 {
+        log::warn!(
+            "Invalid maximum batched token count 0; using default value {DEFAULT_MAX_BATCHED_TOKEN_COUNT}"
+        );
+        args.max_batched_token_count = DEFAULT_MAX_BATCHED_TOKEN_COUNT;
+    }
+    if args.max_active_request_count == 0 {
+        log::warn!(
+            "Invalid maximum active request count 0; using default value {DEFAULT_MAX_ACTIVE_REQUEST_COUNT}"
+        );
+        args.max_active_request_count = DEFAULT_MAX_ACTIVE_REQUEST_COUNT;
     }
     if args.model.model_revision.is_empty() {
         args.model.model_revision = "main".to_owned();
@@ -146,5 +192,28 @@ mod tests {
             .expect("CPU arguments should parse");
 
         assert_eq!(args.inference_device, InferenceDevice::Cpu);
+    }
+
+    #[test]
+    fn parses_scheduler_configuration() {
+        let args = MainProcessArgs::from_args(
+            &["mini-vllm-rs"],
+            &[
+                "--max-batched-token-count",
+                "1024",
+                "--max-active-request-count",
+                "8",
+                "--scheduling-policy",
+                "shortest-prefill-first",
+            ],
+        )
+        .expect("scheduler arguments should parse");
+
+        assert_eq!(args.max_batched_token_count, 1024);
+        assert_eq!(args.max_active_request_count, 8);
+        assert_eq!(
+            args.scheduling_policy,
+            SchedulingPolicy::ShortestPrefillFirst
+        );
     }
 }

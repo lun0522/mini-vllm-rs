@@ -1,3 +1,4 @@
+use crate::model_runner::SchedulerConfig;
 use crate::proto::model_runner::generate_text_event;
 use crate::proto::model_runner::GenerateTextEvent;
 use crate::proto::model_runner::GenerateTextRequest;
@@ -22,7 +23,21 @@ pub(super) struct InferenceRequest {
 pub(super) fn run(
     mut model_runner: ModelRunner,
     mut inference_receiver: mpsc::Receiver<InferenceRequest>,
+    scheduler_config: SchedulerConfig,
 ) {
+    log::info!(
+        "Scheduler config: max_batched_tokens={} max_active_requests={} scheduling_policy={}",
+        scheduler_config.max_batched_token_count,
+        scheduler_config.max_active_request_count,
+        scheduler_config.scheduling_policy,
+    );
+    if scheduler_config.scheduling_policy
+        == crate::model_runner::SchedulingPolicy::ShortestPrefillFirst
+    {
+        log::warn!(
+            "Shortest-prefill-first scheduling will take effect when continuous batching is implemented"
+        );
+    }
     // A single thread owns one model today. This queue can later feed a batching
     // scheduler or route requests to multiple device-specific inference workers.
     while let Some(request) = inference_receiver.blocking_recv() {
@@ -35,9 +50,10 @@ fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
     let execution_started = Instant::now();
     let queue_duration = execution_started.duration_since(request.queued_at);
     log::info!(
-        "Worker state: request_id={} status=started input_tokens={} queue_us={}",
+        "Worker state: request_id={} status=started input_tokens={} ignore_eos_tokens={} queue_us={}",
         request.request_id,
         input_token_count,
+        request.generate_text.end_of_sequence_token_ids.is_empty(),
         queue_duration.as_micros().separate_with_commas(),
     );
     let previous_evicted_cached_token_count = model_runner.evicted_cached_token_count();

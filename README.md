@@ -86,6 +86,12 @@ Run the server on CPU:
 cargo run --release -- --inference-device cpu
 ```
 
+The future continuous-batching scheduler can be configured with
+`--max-batched-token-count`, `--max-active-request-count`, and
+`--scheduling-policy`. The current single-request worker is inherently
+first-come-first-served; `shortest-prefill-first` will take effect when queued
+requests can be scheduled together.
+
 Optionally, set the `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` environment
 variables for CPU inference to control the number of CPU worker threads.
 `CANDLE_NUM_THREADS` controls Candle's dedicated worker pool, including

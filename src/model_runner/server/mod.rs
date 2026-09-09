@@ -1,5 +1,4 @@
-use crate::model_runner::InferenceDevice;
-use crate::model_runner::KvCacheType;
+use crate::model_runner::SchedulerConfig;
 use crate::proto::model_runner::model_runner_command;
 use crate::proto::model_runner::model_runner_service_server::ModelRunnerService;
 use crate::proto::model_runner::model_runner_service_server::ModelRunnerServiceServer;
@@ -12,8 +11,6 @@ use crate::proto::model_runner::ModelRunnerCommand;
 use crate::utils::rpc_shutdown::RpcShutdown;
 use anyhow::Context;
 use anyhow::Result;
-use std::path::Path;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -41,45 +38,38 @@ const INFERENCE_QUEUE_CAPACITY: usize = 32;
 const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
 
 pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
-    run_server(
+    run_server(args).await
+}
+
+async fn run_server(args: ModelRunnerProcessArgs) -> Result<()> {
+    // Bind only after model initialization succeeds so the socket itself is a
+    // readiness signal for the parent process.
+    let model_runner = ModelRunner::new(
         &args.model_path,
-        args.draft_model_path,
+        args.draft_model_path.as_deref(),
         args.draft_token_count,
         args.inference_device,
         args.kv_cache_type,
         args.target_kv_cache_size_bytes,
-        &args.socket_path,
-    )
-    .await
-}
-
-async fn run_server(
-    model_path: &Path,
-    draft_model_path: Option<PathBuf>,
-    draft_token_count: usize,
-    inference_device: InferenceDevice,
-    kv_cache_type: KvCacheType,
-    target_kv_cache_size_bytes: usize,
-    socket_path: &Path,
-) -> Result<()> {
-    // Bind only after model initialization succeeds so the socket itself is a
-    // readiness signal for the parent process.
-    let model_runner = ModelRunner::new(
-        model_path,
-        draft_model_path.as_deref(),
-        draft_token_count,
-        inference_device,
-        kv_cache_type,
-        target_kv_cache_size_bytes,
     )?;
     let model_metadata = model_runner.model_metadata();
     let token_capacity = model_runner.token_capacity();
-    let listener = UnixListener::bind(socket_path)
+    let listener = UnixListener::bind(&args.socket_path)
         .context("failed to bind the model runner Unix domain socket")?;
     let (inference_sender, inference_receiver) = mpsc::channel(INFERENCE_QUEUE_CAPACITY);
     let inference_thread = std::thread::Builder::new()
         .name("inference-worker".to_owned())
-        .spawn(move || inference_worker::run(model_runner, inference_receiver))
+        .spawn(move || {
+            inference_worker::run(
+                model_runner,
+                inference_receiver,
+                SchedulerConfig {
+                    max_batched_token_count: args.max_batched_token_count,
+                    max_active_request_count: args.max_active_request_count,
+                    scheduling_policy: args.scheduling_policy,
+                },
+            )
+        })
         .context("failed to start the model runner inference thread")?;
     let (shutdown, shutdown_receiver) = RpcShutdown::channel();
     let service = ModelRunnerRpcService {

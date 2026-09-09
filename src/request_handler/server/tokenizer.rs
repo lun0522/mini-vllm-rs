@@ -75,12 +75,17 @@ impl TokenizerWrapper {
         if input_token_ids.is_empty() {
             anyhow::bail!("formatted prompt produced no token IDs");
         }
+        let end_of_sequence_token_ids = if request.ignore_eos_tokens {
+            Vec::new()
+        } else {
+            self.end_of_sequence_token_ids.clone()
+        };
         Ok(GenerateTextRequest {
             input_token_ids,
             max_new_tokens: request.max_new_tokens,
             repeat_penalty: request.repeat_penalty,
             repeat_last_n: request.repeat_last_n,
-            end_of_sequence_token_ids: self.end_of_sequence_token_ids.clone(),
+            end_of_sequence_token_ids,
         })
     }
 
@@ -269,6 +274,7 @@ mod tests {
             repeat_penalty: 1.1,
             repeat_last_n: 32,
             stream_output: true,
+            ignore_eos_tokens: false,
         };
 
         let tokenized = tokenizer.create_generate_text_request(request).unwrap();
@@ -278,6 +284,25 @@ mod tests {
         assert_eq!(tokenized.max_new_tokens, 12);
         assert_eq!(tokenized.repeat_penalty, 1.1);
         assert_eq!(tokenized.repeat_last_n, 32);
+    }
+
+    #[test]
+    fn ignores_end_of_sequence_tokens_for_benchmarks() {
+        let tokenizer = TokenizerWrapper {
+            tokenizer: tokenizer(&[("[UNK]", 0), ("<|im_end|>", 1)]),
+            architecture: ModelArchitecture::Qwen2,
+            end_of_sequence_token_ids: vec![1],
+        };
+        let request = GenerateText {
+            prompt: "Hello".to_owned(),
+            repeat_penalty: 1.0,
+            ignore_eos_tokens: true,
+            ..Default::default()
+        };
+
+        let tokenized = tokenizer.create_generate_text_request(request).unwrap();
+
+        assert!(tokenized.end_of_sequence_token_ids.is_empty());
     }
 
     #[test]

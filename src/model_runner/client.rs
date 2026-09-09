@@ -1,6 +1,7 @@
 use crate::model_runner::server;
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
+use crate::model_runner::SchedulerConfig;
 use crate::models::model_downloader::ModelArtifacts;
 use crate::proto::model_runner::model_runner_command::Command::Shutdown as ShutdownCommand;
 use crate::proto::model_runner::model_runner_service_client::ModelRunnerServiceClient;
@@ -27,24 +28,26 @@ pub(crate) struct ModelRunnerProcess {
     socket_path: PathBuf,
 }
 
+pub(crate) struct ModelRunnerProcessConfig {
+    pub(crate) draft_token_count: usize,
+    pub(crate) inference_device: InferenceDevice,
+    pub(crate) kv_cache_type: KvCacheType,
+    pub(crate) target_kv_cache_size_bytes: usize,
+    pub(crate) scheduler_config: SchedulerConfig,
+}
+
 impl ModelRunnerProcess {
     pub(crate) async fn start(
         model_artifacts: &ModelArtifacts,
         draft_model_artifacts: Option<&ModelArtifacts>,
-        draft_token_count: usize,
-        inference_device: InferenceDevice,
-        kv_cache_type: KvCacheType,
-        target_kv_cache_size_bytes: usize,
+        config: ModelRunnerProcessConfig,
     ) -> Result<Self> {
         let socket_path = PathBuf::from(SOCKET_PATH);
         domain_socket::ensure_available(&socket_path, "model runner socket")?;
         let mut child_process = spawn(
             model_artifacts,
             draft_model_artifacts,
-            draft_token_count,
-            inference_device,
-            kv_cache_type,
-            target_kv_cache_size_bytes,
+            &config,
             &socket_path,
         )?;
         let channel =
@@ -104,10 +107,7 @@ impl Drop for ModelRunnerProcess {
 fn spawn(
     model_artifacts: &ModelArtifacts,
     draft_model_artifacts: Option<&ModelArtifacts>,
-    draft_token_count: usize,
-    inference_device: InferenceDevice,
-    kv_cache_type: KvCacheType,
-    target_kv_cache_size_bytes: usize,
+    config: &ModelRunnerProcessConfig,
     socket_path: &Path,
 ) -> Result<ChildProcess> {
     let executable = std::env::current_exe().context("failed to locate the current executable")?;
@@ -118,13 +118,19 @@ fn spawn(
         .arg("--model-path")
         .arg(&model_artifacts.gguf)
         .arg("--draft-token-count")
-        .arg(draft_token_count.to_string())
+        .arg(config.draft_token_count.to_string())
         .arg("--inference-device")
-        .arg(inference_device.cli_value())
+        .arg(config.inference_device.cli_value())
         .arg("--kv-cache-type")
-        .arg(kv_cache_type.to_string())
+        .arg(config.kv_cache_type.to_string())
         .arg("--target-kv-cache-size-bytes")
-        .arg(target_kv_cache_size_bytes.to_string());
+        .arg(config.target_kv_cache_size_bytes.to_string())
+        .arg("--max-batched-token-count")
+        .arg(config.scheduler_config.max_batched_token_count.to_string())
+        .arg("--max-active-request-count")
+        .arg(config.scheduler_config.max_active_request_count.to_string())
+        .arg("--scheduling-policy")
+        .arg(config.scheduler_config.scheduling_policy.to_string());
     if let Some(draft_model_artifacts) = draft_model_artifacts {
         command
             .arg("--draft-model-path")

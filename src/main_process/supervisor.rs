@@ -1,6 +1,7 @@
 use super::cli::MainProcessArgs;
 use super::server::ControlServer;
 use crate::model_runner::client::ModelRunnerProcess;
+use crate::model_runner::client::ModelRunnerProcessConfig;
 use crate::models::model_downloader::ModelDownloader;
 use crate::models::ModelRole;
 use crate::request_handler::client::RequestHandlerProcess;
@@ -11,6 +12,7 @@ use log::info;
 
 pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
     info!("Server configuration:\n{args}");
+    let scheduler_config = args.scheduler_config();
     let model_downloader = ModelDownloader::new(args.model, ModelRole::Target)?;
     let model_artifacts = model_downloader.download()?;
     let draft_model_artifacts = args
@@ -22,10 +24,13 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
     let model_runner_process = ModelRunnerProcess::start(
         &model_artifacts,
         draft_model_artifacts.as_ref(),
-        args.draft_token_count,
-        args.inference_device,
-        args.kv_cache_type,
-        args.target_kv_cache_size_bytes,
+        ModelRunnerProcessConfig {
+            draft_token_count: args.draft_token_count,
+            inference_device: args.inference_device,
+            kv_cache_type: args.kv_cache_type,
+            target_kv_cache_size_bytes: args.target_kv_cache_size_bytes,
+            scheduler_config,
+        },
     )
     .await?;
     let request_handler_process = match RequestHandlerProcess::start(

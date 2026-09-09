@@ -22,6 +22,8 @@ message GenerateText {
   uint64 repeat_last_n = 4;
   // Whether text events contain incremental fragments or one buffered response.
   bool stream_output = 5;
+  // Benchmarking only: ignore end-of-sequence tokens and generate until max_new_tokens is reached.
+  bool ignore_eos_tokens = 6;
 }
 
 message GenerateTextEvent {
