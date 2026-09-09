@@ -1,6 +1,5 @@
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
-use crate::models::loaded_model::LoadedModel;
 use crate::proto::model_runner::model_runner_command;
 use crate::proto::model_runner::model_runner_service_server::ModelRunnerService;
 use crate::proto::model_runner::model_runner_service_server::ModelRunnerServiceServer;
@@ -13,8 +12,6 @@ use crate::proto::model_runner::ModelRunnerCommand;
 use crate::utils::rpc_shutdown::RpcShutdown;
 use anyhow::Context;
 use anyhow::Result;
-use candle_core::Tensor;
-use std::cell::RefCell;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -31,69 +28,17 @@ use tonic::Status;
 mod cli;
 mod inference_worker;
 mod kv_cache;
+mod model_and_kv_cache;
+mod model_runner;
 mod text_generation;
 
 pub(crate) use cli::ModelRunnerProcessArgs;
 use inference_worker::InferenceRequest;
-use inference_worker::ModelRunner;
-use kv_cache::KvCacheBackend;
+use model_runner::ModelRunner;
 
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_MODEL_RUNNER";
 const INFERENCE_QUEUE_CAPACITY: usize = 32;
 const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
-
-pub(super) struct ModelAndKvCache {
-    model: RefCell<LoadedModel>,
-    kv_cache: RefCell<KvCacheBackend>,
-}
-
-impl ModelAndKvCache {
-    fn new(model: LoadedModel, kv_cache: KvCacheBackend) -> Self {
-        Self {
-            model: RefCell::new(model),
-            kv_cache: RefCell::new(kv_cache),
-        }
-    }
-
-    fn forward(&self, input: &Tensor, start_position: usize) -> candle_core::Result<Tensor> {
-        let mut model = self.model.borrow_mut();
-        let mut kv_cache = self.kv_cache.borrow_mut();
-        model.model().forward(input, start_position, &mut *kv_cache)
-    }
-
-    fn forward_for_speculative_verification(
-        &self,
-        input: &Tensor,
-        start_position: usize,
-    ) -> candle_core::Result<Tensor> {
-        let mut model = self.model.borrow_mut();
-        let mut kv_cache = self.kv_cache.borrow_mut();
-        model
-            .model()
-            .forward_for_speculative_verification(input, start_position, &mut *kv_cache)
-    }
-
-    /// Restores reusable prefix pages and returns the prefill start position.
-    fn restore_cached_prefix(&self, token_ids: &[u32]) -> Result<usize> {
-        self.kv_cache.borrow_mut().restore_cached_prefix(token_ids)
-    }
-
-    fn evicted_cached_token_count(&self) -> usize {
-        self.kv_cache.borrow().evicted_cached_token_count()
-    }
-
-    fn truncate_cache(&self, target_token_count: usize) -> Result<()> {
-        self.kv_cache.borrow_mut().truncate(target_token_count)
-    }
-
-    fn clear_cache(&self) -> Result<()> {
-        self.kv_cache.borrow_mut().clear()
-    }
-
-    fn finish_request(&self, token_ids: &[u32]) -> Result<()> {
-        self.kv_cache.borrow_mut().finish_request(token_ids)
-    }
-}
 
 pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
     run_server(

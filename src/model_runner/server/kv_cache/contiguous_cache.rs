@@ -26,7 +26,7 @@ impl LayerCache for ContiguousLayerCache {
 
 /// Stores each layer's key and value tensors in fixed-size, preallocated pools.
 pub(in crate::model_runner::server) struct ContiguousKvCache {
-    per_layer_token_count: usize,
+    per_layer_token_capacity: usize,
     key_pool: Tensor,
     value_pool: Tensor,
     layer_caches: Vec<ContiguousLayerCache>,
@@ -40,9 +40,9 @@ impl ContiguousKvCache {
         total_size_bytes: usize,
     ) -> Result<Self> {
         let per_pool_size_bytes = total_size_bytes / 2;
-        let per_layer_token_count =
+        let per_layer_token_capacity =
             per_pool_size_bytes / model_info.layer_count / model_info.kv_cache_bytes_per_token();
-        if per_layer_token_count == 0 {
+        if per_layer_token_capacity == 0 {
             bail!(
                 "contiguous KV cache size {} bytes cannot hold one token for each of {} layers",
                 total_size_bytes.separate_with_commas(),
@@ -50,18 +50,18 @@ impl ContiguousKvCache {
             );
         }
         let cache = Self {
-            per_layer_token_count,
+            per_layer_token_capacity,
             key_pool: allocate_pool(
                 model_info,
                 device,
                 model_info.layer_count,
-                per_layer_token_count,
+                per_layer_token_capacity,
             )?,
             value_pool: allocate_pool(
                 model_info,
                 device,
                 model_info.layer_count,
-                per_layer_token_count,
+                per_layer_token_capacity,
             )?,
             layer_caches: (0..model_info.layer_count)
                 .map(|_| ContiguousLayerCache::default())
@@ -69,11 +69,11 @@ impl ContiguousKvCache {
         };
         let allocated_size_bytes = 2
             * model_info.layer_count
-            * per_layer_token_count
+            * per_layer_token_capacity
             * model_info.kv_cache_bytes_per_token();
         log::info!(
             "Created {model_role} model contiguous KV cache with capacity for \
-             {per_layer_token_count} cached tokens using {} bytes",
+             {per_layer_token_capacity} cached tokens using {} bytes",
             allocated_size_bytes.separate_with_commas()
         );
         Ok(cache)
@@ -94,7 +94,7 @@ impl ContiguousKvCache {
     }
 
     pub(super) fn token_capacity(&self) -> usize {
-        self.per_layer_token_count
+        self.per_layer_token_capacity
     }
 
     pub(super) fn append(
@@ -110,12 +110,12 @@ impl ContiguousKvCache {
         let current_token_count = layer_cache.token_count;
         let appending_token_count =
             validate_cache_append(current_token_count, layer_index, start_position, key, value)?;
-        let available_token_count = self.per_layer_token_count - current_token_count;
+        let available_token_count = self.per_layer_token_capacity - current_token_count;
         if appending_token_count > available_token_count {
             bail!(
                 "contiguous KV cache requires {appending_token_count} additional tokens for layer \
                  {layer_index} but only {available_token_count} of {} are available",
-                self.per_layer_token_count
+                self.per_layer_token_capacity
             );
         }
 

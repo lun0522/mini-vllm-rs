@@ -7,12 +7,12 @@ use anyhow::Result;
 #[derive(Default)]
 pub(super) struct LayerBlockTable {
     pub(super) page_ids: Vec<PageId>,
-    pub(super) token_count: usize,
+    pub(super) cached_token_count: usize,
 }
 
 impl LayerCache for LayerBlockTable {
     fn cached_token_count(&self) -> usize {
-        self.token_count
+        self.cached_token_count
     }
 }
 
@@ -36,7 +36,7 @@ impl ActiveBlockTables {
 
     pub(super) fn is_populated(&self) -> bool {
         self.layer_block_tables.iter().any(|layer_block_table| {
-            layer_block_table.token_count != 0 || !layer_block_table.page_ids.is_empty()
+            layer_block_table.cached_token_count != 0 || !layer_block_table.page_ids.is_empty()
         })
     }
 
@@ -75,7 +75,7 @@ impl ActiveBlockTables {
     }
 
     pub(super) fn record_appended_tokens(&mut self, layer_index: usize, token_count: usize) {
-        self.layer_block_tables[layer_index].token_count += token_count;
+        self.layer_block_tables[layer_index].cached_token_count += token_count;
     }
 
     pub(super) fn page_ids_by_layer(&self) -> Vec<Vec<PageId>> {
@@ -94,7 +94,7 @@ impl ActiveBlockTables {
             self.layer_block_tables.iter_mut().zip(page_ids_by_layer)
         {
             layer_block_table.page_ids = page_ids;
-            layer_block_table.token_count = matched_token_count;
+            layer_block_table.cached_token_count = matched_token_count;
         }
     }
 
@@ -107,18 +107,15 @@ impl ActiveBlockTables {
         let mut released_page_ids = Vec::new();
         for layer_block_table in &mut self.layer_block_tables {
             released_page_ids.extend(layer_block_table.page_ids.split_off(retained_page_count));
-            layer_block_table.token_count = target_token_count;
+            layer_block_table.cached_token_count = target_token_count;
         }
         released_page_ids
     }
 
     /// Clears every virtual table and returns all physical pages it referenced.
     pub(super) fn reset(&mut self) -> Vec<PageId> {
-        let mut released_page_ids = Vec::new();
-        for layer_block_table in &mut self.layer_block_tables {
-            released_page_ids.extend(std::mem::take(&mut layer_block_table.page_ids));
-            layer_block_table.token_count = 0;
-        }
-        released_page_ids
+        self.truncate(
+            /* retained_page_count */ 0, /* target_token_count */ 0,
+        )
     }
 }

@@ -13,7 +13,7 @@ use std::fmt;
 use std::time::Duration;
 use std::time::Instant;
 
-use super::ModelAndKvCache;
+use super::model_and_kv_cache::ModelAndKvCache;
 
 #[derive(Debug)]
 pub(super) struct GenerationCancelled;
@@ -188,7 +188,7 @@ where
         if prefill_tokens.is_empty() {
             return Ok(());
         }
-        let input = Tensor::new(prefill_tokens, model.model.borrow().device())?.unsqueeze(0)?;
+        let input = model.create_input_tensor(prefill_tokens)?;
         model.forward(&input, start_position)?;
         Ok(())
     }
@@ -327,8 +327,7 @@ where
         let mut verification_tokens = Vec::with_capacity(draft_tokens.len());
         verification_tokens.push(*self.tokens.last().context("generation context is empty")?);
         verification_tokens.extend_from_slice(&draft_tokens[..draft_tokens.len() - 1]);
-        let input =
-            Tensor::new(&verification_tokens[..], target.model.borrow().device())?.unsqueeze(0)?;
+        let input = target.create_input_tensor(&verification_tokens)?;
         Ok(target
             .forward_for_speculative_verification(&input, start_position)?
             .squeeze(0)?
@@ -409,7 +408,7 @@ where
         appended_tokens: &[u32],
         logits_processor: &mut LogitsProcessor,
     ) -> Result<u32> {
-        let input = Tensor::new(input_tokens, model.model.borrow().device())?.unsqueeze(0)?;
+        let input = model.create_input_tensor(input_tokens)?;
         let logits = model.forward(&input, start_position)?;
         let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
         self.sample_logits(&logits, appended_tokens, logits_processor)

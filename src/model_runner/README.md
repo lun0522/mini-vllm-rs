@@ -13,15 +13,17 @@ flowchart LR
         Server["server/mod.rs<br/>tonic service and request queues"]
         Cli["server/cli.rs<br/>Worker arguments and artifact paths"]
         KvCache["server/kv_cache/<br/>Engine-owned KV-cache implementations"]
-        InferenceWorker["server/inference_worker.rs<br/>Inference thread and model ownership"]
+        InferenceWorker["server/inference_worker.rs<br/>Request execution and event streaming"]
+        ModelRunner["server/model_runner.rs<br/>Loaded models and KV-cache ownership"]
         TextGeneration["server/text_generation.rs<br/>Autoregressive decoding loop"]
     end
 
     Client -->|"Spawns with local paths and socket"| Cli
     Cli --> Server
-    InferenceWorker --> KvCache
     Server -->|"Bounded request channel"| InferenceWorker
-    InferenceWorker --> TextGeneration
+    InferenceWorker --> ModelRunner
+    ModelRunner --> KvCache
+    ModelRunner --> TextGeneration
 ```
 
 - `client.rs` checks that the socket path is available, starts the worker, waits
@@ -38,10 +40,12 @@ flowchart LR
 - Prefix-enabled paged caches create a prefix-block index. It indexes only
   complete blocks and includes the preceding block in each identity so equal
   token blocks from different prompt contexts cannot share incompatible pages.
-- `server/inference_worker.rs` owns the target model, optional draft model,
-  device, and corresponding KV caches on its dedicated thread. The
+- `server/model_runner.rs` owns the target model, optional draft model,
+  device, and corresponding KV caches on the dedicated inference thread. The
   target cache uses the configured byte budget; the draft cache is sized to
   hold the same number of tokens.
+- `server/model_and_kv_cache.rs` couples each loaded model with the cache used
+  by its forward passes and exposes their cache-lifecycle operations together.
 - `server/text_generation.rs` performs prompt prefill, ordinary greedy decode,
   or speculative decode using draft proposals, batched target verification,
   cache rollback, and request-level acceptance statistics.
@@ -62,6 +66,7 @@ sequenceDiagram
     participant Handler as Request handler process
     participant Rpc as model_runner/server/mod.rs
     participant Worker as inference_worker.rs
+    participant Runner as model_runner.rs
     participant Decode as text_generation.rs
     participant Target as Target model / Candle
     participant Draft as Optional draft model / Candle
@@ -69,8 +74,9 @@ sequenceDiagram
     Caller->>Handler: GenerateText request
     Handler->>Rpc: Forward GenerateText over tonic/UDS
     Rpc->>Worker: Queue InferenceRequest
-    Worker->>Worker: Restore each model's longest cached prompt prefix
-    Worker->>Decode: Generate text with loaded model(s)
+    Worker->>Runner: Execute queued request
+    Runner->>Runner: Restore each model's longest cached prompt prefix
+    Runner->>Decode: Generate text with loaded model(s)
     alt Draft model configured
         Decode->>Target: Prefill through second-to-last prompt token
         Decode->>Draft: Prefill through second-to-last prompt token
@@ -90,14 +96,16 @@ sequenceDiagram
             Decode->>Target: Forward the pending token
             Target-->>Decode: Next-token logits
         end
-        Decode-->>Worker: Push generated token ID
+        Decode-->>Runner: Push generated token ID
+        Runner-->>Worker: Push generated token ID
         Worker-->>Rpc: Queue GenerateTextEvent::TokenId
         Rpc-->>Handler: Stream token-ID event
         Handler->>Handler: Incrementally decode token ID
         Handler-->>Caller: Stream text event
     end
-    Decode-->>Worker: Return TextGenerationStats
-    Worker->>Worker: Index complete cached blocks and release active references
+    Decode-->>Runner: Return TextGenerationStats
+    Runner->>Runner: Index complete cached blocks and release active references
+    Runner-->>Worker: Return completed generation
     Worker-->>Rpc: Queue GenerateTextEvent::Stats
     Rpc-->>Handler: Stream final statistics
     Handler-->>Caller: Proxy final statistics
@@ -106,11 +114,11 @@ sequenceDiagram
 - `server/mod.rs` rejects inputs that cannot fit the configured KV-cache
   capacity, limits the requested output length to the remaining capacity, then
   queues valid tonic requests on a bounded channel.
-- `inference_worker.rs` owns the loaded model and processes requests on its
-  dedicated thread. It restores reusable prefixes before generation, indexes
-  complete cached blocks after success, and releases active references after
-  either success or failure.
-- `inference_worker.rs` delegates decoding to `text_generation.rs`.
+- `inference_worker.rs` consumes queued requests, records request-level timing,
+  and streams generation events.
+- `model_runner.rs` owns the models and caches, restores reusable prefixes,
+  delegates decoding to `text_generation.rs`, and finishes or clears cache
+  state after each request.
 - `text_generation.rs` runs prefill and decode over token IDs, samples tokens,
   checks cancellation and stop tokens, and records prefill, decode, and
   speculative acceptance statistics.
