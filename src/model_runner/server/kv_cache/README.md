@@ -1,8 +1,12 @@
 # KV-cache architecture
 
-The model runner owns one KV-cache backend for each loaded target or draft
-model. `KvCacheBackend` selects either contiguous storage or paged storage while
-presenting the narrow `KvCache` interface needed by model `forward` calls.
+Each `ModelAndKvCache` owns a `KvCacheManager` for its loaded target or draft
+model. The manager owns the common `KvCacheBackend`, maps request IDs to their
+cache states, and binds the selected state to model `forward` calls.
+
+`KvCacheBackend` selects either contiguous or paged storage. Paged storage can
+hold multiple request states; contiguous storage currently permits one active
+request.
 
 The contiguous backend preallocates one key pool and one value pool and tracks
 the cached token count for every model layer.
@@ -26,6 +30,8 @@ The production files follow the same boundary:
 
 - `physical_page_pool.rs` implements tensor storage, allocation, ownership
   counting, and physical page reads and writes.
+- `manager.rs` maps request IDs to cache states and binds them to the shared
+  backend for model execution.
 - `active_block_tables.rs` implements the current sequence's virtual block
   tables without accessing tensors.
 - `prefix_index.rs` implements reusable-prefix lookup and LRU leaf selection.

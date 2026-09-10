@@ -97,6 +97,10 @@ impl ContiguousKvCache {
         self.per_layer_token_capacity
     }
 
+    pub(super) fn layer_count(&self) -> usize {
+        self.layer_caches.len()
+    }
+
     pub(super) fn append(
         &mut self,
         layer_index: usize,

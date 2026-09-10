@@ -96,6 +96,7 @@ impl ModelRunner {
         push_token: impl FnMut(u32) -> Result<()>,
         is_cancelled: impl FnMut() -> bool,
     ) -> Result<text_generation::TextGenerationResult> {
+        self.start_request(request.request_id)?;
         let result = match (|| {
             // Restore only the prompt tokens before the final token. The final prompt token must
             // still pass through the model to produce the first generation logits, for both
@@ -105,11 +106,13 @@ impl ModelRunner {
                 .split_last()
                 .map_or(&[][..], |(_, prefix)| prefix);
             let prefill_start_positions = text_generation::PrefillStartPositions {
-                target: self.target.restore_cached_prefix(prompt_prefix)?,
+                target: self
+                    .target
+                    .restore_cached_prefix(request.request_id, prompt_prefix)?,
                 draft: self
                     .draft
                     .as_ref()
-                    .map(|draft| draft.restore_cached_prefix(prompt_prefix))
+                    .map(|draft| draft.restore_cached_prefix(request.request_id, prompt_prefix))
                     .transpose()?,
             };
             let result = text_generation::generate_text(
@@ -125,7 +128,7 @@ impl ModelRunner {
         })() {
             Ok(result) => result,
             Err(error) => {
-                if let Err(cleanup_error) = self.clear_kv_caches() {
+                if let Err(cleanup_error) = self.abort_request(request.request_id) {
                     return Err(error.context(format!(
                         "additionally failed to clear KV caches: {cleanup_error:#}"
                     )));
@@ -133,8 +136,8 @@ impl ModelRunner {
                 return Err(error);
             }
         };
-        if let Err(error) = self.finish_requests(&result.token_ids) {
-            if let Err(cleanup_error) = self.clear_kv_caches() {
+        if let Err(error) = self.finish_request(request.request_id, &result.token_ids) {
+            if let Err(cleanup_error) = self.abort_request(request.request_id) {
                 return Err(error.context(format!(
                     "additionally failed to clear KV caches: {cleanup_error:#}"
                 )));
@@ -144,24 +147,35 @@ impl ModelRunner {
         Ok(result)
     }
 
-    fn finish_requests(&self, token_ids: &[u32]) -> Result<()> {
-        let target_result = self.target.finish_request(token_ids);
+    fn start_request(&self, request_id: u64) -> Result<()> {
+        self.target.start_request(request_id)?;
+        if let Some(draft) = &self.draft {
+            if let Err(error) = draft.start_request(request_id) {
+                self.target.abort_request(request_id)?;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_request(&self, request_id: u64, token_ids: &[u32]) -> Result<()> {
+        let target_result = self.target.finish_request(request_id, token_ids);
         let draft_result = self
             .draft
             .as_ref()
-            .map(|draft| draft.finish_request(token_ids))
+            .map(|draft| draft.finish_request(request_id, token_ids))
             .transpose();
         target_result?;
         draft_result?;
         Ok(())
     }
 
-    fn clear_kv_caches(&self) -> Result<()> {
-        let target_result = self.target.clear_cache();
+    fn abort_request(&self, request_id: u64) -> Result<()> {
+        let target_result = self.target.abort_request(request_id);
         let draft_result = self
             .draft
             .as_ref()
-            .map(ModelAndKvCache::clear_cache)
+            .map(|draft| draft.abort_request(request_id))
             .transpose();
         target_result?;
         draft_result?;

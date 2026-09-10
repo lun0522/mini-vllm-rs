@@ -27,6 +27,7 @@ impl fmt::Display for GenerationCancelled {
 impl Error for GenerationCancelled {}
 
 struct TextGenerator<PushToken, IsCancelled> {
+    request_id: u64,
     tokens: Vec<u32>,
     draft_token_count: usize,
     max_new_token_count: usize,
@@ -84,6 +85,7 @@ pub(super) fn generate_text(
         anyhow::bail!("input token IDs must not be empty");
     }
     TextGenerator {
+        request_id: request.request_id,
         tokens: request.input_token_ids.clone(),
         draft_token_count,
         max_new_token_count: usize::try_from(request.max_new_tokens)
@@ -189,7 +191,7 @@ where
             return Ok(());
         }
         let input = model.create_input_tensor(prefill_tokens)?;
-        model.forward(&input, start_position)?;
+        model.forward(self.request_id, &input, start_position)?;
         Ok(())
     }
 
@@ -273,8 +275,8 @@ where
         let replacement_token_count = usize::from(maybe_replacement_token.is_some());
         let retained_cached_token_count =
             original_cached_token_count + accepted_token_count + replacement_token_count;
-        target.truncate_cache(retained_cached_token_count)?;
-        draft.truncate_cache(retained_cached_token_count)?;
+        target.truncate_cache(self.request_id, retained_cached_token_count)?;
+        draft.truncate_cache(self.request_id, retained_cached_token_count)?;
 
         // Publish the accepted draft prefix, followed by the target replacement when the models
         // disagreed. EOS is observed but never added to the generated output.
@@ -329,7 +331,7 @@ where
         verification_tokens.extend_from_slice(&draft_tokens[..draft_tokens.len() - 1]);
         let input = target.create_input_tensor(&verification_tokens)?;
         Ok(target
-            .forward_for_speculative_verification(&input, start_position)?
+            .forward_for_speculative_verification(self.request_id, &input, start_position)?
             .squeeze(0)?
             .to_dtype(DType::F32)?)
     }
@@ -409,7 +411,7 @@ where
         logits_processor: &mut LogitsProcessor,
     ) -> Result<u32> {
         let input = model.create_input_tensor(input_tokens)?;
-        let logits = model.forward(&input, start_position)?;
+        let logits = model.forward(self.request_id, &input, start_position)?;
         let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
         self.sample_logits(&logits, appended_tokens, logits_processor)
     }
@@ -490,6 +492,7 @@ mod tests {
         }
 
         TextGenerator {
+            request_id: 1,
             tokens,
             draft_token_count: 4,
             max_new_token_count: 16,

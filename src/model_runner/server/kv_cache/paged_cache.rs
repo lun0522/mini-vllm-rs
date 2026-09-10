@@ -21,6 +21,7 @@ pub(in crate::model_runner::server) struct PagedKvCache {
     physical_page_pool: PhysicalPagePool,
     prefix_block_index: Option<PrefixBlockIndex>,
     token_capacity: usize,
+    layer_count: usize,
     evicted_cached_token_count: usize,
 }
 
@@ -69,6 +70,7 @@ impl PagedKvCache {
             physical_page_pool,
             prefix_block_index,
             token_capacity,
+            layer_count: model_info.layer_count,
             evicted_cached_token_count: 0,
         })
     }
@@ -79,6 +81,10 @@ impl PagedKvCache {
 
     pub(super) fn evicted_cached_token_count(&self) -> usize {
         self.evicted_cached_token_count
+    }
+
+    pub(super) fn layer_count(&self) -> usize {
+        self.layer_count
     }
 
     /// Attaches the longest reusable prefix to the current request and returns its token count.
