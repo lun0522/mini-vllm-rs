@@ -12,17 +12,63 @@ use thousands::Separable;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct PageId(pub(super) usize);
 
-/// Owns physical key/value tensors, page reference counts, and reusable page IDs.
+/// Tracks whether a physical page may be written, reused, or evicted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PageState {
+    /// Contains no useful KV values and has a page ID in the free list.
+    Unallocated,
+    /// Belongs to the active request and may still receive KV values.
+    PendingWrite,
+    /// Contains immutable cached KV values but is not used by an active request.
+    /// It cannot be overwritten until eviction makes it `Unallocated` and it is allocated again.
+    WrittenNotInUse,
+    /// Contains immutable cached KV values used by one or more active requests.
+    WrittenInUse { reader_count: u32 },
+}
+
+impl PageState {
+    fn retain(&mut self) -> Result<()> {
+        *self = match *self {
+            Self::Unallocated => bail!("cannot retain an unallocated physical page"),
+            Self::PendingWrite | Self::WrittenNotInUse => Self::WrittenInUse { reader_count: 1 },
+            Self::WrittenInUse { reader_count } => Self::WrittenInUse {
+                reader_count: reader_count
+                    .checked_add(1)
+                    .context("physical page reader count overflow")?,
+            },
+        };
+        Ok(())
+    }
+
+    fn release(&mut self) -> Result<bool> {
+        *self = match *self {
+            Self::Unallocated => bail!("cannot release an unallocated physical page"),
+            Self::PendingWrite | Self::WrittenNotInUse => Self::Unallocated,
+            Self::WrittenInUse { reader_count: 1 } => Self::WrittenNotInUse,
+            Self::WrittenInUse { reader_count } if reader_count > 1 => Self::WrittenInUse {
+                reader_count: reader_count - 1,
+            },
+            Self::WrittenInUse { .. } => bail!("written physical page has no active readers"),
+        };
+        Ok(matches!(self, Self::Unallocated))
+    }
+
+    fn is_writable(self) -> bool {
+        matches!(self, Self::PendingWrite)
+    }
+}
+
+/// Owns physical key/value tensors, page ownership states, and reusable page IDs.
 ///
 /// "Physical" means these pages are actual storage locations in the preallocated tensor pools.
 /// They exist independently of whichever active sequence or cached prefix refers to them. A page
-/// becomes reusable only after all such owners release their references.
+/// becomes reusable only after all such owners release it.
 pub(super) struct PhysicalPagePool {
     pub(super) per_page_token_count: usize,
     pub(super) page_count: usize,
     pub(super) key_pool: Tensor,
     pub(super) value_pool: Tensor,
-    pub(super) reference_counts: Vec<usize>,
+    pub(super) page_states: Vec<PageState>,
     pub(super) free_page_ids: Vec<PageId>,
 }
 
@@ -58,37 +104,33 @@ impl PhysicalPagePool {
                 per_pool_page_count,
                 per_page_token_count,
             )?,
-            reference_counts: vec![0; per_pool_page_count],
+            page_states: vec![PageState::Unallocated; per_pool_page_count],
             free_page_ids: (0..per_pool_page_count).rev().map(PageId).collect(),
         })
     }
 
     /// Allocates a key/value page pair for the active block tables.
     ///
-    /// The page's reference count is initialized to one for that active owner, so the caller must
-    /// not immediately call `retain_allocated_page` for the same ownership.
+    /// The page becomes writable by the active block tables, so the caller must not
+    /// immediately call `retain_allocated_page` for the same ownership.
     pub(super) fn allocate_page(&mut self) -> Result<PageId> {
         let page_id = self
             .free_page_ids
             .pop()
             .context("paged KV cache has no free physical pages")?;
-        self.reference_counts[page_id.0] = 1;
+        self.page_states[page_id.0] = PageState::PendingWrite;
         Ok(page_id)
     }
 
     /// Adds another owner, such as a cached-prefix entry, to an allocated page.
     pub(super) fn retain_allocated_page(&mut self, page_id: PageId) -> Result<()> {
-        let reference_count = self
-            .reference_counts
+        let page_state = self
+            .page_states
             .get_mut(page_id.0)
             .with_context(|| format!("invalid physical page ID {}", page_id.0))?;
-        if *reference_count == 0 {
-            bail!("cannot retain unallocated physical page {}", page_id.0);
-        }
-        *reference_count = reference_count
-            .checked_add(1)
-            .context("physical page reference count overflow")?;
-        Ok(())
+        page_state
+            .retain()
+            .with_context(|| format!("failed to retain physical page {}", page_id.0))
     }
 
     /// Retains every page as one transaction.
@@ -97,30 +139,37 @@ impl PhysicalPagePool {
     /// are left untouched.
     pub(super) fn retain_allocated_pages_or_rollback<'a>(
         &mut self,
-        page_ids: impl Clone + Iterator<Item = &'a PageId>,
+        page_ids: impl Iterator<Item = &'a PageId>,
     ) -> Result<()> {
-        for (retained_page_count, &page_id) in page_ids.clone().enumerate() {
+        let mut previous_states: Vec<(PageId, PageState)> = Vec::new();
+        for &page_id in page_ids {
+            let Some(previous_state) = self.page_states.get(page_id.0).copied() else {
+                for &(retained_page_id, previous_state) in &previous_states {
+                    self.page_states[retained_page_id.0] = previous_state;
+                }
+                bail!("invalid physical page ID {}", page_id.0);
+            };
             if let Err(error) = self.retain_allocated_page(page_id) {
-                for &retained_page_id in page_ids.clone().take(retained_page_count) {
-                    self.release_allocated_page(retained_page_id)?;
+                for (retained_page_id, previous_state) in previous_states {
+                    self.page_states[retained_page_id.0] = previous_state;
                 }
                 return Err(error);
             }
+            previous_states.push((page_id, previous_state));
         }
         Ok(())
     }
 
-    /// Releases one owner and makes the page reusable after its final reference is removed.
+    /// Releases one owner and makes the page reusable after its final owner is removed.
     pub(super) fn release_allocated_page(&mut self, page_id: PageId) -> Result<()> {
-        let reference_count = self
-            .reference_counts
+        let page_state = self
+            .page_states
             .get_mut(page_id.0)
             .with_context(|| format!("invalid physical page ID {}", page_id.0))?;
-        if *reference_count == 0 {
-            bail!("physical page {} was released twice", page_id.0);
-        }
-        *reference_count -= 1;
-        if *reference_count == 0 {
+        if page_state
+            .release()
+            .with_context(|| format!("failed to release physical page {}", page_id.0))?
+        {
             self.free_page_ids.push(page_id);
         }
         Ok(())
@@ -145,8 +194,8 @@ impl PhysicalPagePool {
         input_offset: usize,
         token_count: usize,
     ) -> Result<()> {
-        if self.reference_counts[page_id.0] > 1 {
-            bail!("cannot mutate shared physical page {}", page_id.0);
+        if !self.page_states[page_id.0].is_writable() {
+            bail!("cannot mutate written physical page {}", page_id.0);
         }
         let key_slice = key.narrow(TOKEN_DIMENSION, input_offset, token_count)?;
         let value_slice = value.narrow(TOKEN_DIMENSION, input_offset, token_count)?;

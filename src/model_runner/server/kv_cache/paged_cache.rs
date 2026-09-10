@@ -272,6 +272,7 @@ impl PagedKvCache {
 mod tests {
     use super::*;
     use crate::model_runner::server::kv_cache::physical_page_pool::PageId;
+    use crate::model_runner::server::kv_cache::physical_page_pool::PageState;
     use candle_core::DType;
 
     const PAGE_TOKEN_COUNT: usize = 16;
@@ -526,13 +527,19 @@ mod tests {
             assert_eq!(&layer_block_table.page_ids, expected_page_ids);
             assert_eq!(layer_block_table.cached_token_count, 4);
             for page_id in expected_page_ids {
-                assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 2);
+                assert_eq!(
+                    cache.physical_page_pool.page_states[page_id.0],
+                    PageState::WrittenInUse { reader_count: 1 }
+                );
             }
         }
 
         cache.reset_active_block_tables()?;
         for page_id in cached_page_ids_by_layer.iter().flatten() {
-            assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 1);
+            assert_eq!(
+                cache.physical_page_pool.page_states[page_id.0],
+                PageState::WrittenNotInUse
+            );
         }
         Ok(())
     }
@@ -563,12 +570,12 @@ mod tests {
             2
         );
         assert_eq!(
-            cache.physical_page_pool.reference_counts[cached_page_ids_by_layer[0][0].0],
-            2
+            cache.physical_page_pool.page_states[cached_page_ids_by_layer[0][0].0],
+            PageState::WrittenInUse { reader_count: 1 }
         );
         assert_eq!(
-            cache.physical_page_pool.reference_counts[cached_page_ids_by_layer[0][1].0],
-            1
+            cache.physical_page_pool.page_states[cached_page_ids_by_layer[0][1].0],
+            PageState::WrittenNotInUse
         );
         Ok(())
     }
@@ -597,8 +604,8 @@ mod tests {
             "cannot attach a cached prefix to non-empty active block tables"
         );
         assert_eq!(
-            cache.physical_page_pool.reference_counts[cached_page_ids_by_layer[0][0].0],
-            2
+            cache.physical_page_pool.page_states[cached_page_ids_by_layer[0][0].0],
+            PageState::WrittenInUse { reader_count: 1 }
         );
         Ok(())
     }
@@ -623,16 +630,16 @@ mod tests {
         assert!(!cache.active_block_tables.is_populated());
         for layer_page_ids in &active_page_ids_by_layer {
             assert_eq!(
-                cache.physical_page_pool.reference_counts[layer_page_ids[0].0],
-                1
+                cache.physical_page_pool.page_states[layer_page_ids[0].0],
+                PageState::WrittenNotInUse
             );
             assert_eq!(
-                cache.physical_page_pool.reference_counts[layer_page_ids[1].0],
-                1
+                cache.physical_page_pool.page_states[layer_page_ids[1].0],
+                PageState::WrittenNotInUse
             );
             assert_eq!(
-                cache.physical_page_pool.reference_counts[layer_page_ids[2].0],
-                0
+                cache.physical_page_pool.page_states[layer_page_ids[2].0],
+                PageState::Unallocated
             );
         }
         let prefix_match = cache
@@ -666,10 +673,16 @@ mod tests {
         finish_request(&mut cache, &[1, 2, 3, 4])?;
 
         for page_id in &indexed_page_ids {
-            assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 1);
+            assert_eq!(
+                cache.physical_page_pool.page_states[page_id.0],
+                PageState::WrittenNotInUse
+            );
         }
         for page_id in &recomputed_page_ids {
-            assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 0);
+            assert_eq!(
+                cache.physical_page_pool.page_states[page_id.0],
+                PageState::Unallocated
+            );
         }
         assert_eq!(
             cache
@@ -707,7 +720,10 @@ mod tests {
             vec![vec![prefix_page_ids[0], prefix_page_ids[1], suffix_page_id]]
         );
         for page_id in prefix_match.page_ids_by_layer[0].iter().copied() {
-            assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 1);
+            assert_eq!(
+                cache.physical_page_pool.page_states[page_id.0],
+                PageState::WrittenNotInUse
+            );
         }
         Ok(())
     }
@@ -812,8 +828,8 @@ mod tests {
 
         assert!(cache.restore_cached_prefix(&[1, 2]).is_err());
         assert_eq!(
-            cache.physical_page_pool.reference_counts[allocated_page_id.0],
-            1
+            cache.physical_page_pool.page_states[allocated_page_id.0],
+            PageState::PendingWrite
         );
         assert!(cache
             .active_block_tables
@@ -830,13 +846,22 @@ mod tests {
         let page_id = cache.active_block_tables.layer_block_tables[0].page_ids[0];
 
         cache.physical_page_pool.retain_allocated_page(page_id)?;
-        assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 2);
+        assert_eq!(
+            cache.physical_page_pool.page_states[page_id.0],
+            PageState::WrittenInUse { reader_count: 1 }
+        );
         cache.reset_active_block_tables()?;
-        assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 1);
+        assert_eq!(
+            cache.physical_page_pool.page_states[page_id.0],
+            PageState::WrittenNotInUse
+        );
         assert!(cache.physical_page_pool.free_page_ids.is_empty());
 
         cache.physical_page_pool.release_allocated_page(page_id)?;
-        assert_eq!(cache.physical_page_pool.reference_counts[page_id.0], 0);
+        assert_eq!(
+            cache.physical_page_pool.page_states[page_id.0],
+            PageState::Unallocated
+        );
         assert_eq!(cache.physical_page_pool.free_page_ids, vec![page_id]);
         assert_eq!(cache.physical_page_pool.allocate_page()?, page_id);
         Ok(())
@@ -851,15 +876,18 @@ mod tests {
         let error = cache
             .physical_page_pool
             .release_allocated_page(page_id)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("released twice"), "{error}");
+            .unwrap_err();
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("cannot release an unallocated physical page"),
+            "{error}"
+        );
         assert_eq!(cache.physical_page_pool.free_page_ids, vec![page_id]);
         Ok(())
     }
 
     #[test]
-    fn rejects_mutating_a_shared_physical_page() -> Result<()> {
+    fn rejects_mutating_a_written_physical_page() -> Result<()> {
         let mut cache = paged_cache(1, 2, 1)?;
         cache.append(0, 0, &cache_tensor(0, 2)?, &cache_tensor(100, 2)?)?;
         let page_id = cache.active_block_tables.layer_block_tables[0].page_ids[0];
@@ -869,10 +897,10 @@ mod tests {
         let error = cache
             .append(0, 1, &cache_tensor(1, 1)?, &cache_tensor(101, 1)?)
             .err()
-            .context("append should not mutate a shared physical page")?
+            .context("append should not mutate a written physical page")?
             .to_string();
         assert!(
-            error.contains("cannot mutate shared physical page"),
+            error.contains("cannot mutate written physical page"),
             "{error}"
         );
         Ok(())

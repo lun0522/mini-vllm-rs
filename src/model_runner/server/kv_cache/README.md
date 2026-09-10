@@ -9,14 +9,14 @@ the cached token count for every model layer.
 
 `PagedKvCache` orchestrates three kinds of state:
 
-- `PhysicalPagePool` owns the key/value tensor storage, page reference counts,
+- `PhysicalPagePool` owns the key/value tensor storage, page ownership states,
   and free physical page IDs.
 - `ActiveBlockTables` is the virtual view of the sequence currently being
   processed. Each `LayerBlockTable` maps logical token order to physical page
   IDs and records its cached token count; it never accesses tensors or manages
-  reference counts.
+  ownership states.
 - `PrefixBlockIndex`, when enabled, maps reusable token blocks to per-layer
-  physical-page bundles. It owns no tensors and changes no page references.
+  physical-page bundles. It owns no tensors and changes no page states.
 
 `PagedKvCache` is the only component that coordinates these structures. It
 retains or releases pages through `PhysicalPagePool`, installs or removes their
@@ -25,7 +25,7 @@ page bundles are reusable.
 
 The production files follow the same boundary:
 
-- `physical_page_pool.rs` implements tensor storage, allocation, reference
+- `physical_page_pool.rs` implements tensor storage, allocation, ownership
   counting, and physical page reads and writes.
 - `active_block_tables.rs` implements the current sequence's virtual block
   tables without accessing tensors.
@@ -33,8 +33,22 @@ The production files follow the same boundary:
 - `paged_cache.rs` orchestrates the other components and presents the paged
   cache backend to model execution.
 
-A physical page returns to the free list only when its final active or indexed
-reference is released. Complete shared pages are immutable.
+```mermaid
+stateDiagram-v2
+    [*] --> Unallocated
+    Unallocated --> PendingWrite: Allocate for active request
+    PendingWrite --> WrittenInUse: Index completed block
+    PendingWrite --> Unallocated: Reset unindexed page
+    WrittenInUse --> WrittenNotInUse: Release final active reader
+    WrittenNotInUse --> WrittenInUse: Restore cached block
+    WrittenInUse --> WrittenInUse: Add or release readers
+    WrittenNotInUse --> Unallocated: Evict under memory pressure
+```
+
+Only `PendingWrite` is mutable. `WrittenNotInUse` cannot be overwritten until
+memory pressure evicts it, returns its ID to the free list, and a later
+allocation makes it `PendingWrite`. A later request for the evicted prefix must
+recompute its KV values.
 
 This implementation intentionally makes one prefix block equal to one physical
 KV-cache page. Prefix-block size and physical-page size are separate concepts
