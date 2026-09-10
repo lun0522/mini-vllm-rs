@@ -1,5 +1,6 @@
 use self::contiguous_cache::ContiguousKvCache;
 use self::paged_cache::PagedKvCache;
+use self::paged_cache::RequestPagedCacheState;
 use crate::model_runner::KvCacheType;
 use crate::models::loaded_model::LoadedModel;
 use crate::models::CachedKeyValue;
@@ -23,21 +24,24 @@ trait LayerCache {
 /// Model-runner-owned cache variants and their request lifecycle operations.
 pub(super) enum KvCacheBackend {
     Contiguous(ContiguousKvCache),
-    Paged(PagedKvCache),
+    Paged {
+        cache: PagedKvCache,
+        request_state: Box<RequestPagedCacheState>,
+    },
 }
 
 impl KvCacheBackend {
     pub(super) fn token_capacity(&self) -> usize {
         match self {
             Self::Contiguous(cache) => cache.token_capacity(),
-            Self::Paged(cache) => cache.token_capacity(),
+            Self::Paged { cache, .. } => cache.token_capacity(),
         }
     }
 
     pub(super) fn evicted_cached_token_count(&self) -> usize {
         match self {
             Self::Contiguous(_) => 0,
-            Self::Paged(cache) => cache.evicted_cached_token_count(),
+            Self::Paged { cache, .. } => cache.evicted_cached_token_count(),
         }
     }
 
@@ -45,14 +49,20 @@ impl KvCacheBackend {
     pub(super) fn restore_cached_prefix(&mut self, token_ids: &[u32]) -> Result<usize> {
         match self {
             Self::Contiguous(_) => Ok(0),
-            Self::Paged(cache) => cache.restore_cached_prefix(token_ids),
+            Self::Paged {
+                cache,
+                request_state,
+            } => cache.restore_cached_prefix(request_state, token_ids),
         }
     }
 
     pub(super) fn truncate(&mut self, target_token_count: usize) -> Result<()> {
         match self {
             Self::Contiguous(cache) => cache.truncate(target_token_count),
-            Self::Paged(cache) => cache.truncate(target_token_count),
+            Self::Paged {
+                cache,
+                request_state,
+            } => cache.truncate(request_state, target_token_count),
         }
     }
 
@@ -62,13 +72,20 @@ impl KvCacheBackend {
                 cache.clear();
                 Ok(())
             }
-            Self::Paged(cache) => cache.reset_active_block_tables(),
+            Self::Paged {
+                cache,
+                request_state,
+            } => cache.reset_request(request_state),
         }
     }
 
     pub(super) fn finish_request(&mut self, token_ids: &[u32]) -> Result<()> {
-        if let Self::Paged(cache) = self {
-            cache.retain_completed_blocks(token_ids)?;
+        if let Self::Paged {
+            cache,
+            request_state,
+        } = self
+        {
+            cache.retain_completed_blocks(request_state, token_ids)?;
         }
         self.clear()
     }
@@ -84,7 +101,10 @@ impl KvCache for KvCacheBackend {
     ) -> Result<CachedKeyValue> {
         match self {
             Self::Contiguous(cache) => cache.append(layer_index, start_position, key, value),
-            Self::Paged(cache) => cache.append(layer_index, start_position, key, value),
+            Self::Paged {
+                cache,
+                request_state,
+            } => cache.append(request_state, layer_index, start_position, key, value),
         }
     }
 }
@@ -105,8 +125,8 @@ pub(super) fn create_kv_cache(
         KvCacheType::Paged {
             per_page_token_count,
             enable_prefix_caching,
-        } => Ok(KvCacheBackend::Paged(
-            PagedKvCache::new(
+        } => Ok(KvCacheBackend::Paged {
+            cache: PagedKvCache::new(
                 model.info(),
                 model_role,
                 model.device(),
@@ -117,6 +137,7 @@ pub(super) fn create_kv_cache(
             .with_context(|| {
                 format!("failed to allocate {model_role} model paged KV-cache pools")
             })?,
-        )),
+            request_state: Box::new(RequestPagedCacheState::new(model.info().layer_count)),
+        }),
     }
 }

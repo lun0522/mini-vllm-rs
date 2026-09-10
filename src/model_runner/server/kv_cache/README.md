@@ -7,21 +7,20 @@ presenting the narrow `KvCache` interface needed by model `forward` calls.
 The contiguous backend preallocates one key pool and one value pool and tracks
 the cached token count for every model layer.
 
-`PagedKvCache` orchestrates three kinds of state:
+Paged caching separates shared cache state from the state of the request being
+processed:
 
 - `PhysicalPagePool` owns the key/value tensor storage, page ownership states,
   and free physical page IDs.
-- `ActiveBlockTables` is the virtual view of the sequence currently being
-  processed. Each `LayerBlockTable` maps logical token order to physical page
-  IDs and records its cached token count; it never accesses tensors or manages
-  ownership states.
 - `PrefixBlockIndex`, when enabled, maps reusable token blocks to per-layer
   physical-page bundles. It owns no tensors and changes no page states.
+- `RequestPagedCacheState` owns one request's `ActiveBlockTables` and prefix
+  cursor. Each `LayerBlockTable` maps that request's logical token order to
+  physical page IDs; it never accesses tensors or manages page states.
 
-`PagedKvCache` is the only component that coordinates these structures. It
-retains or releases pages through `PhysicalPagePool`, installs or removes their
-virtual mappings through `ActiveBlockTables`, and asks `PrefixBlockIndex` which
-page bundles are reusable.
+`PagedKvCache` owns the shared physical pool and prefix index. Its operations
+receive a `RequestPagedCacheState` and coordinate that request's virtual
+mappings with the shared state.
 
 The production files follow the same boundary:
 

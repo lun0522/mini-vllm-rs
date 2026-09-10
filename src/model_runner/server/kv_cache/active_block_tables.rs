@@ -46,10 +46,6 @@ impl ActiveBlockTables {
             .map_or(0, LayerCache::cached_token_count)
     }
 
-    pub(super) fn layer_count(&self) -> usize {
-        self.layer_block_tables.len()
-    }
-
     pub(super) fn layer_block_table(&self, layer_index: usize) -> Option<&LayerBlockTable> {
         self.layer_block_tables.get(layer_index)
     }
