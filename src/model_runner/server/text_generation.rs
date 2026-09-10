@@ -13,7 +13,7 @@ use std::fmt;
 use std::time::Duration;
 use std::time::Instant;
 
-use super::model_and_kv_cache::ModelAndKvCache;
+use super::model_instance::ModelInstance;
 
 #[derive(Debug)]
 pub(super) struct GenerationCancelled;
@@ -73,8 +73,8 @@ pub(super) struct TextGenerationResult {
 }
 
 pub(super) fn generate_text(
-    target: &ModelAndKvCache,
-    draft: Option<&ModelAndKvCache>,
+    target: &mut ModelInstance,
+    draft: Option<&mut ModelInstance>,
     draft_token_count: usize,
     prefill_start_positions: PrefillStartPositions,
     request: &GenerateTextRequest,
@@ -111,8 +111,8 @@ where
 {
     fn run(
         mut self,
-        target: &ModelAndKvCache,
-        draft: Option<&ModelAndKvCache>,
+        target: &mut ModelInstance,
+        mut draft: Option<&mut ModelInstance>,
         prefill_start_positions: PrefillStartPositions,
     ) -> Result<TextGenerationResult> {
         let prompt_token_count = self.tokens.len();
@@ -122,7 +122,7 @@ where
             let PrefillResult {
                 generated_token_count,
                 should_decode,
-            } = self.run_prefill_phase(target, draft, prefill_start_positions)?;
+            } = self.run_prefill_phase(target, draft.as_deref_mut(), prefill_start_positions)?;
             prefill_finished = Some(Instant::now());
             if should_decode {
                 self.run_decode_phase(target, draft, generated_token_count)?;
@@ -150,8 +150,8 @@ where
 
     fn run_prefill_phase(
         &mut self,
-        target: &ModelAndKvCache,
-        draft: Option<&ModelAndKvCache>,
+        target: &mut ModelInstance,
+        draft: Option<&mut ModelInstance>,
         prefill_start_positions: PrefillStartPositions,
     ) -> Result<PrefillResult> {
         if (self.is_cancelled)() {
@@ -185,7 +185,11 @@ where
 
     /// Prefills through the second-to-last prompt token, leaving the final token as the common
     /// starting point for draft proposal and target verification.
-    fn prefill_prompt_prefix(&self, model: &ModelAndKvCache, start_position: usize) -> Result<()> {
+    fn prefill_prompt_prefix(
+        &self,
+        model: &mut ModelInstance,
+        start_position: usize,
+    ) -> Result<()> {
         let prefill_tokens = &self.tokens[start_position..self.tokens.len() - 1];
         if prefill_tokens.is_empty() {
             return Ok(());
@@ -197,15 +201,15 @@ where
 
     fn run_decode_phase(
         &mut self,
-        target: &ModelAndKvCache,
-        draft: Option<&ModelAndKvCache>,
+        target: &mut ModelInstance,
+        mut draft: Option<&mut ModelInstance>,
         mut generated_token_count: usize,
     ) -> Result<()> {
         while generated_token_count < self.max_new_token_count {
             if (self.is_cancelled)() {
                 return Err(GenerationCancelled.into());
             }
-            let should_continue = match draft {
+            let should_continue = match draft.as_deref_mut() {
                 Some(draft) => {
                     let DecodeIterationResult {
                         committed_token_count,
@@ -240,8 +244,8 @@ where
 
     fn run_speculative_iteration(
         &mut self,
-        target: &ModelAndKvCache,
-        draft: &ModelAndKvCache,
+        target: &mut ModelInstance,
+        draft: &mut ModelInstance,
         remaining_max_token_count: usize,
     ) -> Result<DecodeIterationResult> {
         // Generate draft proposals autoregressively, starting with the pending prompt or output
@@ -288,7 +292,7 @@ where
 
     fn generate_draft_tokens(
         &mut self,
-        draft: &ModelAndKvCache,
+        draft: &mut ModelInstance,
         original_cached_token_count: usize,
         remaining_max_token_count: usize,
     ) -> Result<Vec<u32>> {
@@ -322,7 +326,7 @@ where
 
     fn compute_draft_verification_logits(
         &self,
-        target: &ModelAndKvCache,
+        target: &mut ModelInstance,
         draft_tokens: &[u32],
         start_position: usize,
     ) -> Result<Tensor> {
@@ -404,7 +408,7 @@ where
 
     fn sample_next_token(
         &self,
-        model: &ModelAndKvCache,
+        model: &mut ModelInstance,
         input_tokens: &[u32],
         start_position: usize,
         appended_tokens: &[u32],

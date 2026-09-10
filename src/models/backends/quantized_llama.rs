@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 
 use crate::models::CausalLanguageModel;
+use crate::models::ForwardContext;
 use crate::models::KvCache;
 use crate::models::ModelInfo;
 use anyhow::Result as AnyhowResult;
@@ -197,10 +198,11 @@ impl LayerWeights {
         &self,
         x: &Tensor,
         mask: Option<&Tensor>,
-        index_pos: usize,
+        context: &ForwardContext,
         layer_index: usize,
         kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
+        let index_pos = context.start_position;
         let _enter = self.span_attn.enter();
         let (b_sz, seq_len, n_embd) = x.dims3()?;
         let q = self.attention_wq.forward(x)?;
@@ -225,7 +227,7 @@ impl LayerWeights {
         let k = self.apply_rotary_emb(&k, index_pos)?;
 
         let cached = kv_cache
-            .append(layer_index, index_pos, &k, &v)
+            .append(context, layer_index, &k, &v)
             .map_err(candle_core::Error::wrap)?;
         let k = cached.key;
         let v = cached.value;
@@ -492,11 +494,11 @@ impl ModelWeights {
     pub fn forward(
         &mut self,
         x: &Tensor,
-        index_pos: usize,
+        context: &ForwardContext,
         kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
         let seq_len = x.dim(1)?;
-        let x = self.forward_hidden(x, index_pos, kv_cache)?;
+        let x = self.forward_hidden(x, context, kv_cache)?;
         let x = x.i((.., seq_len - 1, ..))?;
         let _enter = self.span_output.enter();
         self.output.forward(&x)
@@ -505,10 +507,10 @@ impl ModelWeights {
     pub fn forward_for_speculative_verification(
         &mut self,
         x: &Tensor,
-        index_pos: usize,
+        context: &ForwardContext,
         kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
-        let x = self.forward_hidden(x, index_pos, kv_cache)?;
+        let x = self.forward_hidden(x, context, kv_cache)?;
         let _enter = self.span_output.enter();
         self.output.forward(&x)
     }
@@ -516,9 +518,10 @@ impl ModelWeights {
     fn forward_hidden(
         &mut self,
         x: &Tensor,
-        index_pos: usize,
+        context: &ForwardContext,
         kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
+        let index_pos = context.start_position;
         let (_b_sz, seq_len) = x.dims2()?;
         let mask = if seq_len == 1 {
             None
@@ -531,7 +534,7 @@ impl ModelWeights {
             let x = layer_in;
             let residual = &x;
             let x = layer.attention_norm.forward(&x)?;
-            let attn = layer.forward_attn(&x, mask.as_ref(), index_pos, layer_index, kv_cache)?;
+            let attn = layer.forward_attn(&x, mask.as_ref(), context, layer_index, kv_cache)?;
             let x = (attn + residual)?;
 
             // MLP
@@ -577,21 +580,19 @@ impl CausalLanguageModel for LlamaBackend {
     fn forward(
         &mut self,
         input: &Tensor,
-        start_position: usize,
+        context: &ForwardContext,
         kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
-        self.model
-            .forward(input, start_position, kv_cache)?
-            .unsqueeze(1)
+        self.model.forward(input, context, kv_cache)?.unsqueeze(1)
     }
 
     fn forward_for_speculative_verification(
         &mut self,
         input: &Tensor,
-        start_position: usize,
+        context: &ForwardContext,
         kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
         self.model
-            .forward_for_speculative_verification(input, start_position, kv_cache)
+            .forward_for_speculative_verification(input, context, kv_cache)
     }
 }

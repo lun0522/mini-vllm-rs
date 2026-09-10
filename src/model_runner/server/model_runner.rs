@@ -12,13 +12,13 @@ use log::info;
 use std::path::Path;
 
 use super::kv_cache::create_kv_cache;
-use super::model_and_kv_cache::ModelAndKvCache;
+use super::model_instance::ModelInstance;
 use super::text_generation;
 
 /// Owns the loaded models and executes requests on the inference thread.
 pub(super) struct ModelRunner {
-    target: ModelAndKvCache,
-    draft: Option<ModelAndKvCache>,
+    target: ModelInstance,
+    draft: Option<ModelInstance>,
     draft_token_count: usize,
 }
 
@@ -59,11 +59,11 @@ impl ModelRunner {
                     ModelRole::Draft,
                     draft_kv_cache_size_bytes,
                 )?;
-                Ok::<_, anyhow::Error>(ModelAndKvCache::new(model, kv_cache))
+                Ok::<_, anyhow::Error>(ModelInstance::new(model, kv_cache))
             })
             .transpose()?;
         Ok(Self {
-            target: ModelAndKvCache::new(loaded_model, target_kv_cache),
+            target: ModelInstance::new(loaded_model, target_kv_cache),
             draft,
             draft_token_count,
         })
@@ -71,7 +71,7 @@ impl ModelRunner {
 
     pub(super) fn model_metadata(&self) -> GetModelMetadataResponse {
         let target_model = self.target.model_metadata();
-        let draft_model = self.draft.as_ref().map(ModelAndKvCache::model_metadata);
+        let draft_model = self.draft.as_ref().map(ModelInstance::model_metadata);
         GetModelMetadataResponse {
             target_model: Some(target_model),
             draft_model,
@@ -86,7 +86,7 @@ impl ModelRunner {
         self.target.evicted_cached_token_count().saturating_add(
             self.draft
                 .as_ref()
-                .map_or(0, ModelAndKvCache::evicted_cached_token_count),
+                .map_or(0, ModelInstance::evicted_cached_token_count),
         )
     }
 
@@ -111,13 +111,13 @@ impl ModelRunner {
                     .restore_cached_prefix(request.request_id, prompt_prefix)?,
                 draft: self
                     .draft
-                    .as_ref()
+                    .as_mut()
                     .map(|draft| draft.restore_cached_prefix(request.request_id, prompt_prefix))
                     .transpose()?,
             };
             let result = text_generation::generate_text(
-                &self.target,
-                self.draft.as_ref(),
+                &mut self.target,
+                self.draft.as_mut(),
                 self.draft_token_count,
                 prefill_start_positions,
                 request,
@@ -147,9 +147,9 @@ impl ModelRunner {
         Ok(result)
     }
 
-    fn start_request(&self, request_id: u64) -> Result<()> {
+    fn start_request(&mut self, request_id: u64) -> Result<()> {
         self.target.start_request(request_id)?;
-        if let Some(draft) = &self.draft {
+        if let Some(draft) = &mut self.draft {
             if let Err(error) = draft.start_request(request_id) {
                 self.target.abort_request(request_id)?;
                 return Err(error);
@@ -158,11 +158,11 @@ impl ModelRunner {
         Ok(())
     }
 
-    fn finish_request(&self, request_id: u64, token_ids: &[u32]) -> Result<()> {
+    fn finish_request(&mut self, request_id: u64, token_ids: &[u32]) -> Result<()> {
         let target_result = self.target.finish_request(request_id, token_ids);
         let draft_result = self
             .draft
-            .as_ref()
+            .as_mut()
             .map(|draft| draft.finish_request(request_id, token_ids))
             .transpose();
         target_result?;
@@ -170,11 +170,11 @@ impl ModelRunner {
         Ok(())
     }
 
-    fn abort_request(&self, request_id: u64) -> Result<()> {
+    fn abort_request(&mut self, request_id: u64) -> Result<()> {
         let target_result = self.target.abort_request(request_id);
         let draft_result = self
             .draft
-            .as_ref()
+            .as_mut()
             .map(|draft| draft.abort_request(request_id))
             .transpose();
         target_result?;

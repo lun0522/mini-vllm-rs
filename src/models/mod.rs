@@ -14,7 +14,7 @@ pub(crate) trait CausalLanguageModel: Send {
     fn forward(
         &mut self,
         input: &Tensor,
-        start_position: usize,
+        context: &ForwardContext,
         kv_cache: &mut dyn KvCache,
     ) -> candle_core::Result<Tensor>;
 
@@ -24,9 +24,15 @@ pub(crate) trait CausalLanguageModel: Send {
     fn forward_for_speculative_verification(
         &mut self,
         input: &Tensor,
-        start_position: usize,
+        context: &ForwardContext,
         kv_cache: &mut dyn KvCache,
     ) -> candle_core::Result<Tensor>;
+}
+
+/// Identifies the request and token position processed by one model forward pass.
+pub(crate) struct ForwardContext {
+    pub(crate) request_id: u64,
+    pub(crate) start_position: usize,
 }
 
 /// Provides request-specific key and value tensors to model layers.
@@ -34,8 +40,8 @@ pub(crate) trait KvCache: Send {
     /// Stores newly computed key/value tensors and returns the complete layer cache for attention.
     fn append(
         &mut self,
+        context: &ForwardContext,
         layer_index: usize,
-        start_position: usize,
         key: &Tensor,
         value: &Tensor,
     ) -> anyhow::Result<CachedKeyValue>;

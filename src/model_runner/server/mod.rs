@@ -23,7 +23,7 @@ use tonic::Status;
 mod cli;
 mod inference_worker;
 mod kv_cache;
-mod model_and_kv_cache;
+mod model_instance;
 mod model_runner;
 mod text_generation;
 

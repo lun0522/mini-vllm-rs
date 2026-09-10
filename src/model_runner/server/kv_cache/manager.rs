@@ -1,6 +1,7 @@
 use super::paged_cache::RequestPagedCacheState;
 use super::KvCacheBackend;
 use crate::models::CachedKeyValue;
+use crate::models::ForwardContext;
 use crate::models::KvCache;
 use anyhow::bail;
 use anyhow::Context;
@@ -102,17 +103,6 @@ impl KvCacheManager {
         Ok(())
     }
 
-    pub fn request_cache(&mut self, request_id: u64) -> Result<RequestKvCache<'_>> {
-        let request_state = self
-            .request_states
-            .get_mut(&request_id)
-            .with_context(|| format!("KV cache request {request_id} does not exist"))?;
-        Ok(RequestKvCache {
-            backend: &mut self.backend,
-            request_state,
-        })
-    }
-
     fn with_request_state<T>(
         &mut self,
         request_id: u64,
@@ -138,28 +128,29 @@ impl KvCacheManager {
     }
 }
 
-pub struct RequestKvCache<'a> {
-    backend: &'a mut KvCacheBackend,
-    request_state: &'a mut RequestKvCacheState,
-}
-
-impl KvCache for RequestKvCache<'_> {
+impl KvCache for KvCacheManager {
     fn append(
         &mut self,
+        context: &ForwardContext,
         layer_index: usize,
-        start_position: usize,
         key: &Tensor,
         value: &Tensor,
     ) -> Result<CachedKeyValue> {
-        match (&mut *self.backend, &mut *self.request_state) {
-            (KvCacheBackend::Contiguous(cache), RequestKvCacheState::Contiguous) => {
-                cache.append(layer_index, start_position, key, value)
-            }
-            (KvCacheBackend::Paged(cache), RequestKvCacheState::Paged(request_state)) => {
-                cache.append(request_state, layer_index, start_position, key, value)
-            }
-            _ => bail!("KV cache backend and request state do not match"),
-        }
+        self.with_request_state(
+            context.request_id,
+            /* handle_contiguous */
+            |cache| cache.append(layer_index, context.start_position, key, value),
+            /* handle_paged */
+            |cache, request_state| {
+                cache.append(
+                    request_state,
+                    layer_index,
+                    context.start_position,
+                    key,
+                    value,
+                )
+            },
+        )
     }
 }
 
