@@ -22,8 +22,8 @@ trait LayerCache {
 
 /// Model-runner-owned cache variants and their request lifecycle operations.
 pub(super) enum KvCacheBackend {
-    Contiguous(ContiguousKvCache),
-    Paged(PagedKvCache),
+    Contiguous(Box<ContiguousKvCache>),
+    Paged(Box<PagedKvCache>),
 }
 
 impl KvCacheBackend {
@@ -56,16 +56,16 @@ pub(super) fn create_kv_cache(
     total_size_bytes: usize,
 ) -> Result<KvCacheBackend> {
     match kv_cache_type {
-        KvCacheType::Contiguous => Ok(KvCacheBackend::Contiguous(
+        KvCacheType::Contiguous => Ok(KvCacheBackend::Contiguous(Box::new(
             ContiguousKvCache::new(model.info(), model_role, model.device(), total_size_bytes)
                 .with_context(|| {
                     format!("failed to allocate {model_role} model contiguous KV-cache pools")
                 })?,
-        )),
+        ))),
         KvCacheType::Paged {
             per_page_token_count,
             enable_prefix_caching,
-        } => Ok(KvCacheBackend::Paged(
+        } => Ok(KvCacheBackend::Paged(Box::new(
             PagedKvCache::new(
                 model.info(),
                 model_role,
@@ -77,6 +77,6 @@ pub(super) fn create_kv_cache(
             .with_context(|| {
                 format!("failed to allocate {model_role} model paged KV-cache pools")
             })?,
-        )),
+        ))),
     }
 }

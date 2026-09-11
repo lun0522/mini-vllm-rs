@@ -29,7 +29,24 @@ pub(in crate::model_runner::server) struct ContiguousKvCache {
     per_layer_token_capacity: usize,
     key_pool: Tensor,
     value_pool: Tensor,
+}
+
+/// Tracks how many tokens one request has written to each contiguous layer cache.
+///
+/// The backend has only one physical storage region, so only one of these states may be active at
+/// a time. Keeping progress here still separates request lifetime from shared tensor ownership.
+pub(super) struct RequestContiguousCacheState {
     layer_caches: Vec<ContiguousLayerCache>,
+}
+
+impl RequestContiguousCacheState {
+    pub(super) fn new(layer_count: usize) -> Self {
+        Self {
+            layer_caches: (0..layer_count)
+                .map(|_| ContiguousLayerCache::default())
+                .collect(),
+        }
+    }
 }
 
 impl ContiguousKvCache {
@@ -63,9 +80,6 @@ impl ContiguousKvCache {
                 model_info.layer_count,
                 per_layer_token_capacity,
             )?,
-            layer_caches: (0..model_info.layer_count)
-                .map(|_| ContiguousLayerCache::default())
-                .collect(),
         };
         let allocated_size_bytes = 2
             * model_info.layer_count
@@ -79,18 +93,16 @@ impl ContiguousKvCache {
         Ok(cache)
     }
 
-    pub(super) fn truncate(&mut self, target_token_count: usize) -> Result<()> {
-        validate_truncation(&self.layer_caches, target_token_count)?;
-        for layer_cache in &mut self.layer_caches {
+    pub(super) fn truncate(
+        &mut self,
+        request_state: &mut RequestContiguousCacheState,
+        target_token_count: usize,
+    ) -> Result<()> {
+        validate_truncation(&request_state.layer_caches, target_token_count)?;
+        for layer_cache in &mut request_state.layer_caches {
             layer_cache.token_count = target_token_count;
         }
         Ok(())
-    }
-
-    pub(super) fn clear(&mut self) {
-        for layer_cache in &mut self.layer_caches {
-            *layer_cache = ContiguousLayerCache::default();
-        }
     }
 
     pub(super) fn token_capacity(&self) -> usize {
@@ -98,17 +110,18 @@ impl ContiguousKvCache {
     }
 
     pub(super) fn layer_count(&self) -> usize {
-        self.layer_caches.len()
+        self.key_pool.dims()[0]
     }
 
     pub(super) fn append(
         &mut self,
+        request_state: &mut RequestContiguousCacheState,
         layer_index: usize,
         start_position: usize,
         key: &Tensor,
         value: &Tensor,
     ) -> Result<CachedKeyValue> {
-        let Some(layer_cache) = self.layer_caches.get(layer_index) else {
+        let Some(layer_cache) = request_state.layer_caches.get(layer_index) else {
             bail!("invalid KV-cache layer {layer_index}");
         };
         let current_token_count = layer_cache.token_count;
@@ -128,7 +141,7 @@ impl ContiguousKvCache {
         key_layer.slice_set(&key.contiguous()?, TOKEN_DIMENSION, current_token_count)?;
         value_layer.slice_set(&value.contiguous()?, TOKEN_DIMENSION, current_token_count)?;
         let cached_token_count = current_token_count + appending_token_count;
-        self.layer_caches[layer_index].token_count = cached_token_count;
+        request_state.layer_caches[layer_index].token_count = cached_token_count;
         Ok(CachedKeyValue {
             key: key_layer.narrow(TOKEN_DIMENSION, 0, cached_token_count)?,
             value: value_layer.narrow(TOKEN_DIMENSION, 0, cached_token_count)?,
@@ -168,25 +181,59 @@ mod tests {
         }
     }
 
-    fn contiguous_cache(layer_count: usize, token_capacity: usize) -> Result<ContiguousKvCache> {
+    struct TestContiguousKvCache {
+        cache: ContiguousKvCache,
+        request_state: RequestContiguousCacheState,
+    }
+
+    impl TestContiguousKvCache {
+        fn append(
+            &mut self,
+            layer_index: usize,
+            start_position: usize,
+            key: &Tensor,
+            value: &Tensor,
+        ) -> Result<CachedKeyValue> {
+            self.cache.append(
+                &mut self.request_state,
+                layer_index,
+                start_position,
+                key,
+                value,
+            )
+        }
+
+        fn truncate(&mut self, target_token_count: usize) -> Result<()> {
+            self.cache
+                .truncate(&mut self.request_state, target_token_count)
+        }
+    }
+
+    fn contiguous_cache(
+        layer_count: usize,
+        token_capacity: usize,
+    ) -> Result<TestContiguousKvCache> {
         let model_info = test_model_info(layer_count);
         let total_size_bytes =
             2 * layer_count * token_capacity * model_info.kv_cache_bytes_per_token();
-        ContiguousKvCache::new(
-            &model_info,
-            ModelRole::Target,
-            &Device::Cpu,
-            total_size_bytes,
-        )
+        Ok(TestContiguousKvCache {
+            cache: ContiguousKvCache::new(
+                &model_info,
+                ModelRole::Target,
+                &Device::Cpu,
+                total_size_bytes,
+            )?,
+            request_state: RequestContiguousCacheState::new(layer_count),
+        })
     }
 
     #[test]
     fn preallocates_pools_and_rejects_exceeding_capacity() -> Result<()> {
         let mut cache = contiguous_cache(/* layer_count */ 1, /* token_capacity */ 2)?;
-        assert_eq!(cache.key_pool.dim(0)?, 1);
-        assert_eq!(cache.value_pool.dim(0)?, 1);
-        assert_eq!(cache.key_pool.dim(TOKEN_DIMENSION + 1)?, 2);
-        assert_eq!(cache.value_pool.dim(TOKEN_DIMENSION + 1)?, 2);
+        assert_eq!(cache.cache.key_pool.dim(0)?, 1);
+        assert_eq!(cache.cache.value_pool.dim(0)?, 1);
+        assert_eq!(cache.cache.key_pool.dim(TOKEN_DIMENSION + 1)?, 2);
+        assert_eq!(cache.cache.value_pool.dim(TOKEN_DIMENSION + 1)?, 2);
 
         cache.append(0, 0, &cache_tensor(0, 2)?, &cache_tensor(100, 2)?)?;
         let error = cache
@@ -199,7 +246,7 @@ mod tests {
                 .contains("requires 1 additional tokens for layer 0 but only 0 of 2 are available"),
             "{error}"
         );
-        assert_eq!(cache.layer_caches[0].token_count, 2);
+        assert_eq!(cache.request_state.layer_caches[0].token_count, 2);
 
         let model_info = test_model_info(/* layer_count */ 1);
         assert!(ContiguousKvCache::new(&model_info, ModelRole::Target, &Device::Cpu, 0).is_err());

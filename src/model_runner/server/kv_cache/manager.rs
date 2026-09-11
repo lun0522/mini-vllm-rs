@@ -1,3 +1,4 @@
+use super::contiguous_cache::RequestContiguousCacheState;
 use super::paged_cache::RequestPagedCacheState;
 use super::KvCacheBackend;
 use crate::models::CachedKeyValue;
@@ -10,7 +11,7 @@ use candle_core::Tensor;
 use std::collections::HashMap;
 
 enum RequestKvCacheState {
-    Contiguous,
+    Contiguous(RequestContiguousCacheState),
     Paged(RequestPagedCacheState),
 }
 
@@ -37,7 +38,9 @@ impl KvCacheManager {
                 if !self.request_states.is_empty() {
                     bail!("contiguous KV cache already has an active request");
                 }
-                RequestKvCacheState::Contiguous
+                RequestKvCacheState::Contiguous(RequestContiguousCacheState::new(
+                    self.backend.layer_count(),
+                ))
             }
             KvCacheBackend::Paged(_) => {
                 RequestKvCacheState::Paged(RequestPagedCacheState::new(self.backend.layer_count()))
@@ -60,7 +63,7 @@ impl KvCacheManager {
         self.with_request_state(
             request_id,
             /* handle_contiguous */
-            |_| Ok(0),
+            |_, _| Ok(0),
             /* handle_paged */
             |cache, request_state| cache.restore_cached_prefix(request_state, token_ids),
         )
@@ -70,7 +73,7 @@ impl KvCacheManager {
         self.with_request_state(
             request_id,
             /* handle_contiguous */
-            |cache| cache.truncate(target_token_count),
+            |cache, request_state| cache.truncate(request_state, target_token_count),
             /* handle_paged */
             |cache, request_state| cache.truncate(request_state, target_token_count),
         )
@@ -80,7 +83,7 @@ impl KvCacheManager {
         self.with_request_state(
             request_id,
             /* handle_contiguous */
-            |_| Ok(()),
+            |_, _| Ok(()),
             /* handle_paged */
             |cache, request_state| cache.retain_completed_blocks(request_state, token_ids),
         )?;
@@ -92,10 +95,7 @@ impl KvCacheManager {
         self.with_request_state(
             request_id,
             /* handle_contiguous */
-            |cache| {
-                cache.clear();
-                Ok(())
-            },
+            |_, _| Ok(()),
             /* handle_paged */
             |cache, request_state| cache.reset_request(request_state),
         )?;
@@ -106,7 +106,10 @@ impl KvCacheManager {
     fn with_request_state<T>(
         &mut self,
         request_id: u64,
-        handle_contiguous: impl FnOnce(&mut super::contiguous_cache::ContiguousKvCache) -> Result<T>,
+        handle_contiguous: impl FnOnce(
+            &mut super::contiguous_cache::ContiguousKvCache,
+            &mut RequestContiguousCacheState,
+        ) -> Result<T>,
         handle_paged: impl FnOnce(
             &mut super::paged_cache::PagedKvCache,
             &mut RequestPagedCacheState,
@@ -117,8 +120,8 @@ impl KvCacheManager {
             .get_mut(&request_id)
             .with_context(|| format!("KV cache request {request_id} does not exist"))?;
         match (&mut self.backend, request_state) {
-            (KvCacheBackend::Contiguous(cache), RequestKvCacheState::Contiguous) => {
-                handle_contiguous(cache)
+            (KvCacheBackend::Contiguous(cache), RequestKvCacheState::Contiguous(request_state)) => {
+                handle_contiguous(cache, request_state)
             }
             (KvCacheBackend::Paged(cache), RequestKvCacheState::Paged(request_state)) => {
                 handle_paged(cache, request_state)
@@ -139,7 +142,15 @@ impl KvCache for KvCacheManager {
         self.with_request_state(
             context.request_id,
             /* handle_contiguous */
-            |cache| cache.append(layer_index, context.start_position, key, value),
+            |cache, request_state| {
+                cache.append(
+                    request_state,
+                    layer_index,
+                    context.start_position,
+                    key,
+                    value,
+                )
+            },
             /* handle_paged */
             |cache, request_state| {
                 cache.append(
@@ -177,7 +188,25 @@ mod tests {
             true,
             16,
         )?;
-        Ok(KvCacheManager::new(KvCacheBackend::Paged(cache)))
+        Ok(KvCacheManager::new(KvCacheBackend::Paged(Box::new(cache))))
+    }
+
+    fn contiguous_manager() -> Result<KvCacheManager> {
+        let model_info = ModelInfo {
+            layer_count: 1,
+            kv_head_count: 1,
+            head_dimension: 1,
+            activation_dtype: DType::U32,
+        };
+        let cache = super::super::contiguous_cache::ContiguousKvCache::new(
+            &model_info,
+            ModelRole::Target,
+            &Device::Cpu,
+            16,
+        )?;
+        Ok(KvCacheManager::new(KvCacheBackend::Contiguous(Box::new(
+            cache,
+        ))))
     }
 
     #[test]
@@ -203,6 +232,19 @@ mod tests {
         let error = manager.start_request(1).unwrap_err().to_string();
 
         assert_eq!(error, "KV cache request 1 already exists");
+        Ok(())
+    }
+
+    #[test]
+    fn contiguous_cache_rejects_a_second_active_request() -> Result<()> {
+        let mut manager = contiguous_manager()?;
+        manager.start_request(1)?;
+
+        let error = manager.start_request(2).unwrap_err().to_string();
+
+        assert_eq!(error, "contiguous KV cache already has an active request");
+        manager.remove_request(1)?;
+        manager.start_request(2)?;
         Ok(())
     }
 

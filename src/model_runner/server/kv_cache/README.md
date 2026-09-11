@@ -5,12 +5,15 @@ model. The manager owns the common `KvCacheBackend`, maps request IDs to their
 cache states, and directly provides request-aware cache access during model
 forward calls.
 
-`KvCacheBackend` selects either contiguous or paged storage. Paged storage can
-hold multiple request states; contiguous storage currently permits one active
-request.
+`KvCacheBackend` selects either contiguous or paged storage. Both keep mutable
+sequence progress in request-specific state. The contiguous backend has one
+preallocated key/value storage region, so it permits only one active request;
+the paged backend can map multiple request states to different physical pages
+and is the backend intended for continuous batching.
 
-The contiguous backend preallocates one key pool and one value pool and tracks
-the cached token count for every model layer.
+`RequestContiguousCacheState` tracks one request's cached token count for every
+model layer. `ContiguousKvCache` owns only the shared tensor storage and its
+capacity.
 
 Paged caching separates shared cache state from the state of the request being
 processed:
@@ -31,6 +34,8 @@ The production files follow the same boundary:
 
 - `physical_page_pool.rs` implements tensor storage, allocation, ownership
   counting, and physical page reads and writes.
+- `contiguous_cache.rs` separates the single contiguous tensor region from its
+  current request's per-layer progress.
 - `manager.rs` maps request IDs to cache states and implements the model-facing
   cache interface over the shared backend.
 - `active_block_tables.rs` implements the current sequence's virtual block
