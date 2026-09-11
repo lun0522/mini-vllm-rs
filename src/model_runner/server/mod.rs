@@ -32,11 +32,16 @@ mod text_generation;
 pub(crate) use cli::ModelRunnerProcessArgs;
 use inference_engine::InferenceEngine;
 use model_runner::ModelRunner;
-use request_manager::InferenceRequest;
 
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_MODEL_RUNNER";
 const INFERENCE_QUEUE_CAPACITY: usize = 32;
 const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
+
+pub(super) struct InferenceRequest {
+    queued_at: Instant,
+    generate_text: GenerateTextRequest,
+    event_sender: mpsc::Sender<Result<GenerateTextEvent, Status>>,
+}
 
 pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
     run_server(args).await
@@ -69,7 +74,7 @@ async fn run_server(args: ModelRunnerProcessArgs) -> Result<()> {
             let mut inference_engine = InferenceEngine::new(model_runner, scheduler_config);
             while let Some(request) = inference_receiver.blocking_recv() {
                 if let Err(error) = inference_engine
-                    .enqueue(request)
+                    .enqueue_request(request)
                     .and_then(|()| inference_engine.process_requests())
                 {
                     log::error!("Inference engine failed to process a request: {error:#}");

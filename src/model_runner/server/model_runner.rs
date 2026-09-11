@@ -90,15 +90,13 @@ impl ModelRunner {
         )
     }
 
-    pub(super) fn generate_text(
+    pub(super) fn start_request(
         &mut self,
         request: GenerateTextRequest,
-        mut push_token: impl FnMut(u32) -> Result<()>,
-        mut is_cancelled: impl FnMut() -> bool,
-    ) -> Result<text_generation::CompletedGeneration> {
+    ) -> Result<text_generation::RequestExecutionState> {
         let request_id = request.request_id;
-        self.start_request(request_id)?;
-        let result = match (|| {
+        self.prepare_model_instances(request_id)?;
+        match (|| {
             // Restore only the input tokens before the final token. The final input token must
             // still pass through the model to produce the first generation logits, for both
             // regular and speculative decoding.
@@ -116,25 +114,37 @@ impl ModelRunner {
                     .map(|draft| draft.restore_cached_prefix(request_id, input_prefix))
                     .transpose()?,
             };
-            let mut execution_state = text_generation::RequestExecutionState::new(
+            text_generation::RequestExecutionState::new(
                 request,
                 self.draft_token_count,
                 prefill_start_positions,
-            )?;
-            loop {
-                if is_cancelled() {
-                    return Err(text_generation::GenerationCancelled.into());
-                }
-                let step = execution_state.run_one_step(&mut self.target, self.draft.as_mut())?;
-                for token_id in step.output_token_ids {
-                    push_token(token_id)?;
-                }
-                if matches!(step.phase, text_generation::GenerationPhase::Finished) {
-                    break;
-                }
-            }
-            execution_state.into_completed_generation()
+            )
         })() {
+            Ok(execution_state) => Ok(execution_state),
+            Err(error) => {
+                if let Err(cleanup_error) = self.abort_request(request_id) {
+                    return Err(error.context(format!(
+                        "additionally failed to clear KV caches: {cleanup_error:#}"
+                    )));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub(super) fn run_one_step(
+        &mut self,
+        execution_state: &mut text_generation::RequestExecutionState,
+    ) -> Result<text_generation::GenerationStep> {
+        execution_state.run_one_step(&mut self.target, self.draft.as_mut())
+    }
+
+    pub(super) fn finish_request(
+        &mut self,
+        execution_state: text_generation::RequestExecutionState,
+    ) -> Result<text_generation::CompletedGeneration> {
+        let request_id = execution_state.request_id();
+        let result = match execution_state.into_completed_generation() {
             Ok(result) => result,
             Err(error) => {
                 if let Err(cleanup_error) = self.abort_request(request_id) {
@@ -145,7 +155,9 @@ impl ModelRunner {
                 return Err(error);
             }
         };
-        if let Err(error) = self.finish_request(request_id, &result.cached_sequence_token_ids) {
+        if let Err(error) =
+            self.finalize_model_instances(request_id, &result.cached_sequence_token_ids)
+        {
             if let Err(cleanup_error) = self.abort_request(request_id) {
                 return Err(error.context(format!(
                     "additionally failed to clear KV caches: {cleanup_error:#}"
@@ -156,7 +168,19 @@ impl ModelRunner {
         Ok(result)
     }
 
-    fn start_request(&mut self, request_id: u64) -> Result<()> {
+    pub(super) fn abort_request(&mut self, request_id: u64) -> Result<()> {
+        let target_result = self.target.abort_request(request_id);
+        let draft_result = self
+            .draft
+            .as_mut()
+            .map(|draft| draft.abort_request(request_id))
+            .transpose();
+        target_result?;
+        draft_result?;
+        Ok(())
+    }
+
+    fn prepare_model_instances(&mut self, request_id: u64) -> Result<()> {
         self.target.start_request(request_id)?;
         if let Some(draft) = &mut self.draft {
             if let Err(error) = draft.start_request(request_id) {
@@ -167,24 +191,12 @@ impl ModelRunner {
         Ok(())
     }
 
-    fn finish_request(&mut self, request_id: u64, token_ids: &[u32]) -> Result<()> {
+    fn finalize_model_instances(&mut self, request_id: u64, token_ids: &[u32]) -> Result<()> {
         let target_result = self.target.finish_request(request_id, token_ids);
         let draft_result = self
             .draft
             .as_mut()
             .map(|draft| draft.finish_request(request_id, token_ids))
-            .transpose();
-        target_result?;
-        draft_result?;
-        Ok(())
-    }
-
-    fn abort_request(&mut self, request_id: u64) -> Result<()> {
-        let target_result = self.target.abort_request(request_id);
-        let draft_result = self
-            .draft
-            .as_mut()
-            .map(|draft| draft.abort_request(request_id))
             .transpose();
         target_result?;
         draft_result?;

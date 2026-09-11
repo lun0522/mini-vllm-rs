@@ -1,22 +1,19 @@
 use crate::model_runner::SchedulerConfig;
 use crate::model_runner::SchedulingPolicy;
-use crate::proto::model_runner::generate_text_event;
-use crate::proto::model_runner::GenerateTextEvent;
 use crate::proto::model_runner::TextGenerationStats;
 use crate::proto::model_runner::TokenGenerationLatency;
-use anyhow::Context;
 use anyhow::Result;
 use std::time::Duration;
 use std::time::Instant;
 use thousands::Separable;
-use tokio::sync::mpsc;
 use tonic::Status;
 
 use super::model_runner::ModelRunner;
-use super::request_manager::InferenceRequest;
+use super::request_manager::FinishedRequest;
 use super::request_manager::RequestManager;
 use super::scheduler::Scheduler;
 use super::text_generation;
+use super::InferenceRequest;
 
 /// Coordinates request storage, scheduling, model execution, and result delivery.
 pub(super) struct InferenceEngine {
@@ -40,7 +37,7 @@ impl InferenceEngine {
         }
     }
 
-    pub(super) fn enqueue(&mut self, request: InferenceRequest) -> Result<()> {
+    pub(super) fn enqueue_request(&mut self, request: InferenceRequest) -> Result<()> {
         let request_id = request.generate_text.request_id;
         let input_token_count = request.generate_text.input_token_ids.len();
         self.request_manager.add_request(request)?;
@@ -51,66 +48,61 @@ impl InferenceEngine {
     /// Executes every request currently admitted by the scheduler.
     pub(super) fn process_requests(&mut self) -> Result<()> {
         self.scheduler.admit_queued_requests();
-        // TODO: Consult the scheduler between resumable generation steps once active request
-        // execution state is stored by RequestManager.
+        // TODO: Consult the scheduler between resumable generation steps once execution is
+        // interleaved.
         while let Some(request_id) = self.scheduler.get_next_active_request() {
-            let request = self.request_manager.remove_request(request_id)?;
-            self.process_request(request);
+            self.process_request(request_id)?;
             self.scheduler.admit_queued_requests();
         }
         Ok(())
     }
 
-    fn process_request(&mut self, request: InferenceRequest) {
-        let InferenceRequest {
-            queued_at,
-            generate_text,
-            event_sender,
-        } = request;
-        let request_id = generate_text.request_id;
-        let input_token_count = generate_text.input_token_ids.len();
-        let execution_started = Instant::now();
-        let queue_duration = execution_started.duration_since(queued_at);
-        log::info!(
-            "Engine state: request_id={} status=started input_tokens={} ignore_eos_tokens={} queue_us={}",
-            request_id,
-            input_token_count,
-            generate_text.end_of_sequence_token_ids.is_empty(),
-            queue_duration.as_micros().separate_with_commas(),
-        );
-
+    fn process_request(&mut self, request_id: u64) -> Result<()> {
         let previous_evicted_cached_token_count = self.model_runner.evicted_cached_token_count();
-        let mut first_token_at = None;
-        let mut last_token_at = None;
-        let mut output_token_count = 0;
-        let result = self.model_runner.generate_text(
-            generate_text,
-            |token_id| {
-                send_token_event(&event_sender, token_id)?;
-                let token_sent_at = Instant::now();
-                if first_token_at.is_none() {
-                    first_token_at = Some(token_sent_at);
+        let started_request = {
+            let model_runner = &mut self.model_runner;
+            self.request_manager.start_execution(
+                request_id,
+                previous_evicted_cached_token_count,
+                |request| model_runner.start_request(request),
+            )
+        };
+        let finished_request_result = match started_request {
+            Ok(started_request) => {
+                log::info!(
+                    "Engine state: request_id={} status=started input_tokens={} ignore_eos_tokens={} queue_us={}",
+                    request_id,
+                    started_request.input_token_count,
+                    started_request.ignore_eos_tokens,
+                    started_request.queue_duration.as_micros().separate_with_commas(),
+                );
+                match self.run_request(request_id) {
+                    Ok(finished_request) => Ok(finished_request),
+                    Err(error) => match self.model_runner.abort_request(request_id) {
+                        Ok(()) => Err(error),
+                        Err(cleanup_error) => Err(error
+                            .context(format!("request cleanup also failed: {cleanup_error:#}"))),
+                    },
                 }
-                last_token_at = Some(token_sent_at);
-                output_token_count += 1;
-                Ok(())
-            },
-            || event_sender.is_closed(),
-        );
+            }
+            Err(error) => Err(error),
+        };
+        let finished_request = match finished_request_result {
+            Ok(finished_request) => finished_request,
+            Err(error) => self.request_manager.abort_request(request_id, error)?,
+        };
         let evicted_cached_token_count = self
             .model_runner
             .evicted_cached_token_count()
-            .saturating_sub(previous_evicted_cached_token_count);
-        let time_to_first_token =
-            first_token_at.map(|first_token_at| first_token_at.duration_since(queued_at));
+            .saturating_sub(finished_request.metrics.previous_evicted_cached_token_count);
 
-        match result {
+        match &finished_request.result {
             Ok(result) => {
                 let client_stats = create_client_facing_generation_stats(
                     &result.stats,
-                    queued_at,
-                    first_token_at,
-                    last_token_at,
+                    finished_request.context.queued_at,
+                    finished_request.metrics.first_token_at,
+                    finished_request.metrics.last_token_at,
                 );
                 let draft_stats = result.stats.draft_stats.as_ref();
                 log::info!(
@@ -119,11 +111,17 @@ impl InferenceEngine {
                      draft_cached_tokens={} evicted_cached_tokens={} draft_accepted={} \
                      draft_proposed={}",
                     request_id,
-                    input_token_count,
+                    finished_request.context.input_token_count,
                     client_stats.output_token_count,
-                    queue_duration.as_micros().separate_with_commas(),
+                    finished_request
+                        .metrics
+                        .queue_duration(finished_request.context.queued_at)
+                        .as_micros()
+                        .separate_with_commas(),
                     result.stats.prefill_duration.as_micros().separate_with_commas(),
-                    duration_to_microseconds_string(time_to_first_token),
+                    duration_to_microseconds_string(finished_request.metrics.first_token_at.map(|first_token_at| {
+                        first_token_at.duration_since(finished_request.context.queued_at)
+                    })),
                     result.stats.decode_duration.as_micros().separate_with_commas(),
                     result.stats.target_cached_token_count,
                     count_to_string(draft_stats.map(|stats| stats.cached_token_count)),
@@ -131,13 +129,10 @@ impl InferenceEngine {
                     count_to_string(draft_stats.map(|stats| stats.accepted_token_count)),
                     count_to_string(draft_stats.map(|stats| stats.proposed_token_count)),
                 );
-                let _ = send_event(
-                    &event_sender,
-                    generate_text_event::Event::Stats(client_stats),
-                );
+                finished_request.context.send_stats(client_stats);
             }
             Err(error) => {
-                let status = generation_error_status(&error);
+                let status = generation_error_status(error);
                 log::info!(
                     "Engine state: request_id={} status={} input_tokens={} output_tokens={} queue_us={} \
                      ttft_us={} evicted_cached_tokens={}",
@@ -147,13 +142,40 @@ impl InferenceEngine {
                     } else {
                         "failed"
                     },
-                    input_token_count,
-                    output_token_count,
-                    queue_duration.as_micros().separate_with_commas(),
-                    duration_to_microseconds_string(time_to_first_token),
+                    finished_request.context.input_token_count,
+                    finished_request.metrics.output_token_count,
+                    finished_request
+                        .metrics
+                        .queue_duration(finished_request.context.queued_at)
+                        .as_micros()
+                        .separate_with_commas(),
+                    duration_to_microseconds_string(finished_request.metrics.first_token_at.map(|first_token_at| {
+                        first_token_at.duration_since(finished_request.context.queued_at)
+                    })),
                     evicted_cached_token_count,
                 );
-                let _ = event_sender.blocking_send(Err(status));
+                finished_request.context.send_error(status);
+            }
+        }
+        Ok(())
+    }
+
+    fn run_request(&mut self, request_id: u64) -> Result<FinishedRequest> {
+        loop {
+            let phase = {
+                let model_runner = &mut self.model_runner;
+                self.request_manager
+                    .advance_execution(request_id, |execution_state| {
+                        model_runner.run_one_step(execution_state)
+                    })?
+            };
+            if matches!(phase, text_generation::GenerationPhase::Finished) {
+                let model_runner = &mut self.model_runner;
+                return self
+                    .request_manager
+                    .finish_request(request_id, |execution_state| {
+                        model_runner.finish_request(execution_state)
+                    });
             }
         }
     }
@@ -216,59 +238,9 @@ fn count_to_string(count: Option<usize>) -> String {
     count.map_or_else(|| "none".to_owned(), |count| count.to_string())
 }
 
-fn send_token_event(
-    event_sender: &mpsc::Sender<Result<GenerateTextEvent, Status>>,
-    token_id: u32,
-) -> Result<()> {
-    send_event(event_sender, generate_text_event::Event::TokenId(token_id))
-        .map_err(|_| text_generation::GenerationCancelled.into())
-}
-
-fn send_event(
-    event_sender: &mpsc::Sender<Result<GenerateTextEvent, Status>>,
-    event: generate_text_event::Event,
-) -> Result<()> {
-    event_sender
-        .blocking_send(Ok(GenerateTextEvent { event: Some(event) }))
-        .context("generation response stream was dropped")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn receive_event(
-        receiver: &mut mpsc::Receiver<Result<GenerateTextEvent, Status>>,
-    ) -> generate_text_event::Event {
-        receiver
-            .blocking_recv()
-            .expect("event channel closed")
-            .expect("generation returned an error")
-            .event
-            .expect("generation event was empty")
-    }
-
-    #[test]
-    fn generation_result_follows_generated_tokens_with_final_stats() {
-        let stats = TextGenerationStats {
-            input_token_count: 3,
-            output_token_count: 2,
-            ..Default::default()
-        };
-        let (sender, mut receiver) = mpsc::channel(2);
-
-        send_event(&sender, generate_text_event::Event::TokenId(42)).unwrap();
-        send_event(&sender, generate_text_event::Event::Stats(stats)).unwrap();
-
-        assert!(matches!(
-            receive_event(&mut receiver),
-            generate_text_event::Event::TokenId(42)
-        ));
-        assert!(matches!(
-            receive_event(&mut receiver),
-            generate_text_event::Event::Stats(received) if received == stats
-        ));
-    }
 
     #[test]
     fn reports_generation_cancellation_with_the_cancelled_status() {
@@ -277,17 +249,5 @@ mod tests {
 
         assert_eq!(status.code(), tonic::Code::Cancelled);
         assert_eq!(status.message(), "generation request was cancelled");
-    }
-
-    #[test]
-    fn treats_a_dropped_generation_stream_as_cancellation() {
-        let (sender, receiver) = mpsc::channel(1);
-        drop(receiver);
-
-        let error = send_token_event(&sender, 42).expect_err("token send should fail");
-
-        assert!(error
-            .downcast_ref::<text_generation::GenerationCancelled>()
-            .is_some());
     }
 }

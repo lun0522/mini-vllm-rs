@@ -14,7 +14,7 @@ flowchart LR
         Cli["server/cli.rs<br/>Worker arguments and artifact paths"]
         KvCache["server/kv_cache/<br/>Engine-owned KV-cache implementations"]
         InferenceEngine["server/inference_engine.rs<br/>Request lifecycle orchestration and timing"]
-        RequestManager["server/request_manager.rs<br/>Request payloads and response channels"]
+        RequestManager["server/request_manager.rs<br/>Request execution state, timing, and responses"]
         Scheduler["server/scheduler.rs<br/>Queued and active scheduling metadata"]
         ModelRunner["server/model_runner.rs<br/>Request execution across model instances"]
         ModelInstance["server/model_instance.rs<br/>One loaded model and its KV-cache manager"]
@@ -47,13 +47,15 @@ flowchart LR
   complete blocks and includes the preceding block in each identity so equal
   token blocks from different prompt contexts cannot share incompatible pages.
 - `server/model_runner.rs` owns the target model instance and optional draft
-  model instance on the dedicated inference thread.
+  model instance and exposes request start, one-step execution, completion, and
+  abortion operations.
 - `server/mod.rs` starts the dedicated inference thread and forwards requests
   from its bounded channel to `InferenceEngine`.
 - `server/inference_engine.rs` coordinates request storage, scheduling, model
   execution, response events, and elapsed-time tracking.
-- `server/request_manager.rs` owns request payloads and response channels while
-  the scheduler retains only the metadata needed to make decisions.
+- `server/request_manager.rs` owns each request's payload, resumable execution
+  state, response channel, and lifecycle timing while the scheduler retains
+  only the metadata needed to make decisions.
 - `server/scheduler.rs` applies the selected scheduling policy and enforces the
   configured active-request limit without owning generation state.
 - `server/model_instance.rs` keeps each loaded model paired with its cache
@@ -94,9 +96,13 @@ sequenceDiagram
     Engine->>Requests: Store request payload and response channel
     Engine->>Scheduler: Queue scheduling metadata
     Scheduler-->>Engine: Return next admitted request ID
-    Engine->>Requests: Take request by ID
-    Engine->>Runner: Execute request
+    Engine->>Requests: Start request by ID
+    Engine->>Runner: Initialize model and cache state
     Runner->>Runner: Restore each model's longest cached prompt prefix
+    Runner-->>Engine: Return resumable execution state
+    Engine->>Requests: Store resumable execution state
+    Engine->>Requests: Borrow resumable execution state
+    Engine->>Runner: Execute next generation step
     Runner->>Decode: Generate text with loaded model(s)
     alt Draft model configured
         Decode->>Target: Prefill through second-to-last prompt token
@@ -135,8 +141,8 @@ sequenceDiagram
 - `server/mod.rs` rejects inputs that cannot fit the configured KV-cache
   capacity, limits the requested output length to the remaining capacity, then
   queues valid tonic requests on a bounded channel.
-- `inference_worker.rs` consumes queued requests, records request-level timing,
-  and streams generation events.
+- `inference_engine.rs` executes scheduled requests, records request-level
+  timing, and streams generation events.
 - `model_runner.rs` owns the models and caches, restores reusable prefixes,
   delegates decoding to `text_generation.rs`, and finishes or clears cache
   state after each request.

@@ -97,6 +97,10 @@ pub(super) struct RequestExecutionState {
 }
 
 impl RequestExecutionState {
+    pub(super) fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
     pub(super) fn new(
         request: GenerateTextRequest,
         draft_token_count: usize,
