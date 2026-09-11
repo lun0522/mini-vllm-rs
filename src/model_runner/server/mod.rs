@@ -25,6 +25,7 @@ mod inference_worker;
 mod kv_cache;
 mod model_instance;
 mod model_runner;
+mod scheduler;
 mod text_generation;
 
 pub(crate) use cli::ModelRunnerProcessArgs;

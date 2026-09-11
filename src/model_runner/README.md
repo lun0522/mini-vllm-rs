@@ -14,6 +14,7 @@ flowchart LR
         Cli["server/cli.rs<br/>Worker arguments and artifact paths"]
         KvCache["server/kv_cache/<br/>Engine-owned KV-cache implementations"]
         InferenceWorker["server/inference_worker.rs<br/>Request execution and event streaming"]
+        Scheduler["server/scheduler.rs<br/>Queued and active request ordering"]
         ModelRunner["server/model_runner.rs<br/>Request execution across model instances"]
         ModelInstance["server/model_instance.rs<br/>One loaded model and its KV-cache manager"]
         TextGeneration["server/text_generation.rs<br/>Resumable request generation state"]
@@ -22,6 +23,8 @@ flowchart LR
     Client -->|"Spawns with local paths and socket"| Cli
     Cli --> Server
     Server -->|"Bounded request channel"| InferenceWorker
+    InferenceWorker --> Scheduler
+    Scheduler --> InferenceWorker
     InferenceWorker --> ModelRunner
     ModelRunner --> ModelInstance
     ModelInstance --> KvCache
@@ -44,6 +47,8 @@ flowchart LR
   token blocks from different prompt contexts cannot share incompatible pages.
 - `server/model_runner.rs` owns the target model instance and optional draft
   model instance on the dedicated inference thread.
+- `server/scheduler.rs` owns queued and admitted requests, applies the selected
+  scheduling policy, and enforces the configured active-request limit.
 - `server/model_instance.rs` keeps each loaded model paired with its cache
   manager and passes request-aware forward contexts into model execution. The
   target cache uses the configured byte budget; the draft cache is sized to

@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tonic::Status;
 
 use super::model_runner::ModelRunner;
+use super::scheduler::Scheduler;
 use super::text_generation;
 
 pub(super) struct InferenceRequest {
@@ -39,10 +40,17 @@ pub(super) fn run(
             "Shortest-prefill-first scheduling will take effect when continuous batching is implemented"
         );
     }
+    let mut scheduler = Scheduler::new(scheduler_config);
     // A single thread owns one model today. This queue can later feed a batching
     // scheduler or route requests to multiple device-specific inference workers.
     while let Some(request) = inference_receiver.blocking_recv() {
-        process_request(&mut model_runner, request);
+        scheduler.enqueue(request);
+        scheduler.admit_queued_requests();
+        // TODO: Build a batch from multiple active requests once model execution supports batching.
+        while let Some(request) = scheduler.get_next_active_request() {
+            process_request(&mut model_runner, request);
+            scheduler.admit_queued_requests();
+        }
     }
 }
 
