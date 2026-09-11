@@ -2,14 +2,17 @@ use crate::model_runner::SchedulerConfig;
 use crate::model_runner::SchedulingPolicy;
 use std::collections::VecDeque;
 
-use super::inference_worker::InferenceRequest;
+struct RequestSchedulingMetadata {
+    request_id: u64,
+    input_token_count: usize,
+}
 
-/// Owns requests waiting for admission and those admitted for model execution.
+/// Owns scheduling metadata for requests waiting for admission and active execution.
 pub(super) struct Scheduler {
     max_active_request_count: usize,
     scheduling_policy: SchedulingPolicy,
-    queued_requests: VecDeque<InferenceRequest>,
-    active_requests: VecDeque<InferenceRequest>,
+    queued_requests: VecDeque<RequestSchedulingMetadata>,
+    active_requests: VecDeque<RequestSchedulingMetadata>,
 }
 
 impl Scheduler {
@@ -22,8 +25,11 @@ impl Scheduler {
         }
     }
 
-    pub(super) fn enqueue(&mut self, request: InferenceRequest) {
-        self.queued_requests.push_back(request);
+    pub(super) fn enqueue(&mut self, request_id: u64, input_token_count: usize) {
+        self.queued_requests.push_back(RequestSchedulingMetadata {
+            request_id,
+            input_token_count,
+        });
     }
 
     /// Admits queued requests according to policy until the active-request limit is reached.
@@ -39,8 +45,10 @@ impl Scheduler {
         }
     }
 
-    pub(super) fn get_next_active_request(&mut self) -> Option<InferenceRequest> {
-        self.active_requests.pop_front()
+    pub(super) fn get_next_active_request(&mut self) -> Option<u64> {
+        self.active_requests
+            .pop_front()
+            .map(|request| request.request_id)
     }
 
     fn select_queued_request_index(&self) -> Option<usize> {
@@ -56,7 +64,7 @@ impl Scheduler {
                 .queued_requests
                 .iter()
                 .enumerate()
-                .min_by_key(|(_, request)| request.generate_text.input_token_ids.len())
+                .min_by_key(|(_, request)| request.input_token_count)
                 .map(|(index, _)| index),
         }
     }
@@ -65,12 +73,6 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::model_runner::GenerateTextEvent;
-    use crate::proto::model_runner::GenerateTextRequest;
-    use std::time::Instant;
-    use tokio::sync::mpsc;
-    use tonic::Status;
-
     fn scheduler(
         max_active_request_count: usize,
         scheduling_policy: SchedulingPolicy,
@@ -82,31 +84,16 @@ mod tests {
         })
     }
 
-    fn request(request_id: u64, input_token_count: usize) -> InferenceRequest {
-        let (event_sender, _event_receiver) = mpsc::channel::<Result<GenerateTextEvent, Status>>(1);
-        InferenceRequest {
-            queued_at: Instant::now(),
-            generate_text: GenerateTextRequest {
-                request_id,
-                input_token_ids: vec![0; input_token_count],
-                ..Default::default()
-            },
-            event_sender,
-        }
-    }
-
     fn pop_next_request_id(scheduler: &mut Scheduler) -> Option<u64> {
-        scheduler
-            .get_next_active_request()
-            .map(|request| request.generate_text.request_id)
+        scheduler.get_next_active_request()
     }
 
     #[test]
     fn admits_requests_in_arrival_order() {
         let mut scheduler = scheduler(3, SchedulingPolicy::FirstComeFirstServed);
-        scheduler.enqueue(request(1, 30));
-        scheduler.enqueue(request(2, 10));
-        scheduler.enqueue(request(3, 20));
+        scheduler.enqueue(1, 30);
+        scheduler.enqueue(2, 10);
+        scheduler.enqueue(3, 20);
 
         scheduler.admit_queued_requests();
 
@@ -118,10 +105,10 @@ mod tests {
     #[test]
     fn admits_shortest_prefills_first_and_preserves_tie_order() {
         let mut scheduler = scheduler(4, SchedulingPolicy::ShortestPrefillFirst);
-        scheduler.enqueue(request(1, 30));
-        scheduler.enqueue(request(2, 10));
-        scheduler.enqueue(request(3, 20));
-        scheduler.enqueue(request(4, 10));
+        scheduler.enqueue(1, 30);
+        scheduler.enqueue(2, 10);
+        scheduler.enqueue(3, 20);
+        scheduler.enqueue(4, 10);
 
         scheduler.admit_queued_requests();
 
@@ -134,9 +121,9 @@ mod tests {
     #[test]
     fn enforces_the_active_request_limit() {
         let mut scheduler = scheduler(2, SchedulingPolicy::FirstComeFirstServed);
-        scheduler.enqueue(request(1, 10));
-        scheduler.enqueue(request(2, 20));
-        scheduler.enqueue(request(3, 30));
+        scheduler.enqueue(1, 10);
+        scheduler.enqueue(2, 20);
+        scheduler.enqueue(3, 30);
 
         scheduler.admit_queued_requests();
 

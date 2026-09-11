@@ -21,16 +21,18 @@ use tonic::Response;
 use tonic::Status;
 
 mod cli;
-mod inference_worker;
+mod inference_engine;
 mod kv_cache;
 mod model_instance;
 mod model_runner;
+mod request_manager;
 mod scheduler;
 mod text_generation;
 
 pub(crate) use cli::ModelRunnerProcessArgs;
-use inference_worker::InferenceRequest;
+use inference_engine::InferenceEngine;
 use model_runner::ModelRunner;
+use request_manager::InferenceRequest;
 
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_MODEL_RUNNER";
 const INFERENCE_QUEUE_CAPACITY: usize = 32;
@@ -55,19 +57,24 @@ async fn run_server(args: ModelRunnerProcessArgs) -> Result<()> {
     let token_capacity = model_runner.token_capacity();
     let listener = UnixListener::bind(&args.socket_path)
         .context("failed to bind the model runner Unix domain socket")?;
-    let (inference_sender, inference_receiver) = mpsc::channel(INFERENCE_QUEUE_CAPACITY);
+    let (inference_sender, mut inference_receiver) = mpsc::channel(INFERENCE_QUEUE_CAPACITY);
+    let scheduler_config = SchedulerConfig {
+        max_batched_token_count: args.max_batched_token_count,
+        max_active_request_count: args.max_active_request_count,
+        scheduling_policy: args.scheduling_policy,
+    };
     let inference_thread = std::thread::Builder::new()
         .name("inference-worker".to_owned())
         .spawn(move || {
-            inference_worker::run(
-                model_runner,
-                inference_receiver,
-                SchedulerConfig {
-                    max_batched_token_count: args.max_batched_token_count,
-                    max_active_request_count: args.max_active_request_count,
-                    scheduling_policy: args.scheduling_policy,
-                },
-            )
+            let mut inference_engine = InferenceEngine::new(model_runner, scheduler_config);
+            while let Some(request) = inference_receiver.blocking_recv() {
+                if let Err(error) = inference_engine
+                    .enqueue(request)
+                    .and_then(|()| inference_engine.process_requests())
+                {
+                    log::error!("Inference engine failed to process a request: {error:#}");
+                }
+            }
         })
         .context("failed to start the model runner inference thread")?;
     let (shutdown, shutdown_receiver) = RpcShutdown::channel();

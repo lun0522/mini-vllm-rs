@@ -13,8 +13,9 @@ flowchart LR
         Server["server/mod.rs<br/>tonic service and request queues"]
         Cli["server/cli.rs<br/>Worker arguments and artifact paths"]
         KvCache["server/kv_cache/<br/>Engine-owned KV-cache implementations"]
-        InferenceWorker["server/inference_worker.rs<br/>Request execution and event streaming"]
-        Scheduler["server/scheduler.rs<br/>Queued and active request ordering"]
+        InferenceEngine["server/inference_engine.rs<br/>Request lifecycle orchestration and timing"]
+        RequestManager["server/request_manager.rs<br/>Request payloads and response channels"]
+        Scheduler["server/scheduler.rs<br/>Queued and active scheduling metadata"]
         ModelRunner["server/model_runner.rs<br/>Request execution across model instances"]
         ModelInstance["server/model_instance.rs<br/>One loaded model and its KV-cache manager"]
         TextGeneration["server/text_generation.rs<br/>Resumable request generation state"]
@@ -22,10 +23,10 @@ flowchart LR
 
     Client -->|"Spawns with local paths and socket"| Cli
     Cli --> Server
-    Server -->|"Bounded request channel"| InferenceWorker
-    InferenceWorker --> Scheduler
-    Scheduler --> InferenceWorker
-    InferenceWorker --> ModelRunner
+    Server -->|"Dedicated thread and bounded request channel"| InferenceEngine
+    InferenceEngine --> RequestManager
+    InferenceEngine --> Scheduler
+    InferenceEngine --> ModelRunner
     ModelRunner --> ModelInstance
     ModelInstance --> KvCache
     ModelRunner --> TextGeneration
@@ -47,8 +48,14 @@ flowchart LR
   token blocks from different prompt contexts cannot share incompatible pages.
 - `server/model_runner.rs` owns the target model instance and optional draft
   model instance on the dedicated inference thread.
-- `server/scheduler.rs` owns queued and admitted requests, applies the selected
-  scheduling policy, and enforces the configured active-request limit.
+- `server/mod.rs` starts the dedicated inference thread and forwards requests
+  from its bounded channel to `InferenceEngine`.
+- `server/inference_engine.rs` coordinates request storage, scheduling, model
+  execution, response events, and elapsed-time tracking.
+- `server/request_manager.rs` owns request payloads and response channels while
+  the scheduler retains only the metadata needed to make decisions.
+- `server/scheduler.rs` applies the selected scheduling policy and enforces the
+  configured active-request limit without owning generation state.
 - `server/model_instance.rs` keeps each loaded model paired with its cache
   manager and passes request-aware forward contexts into model execution. The
   target cache uses the configured byte budget; the draft cache is sized to
@@ -73,7 +80,9 @@ sequenceDiagram
     participant Caller as Inference client
     participant Handler as Request handler process
     participant Rpc as model_runner/server/mod.rs
-    participant Worker as inference_worker.rs
+    participant Engine as inference_engine.rs
+    participant Requests as request_manager.rs
+    participant Scheduler as scheduler.rs
     participant Runner as model_runner.rs
     participant Decode as text_generation.rs
     participant Target as Target model / Candle
@@ -81,8 +90,12 @@ sequenceDiagram
 
     Caller->>Handler: GenerateText request
     Handler->>Rpc: Forward GenerateText over tonic/UDS
-    Rpc->>Worker: Queue InferenceRequest
-    Worker->>Runner: Execute queued request
+    Rpc->>Engine: Queue InferenceRequest on the dedicated thread
+    Engine->>Requests: Store request payload and response channel
+    Engine->>Scheduler: Queue scheduling metadata
+    Scheduler-->>Engine: Return next admitted request ID
+    Engine->>Requests: Take request by ID
+    Engine->>Runner: Execute request
     Runner->>Runner: Restore each model's longest cached prompt prefix
     Runner->>Decode: Generate text with loaded model(s)
     alt Draft model configured
@@ -105,16 +118,16 @@ sequenceDiagram
             Target-->>Decode: Next-token logits
         end
         Decode-->>Runner: Push generated token ID
-        Runner-->>Worker: Push generated token ID
-        Worker-->>Rpc: Queue GenerateTextEvent::TokenId
+        Runner-->>Engine: Push generated token ID
+        Engine-->>Rpc: Queue GenerateTextEvent::TokenId
         Rpc-->>Handler: Stream token-ID event
         Handler->>Handler: Incrementally decode token ID
         Handler-->>Caller: Stream text event
     end
     Decode-->>Runner: Return TextGenerationStats
     Runner->>Runner: Index complete cached blocks and release active references
-    Runner-->>Worker: Return completed generation
-    Worker-->>Rpc: Queue GenerateTextEvent::Stats
+    Runner-->>Engine: Return completed generation
+    Engine-->>Rpc: Queue GenerateTextEvent::Stats
     Rpc-->>Handler: Stream final statistics
     Handler-->>Caller: Proxy final statistics
 ```

@@ -46,6 +46,16 @@ pub(crate) struct SchedulerConfig {
     pub(crate) scheduling_policy: SchedulingPolicy,
 }
 
+impl fmt::Display for SchedulerConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "max_batched_tokens={} max_active_requests={} scheduling_policy={}",
+            self.max_batched_token_count, self.max_active_request_count, self.scheduling_policy,
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InferenceDevice {
     Cpu,
@@ -170,6 +180,20 @@ mod tests {
             Ok(SchedulingPolicy::ShortestPrefillFirst)
         );
         assert!("unknown".parse::<SchedulingPolicy>().is_err());
+    }
+
+    #[test]
+    fn displays_scheduler_configuration() {
+        let config = SchedulerConfig {
+            max_batched_token_count: 512,
+            max_active_request_count: 4,
+            scheduling_policy: SchedulingPolicy::FirstComeFirstServed,
+        };
+
+        assert_eq!(
+            config.to_string(),
+            "max_batched_tokens=512 max_active_requests=4 scheduling_policy=first-come-first-served"
+        );
     }
 
     #[test]
