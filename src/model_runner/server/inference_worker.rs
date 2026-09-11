@@ -2,6 +2,8 @@ use crate::model_runner::SchedulerConfig;
 use crate::proto::model_runner::generate_text_event;
 use crate::proto::model_runner::GenerateTextEvent;
 use crate::proto::model_runner::GenerateTextRequest;
+use crate::proto::model_runner::TextGenerationStats;
+use crate::proto::model_runner::TokenGenerationLatency;
 use anyhow::Context;
 use anyhow::Result;
 use std::time::Duration;
@@ -63,14 +65,17 @@ fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
     );
     let previous_evicted_cached_token_count = model_runner.evicted_cached_token_count();
     let mut first_token_at = None;
+    let mut last_token_at = None;
     let mut output_token_count = 0;
     let result = model_runner.generate_text(
         generate_text,
         |token_id| {
             send_token_event(&event_sender, token_id)?;
+            let token_sent_at = Instant::now();
             if first_token_at.is_none() {
-                first_token_at = Some(Instant::now());
+                first_token_at = Some(token_sent_at);
             }
+            last_token_at = Some(token_sent_at);
             output_token_count += 1;
             Ok(())
         },
@@ -84,7 +89,13 @@ fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
 
     match result {
         Ok(result) => {
-            let draft_stats = result.server_stats.draft_stats.as_ref();
+            let client_stats = create_client_facing_generation_stats(
+                &result.stats,
+                queued_at,
+                first_token_at,
+                last_token_at,
+            );
+            let draft_stats = result.stats.draft_stats.as_ref();
             log::info!(
                 "Worker state: request_id={} status=completed input_tokens={} output_tokens={} queue_us={} \
                  prefill_us={} ttft_us={} decode_us={} target_cached_tokens={} \
@@ -92,18 +103,12 @@ fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
                  draft_proposed={}",
                 request_id,
                 input_token_count,
-                result.client_stats.output_token_count,
+                client_stats.output_token_count,
                 queue_duration.as_micros().separate_with_commas(),
-                result
-                    .client_stats
-                    .prefill_duration_microseconds
-                    .separate_with_commas(),
+                result.stats.prefill_duration.as_micros().separate_with_commas(),
                 duration_to_microseconds_string(time_to_first_token),
-                result
-                    .client_stats
-                    .decode_duration_microseconds
-                    .separate_with_commas(),
-                result.server_stats.target_cached_token_count,
+                result.stats.decode_duration.as_micros().separate_with_commas(),
+                result.stats.target_cached_token_count,
                 count_to_string(draft_stats.map(|stats| stats.cached_token_count)),
                 evicted_cached_token_count,
                 count_to_string(draft_stats.map(|stats| stats.accepted_token_count)),
@@ -111,7 +116,7 @@ fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
             );
             let _ = send_event(
                 &event_sender,
-                generate_text_event::Event::Stats(result.client_stats),
+                generate_text_event::Event::Stats(client_stats),
             );
         }
         Err(error) => {
@@ -147,11 +152,46 @@ fn generation_error_status(error: &anyhow::Error) -> Status {
     }
 }
 
+fn create_client_facing_generation_stats(
+    stats: &text_generation::TextGenerationStats,
+    queued_at: Instant,
+    first_token_at: Option<Instant>,
+    last_token_at: Option<Instant>,
+) -> TextGenerationStats {
+    let draft_token_acceptance_rate = match stats.draft_stats.as_ref() {
+        Some(draft_stats) if draft_stats.proposed_token_count != 0 => {
+            Some(draft_stats.accepted_token_count as f32 / draft_stats.proposed_token_count as f32)
+        }
+        _ => None,
+    };
+    let token_generation_latency =
+        first_token_at
+            .zip(last_token_at)
+            .map(|(first_token_at, last_token_at)| TokenGenerationLatency {
+                time_to_first_token_microseconds: duration_to_microseconds(
+                    first_token_at.duration_since(queued_at),
+                ),
+                end_to_end_latency_microseconds: duration_to_microseconds(
+                    last_token_at.duration_since(queued_at),
+                ),
+            });
+    TextGenerationStats {
+        input_token_count: stats.input_token_count,
+        output_token_count: stats.output_token_count,
+        token_generation_latency,
+        draft_token_acceptance_rate,
+    }
+}
+
 fn duration_to_microseconds_string(duration: Option<Duration>) -> String {
     duration.map_or_else(
         || "none".to_owned(),
         |duration| duration.as_micros().separate_with_commas(),
     )
+}
+
+fn duration_to_microseconds(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or_default()
 }
 
 fn count_to_string(count: Option<usize>) -> String {

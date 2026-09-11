@@ -67,12 +67,17 @@ message TextGenerationStats {
   uint64 input_token_count = 1;
   // Number of generated tokens, excluding the terminal end-of-sequence token.
   uint64 output_token_count = 2;
-  // Prefill time in microseconds.
-  uint64 prefill_duration_microseconds = 3;
-  // Decode time in microseconds.
-  uint64 decode_duration_microseconds = 4;
+  // Token latency measurements; absent when generation produced no output token.
+  TokenGenerationLatency token_generation_latency = 3;
   // Fraction of proposed draft tokens accepted during speculative decoding.
-  optional float draft_token_acceptance_rate = 5;
+  optional float draft_token_acceptance_rate = 4;
+}
+
+message TokenGenerationLatency {
+  // Time from model-runner queue arrival until the first output token.
+  uint64 time_to_first_token_microseconds = 1;
+  // Time from model-runner queue arrival until the final output token.
+  uint64 end_to_end_latency_microseconds = 2;
 }
 
 // Requests a graceful shutdown of the model runner process.

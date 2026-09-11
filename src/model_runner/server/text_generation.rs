@@ -1,5 +1,4 @@
 use crate::proto::model_runner::GenerateTextRequest;
-use crate::proto::model_runner::TextGenerationStats;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::DType;
@@ -58,13 +57,16 @@ pub(super) struct PrefillStartPositions {
 
 pub(super) struct CompletedGeneration {
     pub(super) cached_sequence_token_ids: Vec<u32>,
-    pub(super) client_stats: TextGenerationStats,
-    pub(super) server_stats: RequestGenerationStats,
+    pub(super) stats: TextGenerationStats,
 }
 
-pub(super) struct RequestGenerationStats {
+pub(super) struct TextGenerationStats {
+    pub(super) input_token_count: u64,
+    pub(super) output_token_count: u64,
     pub(super) target_cached_token_count: usize,
     pub(super) draft_stats: Option<DraftGenerationStats>,
+    pub(super) prefill_duration: Duration,
+    pub(super) decode_duration: Duration,
 }
 
 pub(super) struct DraftGenerationStats {
@@ -88,8 +90,6 @@ pub(super) struct RequestExecutionState {
     prefill_start_positions: PrefillStartPositions,
     phase: GenerationPhase,
     pending_output_token_ids: Vec<u32>,
-    // TODO: Move prefill and decode timing to server-level observability, and keep only
-    // user-relevant latency such as time to first and last token in per-request results.
     prefill_duration: Duration,
     decode_duration: Duration,
     accepted_draft_token_count: usize,
@@ -165,16 +165,11 @@ impl RequestExecutionState {
             anyhow::bail!("generation request is not finished");
         }
         let output_token_count = self.tokens.len() - self.input_token_count;
-        let client_stats = TextGenerationStats {
+        let stats = TextGenerationStats {
             input_token_count: u64::try_from(self.input_token_count)
                 .context("input token count does not fit in u64")?,
             output_token_count: u64::try_from(output_token_count)
                 .context("output token count does not fit in u64")?,
-            prefill_duration_microseconds: duration_microseconds(self.prefill_duration),
-            decode_duration_microseconds: duration_microseconds(self.decode_duration),
-            draft_token_acceptance_rate: self.compute_draft_token_acceptance_rate(),
-        };
-        let server_stats = RequestGenerationStats {
             target_cached_token_count: self.prefill_start_positions.target,
             draft_stats: self
                 .prefill_start_positions
@@ -184,11 +179,12 @@ impl RequestExecutionState {
                     accepted_token_count: self.accepted_draft_token_count,
                     proposed_token_count: self.proposed_draft_token_count,
                 }),
+            prefill_duration: self.prefill_duration,
+            decode_duration: self.decode_duration,
         };
         Ok(CompletedGeneration {
             cached_sequence_token_ids: self.tokens,
-            client_stats,
-            server_stats,
+            stats,
         })
     }
 
@@ -439,13 +435,6 @@ impl RequestExecutionState {
         }
     }
 
-    fn compute_draft_token_acceptance_rate(&self) -> Option<f32> {
-        if self.proposed_draft_token_count == 0 {
-            return None;
-        }
-        Some(self.accepted_draft_token_count as f32 / self.proposed_draft_token_count as f32)
-    }
-
     fn sample_next_token(
         &self,
         model: &mut ModelInstance,
@@ -489,10 +478,6 @@ impl RequestExecutionState {
         self.pending_output_token_ids.push(next_token);
         true
     }
-}
-
-fn duration_microseconds(duration: Duration) -> u64 {
-    u64::try_from(duration.as_micros()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -581,19 +566,6 @@ mod tests {
         assert_eq!(execution_state.tokens, vec![1, 2]);
         assert_eq!(execution_state.pending_output_token_ids, vec![2]);
         Ok(())
-    }
-
-    #[test]
-    fn computes_acceptance_rate_only_when_draft_tokens_were_proposed() {
-        let mut execution_state = create_test_execution_state(vec![1], vec![]);
-        assert_eq!(execution_state.compute_draft_token_acceptance_rate(), None);
-
-        execution_state.accepted_draft_token_count = 3;
-        execution_state.proposed_draft_token_count = 4;
-        assert_eq!(
-            execution_state.compute_draft_token_acceptance_rate(),
-            Some(0.75)
-        );
     }
 
     #[test]
