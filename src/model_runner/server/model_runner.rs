@@ -92,43 +92,52 @@ impl ModelRunner {
 
     pub(super) fn generate_text(
         &mut self,
-        request: &GenerateTextRequest,
-        push_token: impl FnMut(u32) -> Result<()>,
-        is_cancelled: impl FnMut() -> bool,
-    ) -> Result<text_generation::TextGenerationResult> {
-        self.start_request(request.request_id)?;
+        request: GenerateTextRequest,
+        mut push_token: impl FnMut(u32) -> Result<()>,
+        mut is_cancelled: impl FnMut() -> bool,
+    ) -> Result<text_generation::CompletedGeneration> {
+        let request_id = request.request_id;
+        self.start_request(request_id)?;
         let result = match (|| {
-            // Restore only the prompt tokens before the final token. The final prompt token must
+            // Restore only the input tokens before the final token. The final input token must
             // still pass through the model to produce the first generation logits, for both
             // regular and speculative decoding.
-            let prompt_prefix = request
+            let input_prefix = request
                 .input_token_ids
                 .split_last()
                 .map_or(&[][..], |(_, prefix)| prefix);
             let prefill_start_positions = text_generation::PrefillStartPositions {
                 target: self
                     .target
-                    .restore_cached_prefix(request.request_id, prompt_prefix)?,
+                    .restore_cached_prefix(request_id, input_prefix)?,
                 draft: self
                     .draft
                     .as_mut()
-                    .map(|draft| draft.restore_cached_prefix(request.request_id, prompt_prefix))
+                    .map(|draft| draft.restore_cached_prefix(request_id, input_prefix))
                     .transpose()?,
             };
-            let result = text_generation::generate_text(
-                &mut self.target,
-                self.draft.as_mut(),
+            let mut execution_state = text_generation::RequestExecutionState::new(
+                request,
                 self.draft_token_count,
                 prefill_start_positions,
-                request,
-                push_token,
-                is_cancelled,
             )?;
-            Ok::<_, anyhow::Error>(result)
+            loop {
+                if is_cancelled() {
+                    return Err(text_generation::GenerationCancelled.into());
+                }
+                let step = execution_state.run_one_step(&mut self.target, self.draft.as_mut())?;
+                for token_id in step.output_token_ids {
+                    push_token(token_id)?;
+                }
+                if matches!(step.phase, text_generation::GenerationPhase::Finished) {
+                    break;
+                }
+            }
+            execution_state.into_completed_generation()
         })() {
             Ok(result) => result,
             Err(error) => {
-                if let Err(cleanup_error) = self.abort_request(request.request_id) {
+                if let Err(cleanup_error) = self.abort_request(request_id) {
                     return Err(error.context(format!(
                         "additionally failed to clear KV caches: {cleanup_error:#}"
                     )));
@@ -136,8 +145,8 @@ impl ModelRunner {
                 return Err(error);
             }
         };
-        if let Err(error) = self.finish_request(request.request_id, &result.token_ids) {
-            if let Err(cleanup_error) = self.abort_request(request.request_id) {
+        if let Err(error) = self.finish_request(request_id, &result.cached_sequence_token_ids) {
+            if let Err(cleanup_error) = self.abort_request(request_id) {
                 return Err(error.context(format!(
                     "additionally failed to clear KV caches: {cleanup_error:#}"
                 )));

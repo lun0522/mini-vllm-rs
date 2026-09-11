@@ -16,7 +16,7 @@ flowchart LR
         InferenceWorker["server/inference_worker.rs<br/>Request execution and event streaming"]
         ModelRunner["server/model_runner.rs<br/>Request execution across model instances"]
         ModelInstance["server/model_instance.rs<br/>One loaded model and its KV-cache manager"]
-        TextGeneration["server/text_generation.rs<br/>Autoregressive decoding loop"]
+        TextGeneration["server/text_generation.rs<br/>Resumable request generation state"]
     end
 
     Client -->|"Spawns with local paths and socket"| Cli
@@ -48,9 +48,10 @@ flowchart LR
   manager and passes request-aware forward contexts into model execution. The
   target cache uses the configured byte budget; the draft cache is sized to
   hold the same number of tokens.
-- `server/text_generation.rs` performs prompt prefill, ordinary greedy decode,
-  or speculative decode using draft proposals, batched target verification,
-  cache rollback, and request-level acceptance statistics.
+- `server/text_generation.rs` keeps each request's generation progress and
+  sampling state resumable between prefill and decode iterations. It supports
+  ordinary greedy decode or speculative decode using draft proposals, batched
+  target verification, cache rollback, and request-level acceptance statistics.
 - Tokenization, tokenizer compatibility checks, and incremental decoding belong
   to the request-handler process. The model runner receives and returns token
   IDs.

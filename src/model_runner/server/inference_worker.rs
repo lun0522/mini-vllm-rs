@@ -45,66 +45,73 @@ pub(super) fn run(
 }
 
 fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
-    let input_token_count = request.generate_text.input_token_ids.len();
+    let InferenceRequest {
+        queued_at,
+        generate_text,
+        event_sender,
+    } = request;
+    let request_id = generate_text.request_id;
+    let input_token_count = generate_text.input_token_ids.len();
     let execution_started = Instant::now();
-    let queue_duration = execution_started.duration_since(request.queued_at);
+    let queue_duration = execution_started.duration_since(queued_at);
     log::info!(
         "Worker state: request_id={} status=started input_tokens={} ignore_eos_tokens={} queue_us={}",
-        request.generate_text.request_id,
+        request_id,
         input_token_count,
-        request.generate_text.end_of_sequence_token_ids.is_empty(),
+        generate_text.end_of_sequence_token_ids.is_empty(),
         queue_duration.as_micros().separate_with_commas(),
     );
     let previous_evicted_cached_token_count = model_runner.evicted_cached_token_count();
     let mut first_token_at = None;
     let mut output_token_count = 0;
     let result = model_runner.generate_text(
-        &request.generate_text,
+        generate_text,
         |token_id| {
-            send_token_event(&request.event_sender, token_id)?;
+            send_token_event(&event_sender, token_id)?;
             if first_token_at.is_none() {
                 first_token_at = Some(Instant::now());
             }
             output_token_count += 1;
             Ok(())
         },
-        || request.event_sender.is_closed(),
+        || event_sender.is_closed(),
     );
     let evicted_cached_token_count = model_runner
         .evicted_cached_token_count()
         .saturating_sub(previous_evicted_cached_token_count);
     let time_to_first_token =
-        first_token_at.map(|first_token_at| first_token_at.duration_since(request.queued_at));
+        first_token_at.map(|first_token_at| first_token_at.duration_since(queued_at));
 
     match result {
         Ok(result) => {
+            let draft_stats = result.server_stats.draft_stats.as_ref();
             log::info!(
                 "Worker state: request_id={} status=completed input_tokens={} output_tokens={} queue_us={} \
                  prefill_us={} ttft_us={} decode_us={} target_cached_tokens={} \
                  draft_cached_tokens={} evicted_cached_tokens={} draft_accepted={} \
                  draft_proposed={}",
-                request.generate_text.request_id,
+                request_id,
                 input_token_count,
-                result.stats.output_token_count,
+                result.client_stats.output_token_count,
                 queue_duration.as_micros().separate_with_commas(),
                 result
-                    .stats
+                    .client_stats
                     .prefill_duration_microseconds
                     .separate_with_commas(),
                 duration_to_microseconds_string(time_to_first_token),
                 result
-                    .stats
+                    .client_stats
                     .decode_duration_microseconds
                     .separate_with_commas(),
-                result.target_cached_token_count,
-                count_to_string(result.draft_cached_token_count),
+                result.server_stats.target_cached_token_count,
+                count_to_string(draft_stats.map(|stats| stats.cached_token_count)),
                 evicted_cached_token_count,
-                result.accepted_draft_token_count,
-                result.proposed_draft_token_count,
+                count_to_string(draft_stats.map(|stats| stats.accepted_token_count)),
+                count_to_string(draft_stats.map(|stats| stats.proposed_token_count)),
             );
             let _ = send_event(
-                &request.event_sender,
-                generate_text_event::Event::Stats(result.stats),
+                &event_sender,
+                generate_text_event::Event::Stats(result.client_stats),
             );
         }
         Err(error) => {
@@ -112,7 +119,7 @@ fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
             log::info!(
                 "Worker state: request_id={} status={} input_tokens={} output_tokens={} queue_us={} \
                  ttft_us={} evicted_cached_tokens={}",
-                request.generate_text.request_id,
+                request_id,
                 if status.code() == tonic::Code::Cancelled {
                     "cancelled"
                 } else {
@@ -124,7 +131,7 @@ fn process_request(model_runner: &mut ModelRunner, request: InferenceRequest) {
                 duration_to_microseconds_string(time_to_first_token),
                 evicted_cached_token_count,
             );
-            let _ = request.event_sender.blocking_send(Err(status));
+            let _ = event_sender.blocking_send(Err(status));
         }
     }
 }

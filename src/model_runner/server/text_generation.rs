@@ -26,20 +26,16 @@ impl fmt::Display for GenerationCancelled {
 
 impl Error for GenerationCancelled {}
 
-struct TextGenerator<PushToken, IsCancelled> {
-    request_id: u64,
-    tokens: Vec<u32>,
-    draft_token_count: usize,
-    max_new_token_count: usize,
-    repeat_last_n: usize,
-    repeat_penalty: f32,
-    eos_tokens: Vec<u32>,
-    target_logits_processor: RefCell<LogitsProcessor>,
-    draft_logits_processor: RefCell<LogitsProcessor>,
-    accepted_draft_token_count: usize,
-    proposed_draft_token_count: usize,
-    push_token: PushToken,
-    is_cancelled: IsCancelled,
+#[derive(Clone, Copy)]
+pub(super) enum GenerationPhase {
+    Prefill,
+    Decode { generated_token_count: usize },
+    Finished,
+}
+
+pub(super) struct GenerationStep {
+    pub(super) output_token_ids: Vec<u32>,
+    pub(super) phase: GenerationPhase,
 }
 
 struct DraftVerificationResult {
@@ -52,99 +48,147 @@ struct DecodeIterationResult {
     should_continue: bool,
 }
 
-struct PrefillResult {
-    generated_token_count: usize,
-    should_decode: bool,
-}
-
 #[derive(Clone, Copy)]
+/// Records how many input tokens each model restored from its prefix cache, so prefill starts at
+/// the first uncached token instead of position zero.
 pub(super) struct PrefillStartPositions {
     pub(super) target: usize,
     pub(super) draft: Option<usize>,
 }
 
-pub(super) struct TextGenerationResult {
-    pub(super) stats: TextGenerationStats,
-    pub(super) token_ids: Vec<u32>,
+pub(super) struct CompletedGeneration {
+    pub(super) cached_sequence_token_ids: Vec<u32>,
+    pub(super) client_stats: TextGenerationStats,
+    pub(super) server_stats: RequestGenerationStats,
+}
+
+pub(super) struct RequestGenerationStats {
     pub(super) target_cached_token_count: usize,
-    pub(super) draft_cached_token_count: Option<usize>,
-    pub(super) accepted_draft_token_count: usize,
-    pub(super) proposed_draft_token_count: usize,
+    pub(super) draft_stats: Option<DraftGenerationStats>,
 }
 
-pub(super) fn generate_text(
-    target: &mut ModelInstance,
-    draft: Option<&mut ModelInstance>,
+pub(super) struct DraftGenerationStats {
+    pub(super) cached_token_count: usize,
+    pub(super) accepted_token_count: usize,
+    pub(super) proposed_token_count: usize,
+}
+
+/// Owns the generation progress and sampling state for one resumable request.
+pub(super) struct RequestExecutionState {
+    request_id: u64,
+    tokens: Vec<u32>,
+    input_token_count: usize,
     draft_token_count: usize,
+    max_new_token_count: usize,
+    repeat_last_n: usize,
+    repeat_penalty: f32,
+    eos_tokens: Vec<u32>,
+    target_logits_processor: RefCell<LogitsProcessor>,
+    draft_logits_processor: RefCell<LogitsProcessor>,
     prefill_start_positions: PrefillStartPositions,
-    request: &GenerateTextRequest,
-    push_token: impl FnMut(u32) -> Result<()>,
-    is_cancelled: impl FnMut() -> bool,
-) -> Result<TextGenerationResult> {
-    if request.input_token_ids.is_empty() {
-        anyhow::bail!("input token IDs must not be empty");
-    }
-    TextGenerator {
-        request_id: request.request_id,
-        tokens: request.input_token_ids.clone(),
-        draft_token_count,
-        max_new_token_count: usize::try_from(request.max_new_tokens)
-            .context("max_new_tokens does not fit in usize")?,
-        repeat_last_n: usize::try_from(request.repeat_last_n)
-            .context("repeat_last_n does not fit in usize")?,
-        repeat_penalty: request.repeat_penalty,
-        eos_tokens: request.end_of_sequence_token_ids.clone(),
-        target_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
-        draft_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
-        accepted_draft_token_count: 0,
-        proposed_draft_token_count: 0,
-        push_token,
-        is_cancelled,
-    }
-    .run(target, draft, prefill_start_positions)
+    phase: GenerationPhase,
+    pending_output_token_ids: Vec<u32>,
+    // TODO: Move prefill and decode timing to server-level observability, and keep only
+    // user-relevant latency such as time to first and last token in per-request results.
+    prefill_duration: Duration,
+    decode_duration: Duration,
+    accepted_draft_token_count: usize,
+    proposed_draft_token_count: usize,
 }
 
-impl<PushToken, IsCancelled> TextGenerator<PushToken, IsCancelled>
-where
-    PushToken: FnMut(u32) -> Result<()>,
-    IsCancelled: FnMut() -> bool,
-{
-    fn run(
-        mut self,
-        target: &mut ModelInstance,
-        mut draft: Option<&mut ModelInstance>,
+impl RequestExecutionState {
+    pub(super) fn new(
+        request: GenerateTextRequest,
+        draft_token_count: usize,
         prefill_start_positions: PrefillStartPositions,
-    ) -> Result<TextGenerationResult> {
-        let prompt_token_count = self.tokens.len();
-        let generation_started = Instant::now();
-        let mut prefill_finished = None;
-        if self.max_new_token_count > 0 {
-            let PrefillResult {
-                generated_token_count,
-                should_decode,
-            } = self.run_prefill_phase(target, draft.as_deref_mut(), prefill_start_positions)?;
-            prefill_finished = Some(Instant::now());
-            if should_decode {
-                self.run_decode_phase(target, draft, generated_token_count)?;
-            }
+    ) -> Result<Self> {
+        if request.input_token_ids.is_empty() {
+            anyhow::bail!("input token IDs must not be empty");
         }
-        let decode_finished = Instant::now();
-        let prefill_finished = prefill_finished.unwrap_or(decode_finished);
-        let stats = create_generation_stats(
-            prompt_token_count,
-            self.tokens.len(),
-            generation_started,
-            prefill_finished,
-            decode_finished,
-            self.compute_draft_token_acceptance_rate(),
-        )?;
-        Ok(TextGenerationResult {
-            stats,
-            token_ids: self.tokens,
-            target_cached_token_count: prefill_start_positions.target,
-            draft_cached_token_count: prefill_start_positions.draft,
-            accepted_draft_token_count: self.accepted_draft_token_count,
-            proposed_draft_token_count: self.proposed_draft_token_count,
+        let input_token_count = request.input_token_ids.len();
+        let max_new_token_count = usize::try_from(request.max_new_tokens)
+            .context("max_new_tokens does not fit in usize")?;
+        Ok(Self {
+            request_id: request.request_id,
+            tokens: request.input_token_ids,
+            input_token_count,
+            draft_token_count,
+            max_new_token_count,
+            repeat_last_n: usize::try_from(request.repeat_last_n)
+                .context("repeat_last_n does not fit in usize")?,
+            repeat_penalty: request.repeat_penalty,
+            eos_tokens: request.end_of_sequence_token_ids,
+            target_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
+            draft_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
+            prefill_start_positions,
+            phase: GenerationPhase::Prefill,
+            pending_output_token_ids: Vec::new(),
+            prefill_duration: Duration::ZERO,
+            decode_duration: Duration::ZERO,
+            accepted_draft_token_count: 0,
+            proposed_draft_token_count: 0,
+        })
+    }
+
+    /// Advances one prefill phase or decode iteration and then yields back to the caller.
+    pub(super) fn run_one_step(
+        &mut self,
+        target: &mut ModelInstance,
+        draft: Option<&mut ModelInstance>,
+    ) -> Result<GenerationStep> {
+        self.pending_output_token_ids.clear();
+        self.phase = match self.phase {
+            GenerationPhase::Prefill => {
+                let started = Instant::now();
+                let phase = self.run_prefill_phase(target, draft)?;
+                self.prefill_duration += started.elapsed();
+                phase
+            }
+            GenerationPhase::Decode {
+                generated_token_count,
+            } => {
+                let started = Instant::now();
+                let phase = self.run_decode_iteration(target, draft, generated_token_count)?;
+                self.decode_duration += started.elapsed();
+                phase
+            }
+            GenerationPhase::Finished => GenerationPhase::Finished,
+        };
+        Ok(GenerationStep {
+            output_token_ids: std::mem::take(&mut self.pending_output_token_ids),
+            phase: self.phase,
+        })
+    }
+
+    pub(super) fn into_completed_generation(self) -> Result<CompletedGeneration> {
+        if !matches!(self.phase, GenerationPhase::Finished) {
+            anyhow::bail!("generation request is not finished");
+        }
+        let output_token_count = self.tokens.len() - self.input_token_count;
+        let client_stats = TextGenerationStats {
+            input_token_count: u64::try_from(self.input_token_count)
+                .context("input token count does not fit in u64")?,
+            output_token_count: u64::try_from(output_token_count)
+                .context("output token count does not fit in u64")?,
+            prefill_duration_microseconds: duration_microseconds(self.prefill_duration),
+            decode_duration_microseconds: duration_microseconds(self.decode_duration),
+            draft_token_acceptance_rate: self.compute_draft_token_acceptance_rate(),
+        };
+        let server_stats = RequestGenerationStats {
+            target_cached_token_count: self.prefill_start_positions.target,
+            draft_stats: self
+                .prefill_start_positions
+                .draft
+                .map(|cached_token_count| DraftGenerationStats {
+                    cached_token_count,
+                    accepted_token_count: self.accepted_draft_token_count,
+                    proposed_token_count: self.proposed_draft_token_count,
+                }),
+        };
+        Ok(CompletedGeneration {
+            cached_sequence_token_ids: self.tokens,
+            client_stats,
+            server_stats,
         })
     }
 
@@ -152,44 +196,44 @@ where
         &mut self,
         target: &mut ModelInstance,
         draft: Option<&mut ModelInstance>,
-        prefill_start_positions: PrefillStartPositions,
-    ) -> Result<PrefillResult> {
-        if (self.is_cancelled)() {
-            return Err(GenerationCancelled.into());
-        }
+    ) -> Result<GenerationPhase> {
         if let Some(draft) = draft {
-            self.prefill_prompt_prefix(target, prefill_start_positions.target)?;
-            let draft_start_position = prefill_start_positions
+            self.prefill_input_prefix(target, self.prefill_start_positions.target)?;
+            let draft_start_position = self
+                .prefill_start_positions
                 .draft
                 .context("draft prefill start position is missing")?;
-            self.prefill_prompt_prefix(draft, draft_start_position)?;
-            return Ok(PrefillResult {
+            self.prefill_input_prefix(draft, draft_start_position)?;
+            return Ok(GenerationPhase::Decode {
                 generated_token_count: 0,
-                should_decode: true,
             });
         }
 
+        // TODO: Advance over a scheduler-sized input chunk and sample only after the final
+        // prefill chunk once chunked prefill is implemented.
         let next_token = self.sample_next_token(
             target,
-            &self.tokens[prefill_start_positions.target..],
-            prefill_start_positions.target,
+            &self.tokens[self.prefill_start_positions.target..],
+            self.prefill_start_positions.target,
             /* appended_tokens */ &[],
             &mut self.target_logits_processor.borrow_mut(),
         )?;
-        let should_decode = self.commit_next_token(next_token)?;
-        Ok(PrefillResult {
-            generated_token_count: usize::from(should_decode),
-            should_decode,
-        })
+        let should_decode = self.commit_next_token(next_token);
+        let generated_token_count = usize::from(should_decode);
+        Ok(
+            if should_decode && generated_token_count < self.max_new_token_count {
+                GenerationPhase::Decode {
+                    generated_token_count,
+                }
+            } else {
+                GenerationPhase::Finished
+            },
+        )
     }
 
-    /// Prefills through the second-to-last prompt token, leaving the final token as the common
+    /// Prefills through the second-to-last input token, leaving the final token as the common
     /// starting point for draft proposal and target verification.
-    fn prefill_prompt_prefix(
-        &self,
-        model: &mut ModelInstance,
-        start_position: usize,
-    ) -> Result<()> {
+    fn prefill_input_prefix(&self, model: &mut ModelInstance, start_position: usize) -> Result<()> {
         let prefill_tokens = &self.tokens[start_position..self.tokens.len() - 1];
         if prefill_tokens.is_empty() {
             return Ok(());
@@ -199,47 +243,46 @@ where
         Ok(())
     }
 
-    fn run_decode_phase(
+    fn run_decode_iteration(
         &mut self,
         target: &mut ModelInstance,
-        mut draft: Option<&mut ModelInstance>,
-        mut generated_token_count: usize,
-    ) -> Result<()> {
-        while generated_token_count < self.max_new_token_count {
-            if (self.is_cancelled)() {
-                return Err(GenerationCancelled.into());
-            }
-            let should_continue = match draft.as_deref_mut() {
-                Some(draft) => {
-                    let DecodeIterationResult {
-                        committed_token_count,
-                        should_continue,
-                    } = self.run_speculative_iteration(
-                        target,
-                        draft,
-                        self.max_new_token_count - generated_token_count,
-                    )?;
-                    generated_token_count += committed_token_count;
-                    should_continue
+        draft: Option<&mut ModelInstance>,
+        generated_token_count: usize,
+    ) -> Result<GenerationPhase> {
+        let DecodeIterationResult {
+            committed_token_count,
+            should_continue,
+        } = match draft {
+            Some(draft) => self.run_speculative_iteration(
+                target,
+                draft,
+                self.max_new_token_count - generated_token_count,
+            )?,
+            None => {
+                let start_position = self.tokens.len() - 1;
+                let next_token = self.sample_next_token(
+                    target,
+                    &self.tokens[start_position..],
+                    start_position,
+                    /* appended_tokens */ &[],
+                    &mut self.target_logits_processor.borrow_mut(),
+                )?;
+                DecodeIterationResult {
+                    committed_token_count: 1,
+                    should_continue: self.commit_next_token(next_token),
                 }
-                None => {
-                    let start_position = self.tokens.len() - 1;
-                    let next_token = self.sample_next_token(
-                        target,
-                        &self.tokens[start_position..],
-                        start_position,
-                        /* appended_tokens */ &[],
-                        &mut self.target_logits_processor.borrow_mut(),
-                    )?;
-                    generated_token_count += 1;
-                    self.commit_next_token(next_token)?
-                }
-            };
-            if !should_continue {
-                return Ok(());
             }
-        }
-        Ok(())
+        };
+        let generated_token_count = generated_token_count + committed_token_count;
+        Ok(
+            if should_continue && generated_token_count < self.max_new_token_count {
+                GenerationPhase::Decode {
+                    generated_token_count,
+                }
+            } else {
+                GenerationPhase::Finished
+            },
+        )
     }
 
     fn run_speculative_iteration(
@@ -248,7 +291,7 @@ where
         draft: &mut ModelInstance,
         remaining_max_token_count: usize,
     ) -> Result<DecodeIterationResult> {
-        // Generate draft proposals autoregressively, starting with the pending prompt or output
+        // Generate draft proposals autoregressively, starting with the pending input or output
         // token that has not yet been written to either model's KV cache.
         let original_cached_token_count = self.tokens.len() - 1;
         let draft_tokens = self.generate_draft_tokens(
@@ -284,10 +327,10 @@ where
 
         // Publish the accepted draft prefix, followed by the target replacement when the models
         // disagreed. EOS is observed but never added to the generated output.
-        self.commit_speculative_tokens(
+        Ok(self.commit_speculative_tokens(
             &draft_tokens[..accepted_token_count],
             maybe_replacement_token,
-        )
+        ))
     }
 
     fn generate_draft_tokens(
@@ -300,9 +343,6 @@ where
         let draft_token_count = self.draft_token_count.min(remaining_max_token_count);
         let mut draft_tokens = Vec::with_capacity(draft_token_count);
         for _ in 0..draft_token_count {
-            if (self.is_cancelled)() {
-                return Err(GenerationCancelled.into());
-            }
             let start_position = original_cached_token_count + draft_tokens.len();
             let input_token = draft_tokens
                 .last()
@@ -373,30 +413,30 @@ where
         &mut self,
         accepted_draft_tokens: &[u32],
         maybe_replacement_token: Option<u32>,
-    ) -> Result<DecodeIterationResult> {
+    ) -> DecodeIterationResult {
         let mut committed_token_count = 0;
         for &draft_token in accepted_draft_tokens {
-            if !self.commit_next_token(draft_token)? {
-                return Ok(DecodeIterationResult {
+            if !self.commit_next_token(draft_token) {
+                return DecodeIterationResult {
                     committed_token_count,
                     should_continue: false,
-                });
+                };
             }
             committed_token_count += 1;
         }
         if let Some(replacement_token) = maybe_replacement_token {
-            if !self.commit_next_token(replacement_token)? {
-                return Ok(DecodeIterationResult {
+            if !self.commit_next_token(replacement_token) {
+                return DecodeIterationResult {
                     committed_token_count,
                     should_continue: false,
-                });
+                };
             }
             committed_token_count += 1;
         }
-        Ok(DecodeIterationResult {
+        DecodeIterationResult {
             committed_token_count,
             should_continue: true,
-        })
+        }
     }
 
     fn compute_draft_token_acceptance_rate(&self) -> Option<f32> {
@@ -441,38 +481,14 @@ where
         logits_processor.sample(&logits).map_err(Into::into)
     }
 
-    fn commit_next_token(&mut self, next_token: u32) -> Result<bool> {
+    fn commit_next_token(&mut self, next_token: u32) -> bool {
         if self.eos_tokens.contains(&next_token) {
-            return Ok(false);
+            return false;
         }
         self.tokens.push(next_token);
-        (self.push_token)(next_token)?;
-        Ok(true)
+        self.pending_output_token_ids.push(next_token);
+        true
     }
-}
-
-fn create_generation_stats(
-    prompt_token_count: usize,
-    total_token_count: usize,
-    generation_started: Instant,
-    prefill_finished: Instant,
-    decode_finished: Instant,
-    draft_token_acceptance_rate: Option<f32>,
-) -> Result<TextGenerationStats> {
-    let output_token_count = total_token_count - prompt_token_count;
-    Ok(TextGenerationStats {
-        input_token_count: u64::try_from(prompt_token_count)
-            .context("input token count does not fit in u64")?,
-        output_token_count: u64::try_from(output_token_count)
-            .context("output token count does not fit in u64")?,
-        prefill_duration_microseconds: duration_microseconds(
-            prefill_finished.duration_since(generation_started),
-        ),
-        decode_duration_microseconds: duration_microseconds(
-            decode_finished.duration_since(prefill_finished),
-        ),
-        draft_token_acceptance_rate,
-    })
 }
 
 fn duration_microseconds(duration: Duration) -> u64 {
@@ -484,20 +500,15 @@ mod tests {
     use super::*;
     use candle_core::Device;
 
-    type TestGenerator = TextGenerator<fn(u32) -> Result<()>, fn() -> bool>;
-
-    fn create_test_generator(tokens: Vec<u32>, eos_tokens: Vec<u32>) -> TestGenerator {
-        fn ignore_token(_: u32) -> Result<()> {
-            Ok(())
-        }
-
-        fn never_cancelled() -> bool {
-            false
-        }
-
-        TextGenerator {
+    fn create_test_execution_state(
+        tokens: Vec<u32>,
+        eos_tokens: Vec<u32>,
+    ) -> RequestExecutionState {
+        let input_token_count = tokens.len();
+        RequestExecutionState {
             request_id: 1,
             tokens,
+            input_token_count,
             draft_token_count: 4,
             max_new_token_count: 16,
             repeat_last_n: 64,
@@ -505,16 +516,24 @@ mod tests {
             eos_tokens,
             target_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
             draft_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
+            prefill_start_positions: PrefillStartPositions {
+                target: 0,
+                draft: None,
+            },
+            phase: GenerationPhase::Decode {
+                generated_token_count: 0,
+            },
+            pending_output_token_ids: Vec::new(),
+            prefill_duration: Duration::ZERO,
+            decode_duration: Duration::ZERO,
             accepted_draft_token_count: 0,
             proposed_draft_token_count: 0,
-            push_token: ignore_token,
-            is_cancelled: never_cancelled,
         }
     }
 
     #[test]
     fn verifies_the_accepted_draft_prefix_and_target_replacement() -> Result<()> {
-        let mut generator = create_test_generator(vec![0], vec![]);
+        let mut execution_state = create_test_execution_state(vec![0], vec![]);
         let draft_tokens = [1, 2, 3];
         let verification_logits = Tensor::new(
             &[
@@ -525,7 +544,7 @@ mod tests {
             &Device::Cpu,
         )?;
 
-        let result = generator.verify_draft_tokens(&draft_tokens, &verification_logits)?;
+        let result = execution_state.verify_draft_tokens(&draft_tokens, &verification_logits)?;
 
         assert_eq!(result.accepted_token_count, 1);
         assert_eq!(result.maybe_replacement_token, Some(4));
@@ -534,7 +553,7 @@ mod tests {
 
     #[test]
     fn verifies_when_all_draft_tokens_are_accepted() -> Result<()> {
-        let mut generator = create_test_generator(vec![0], vec![]);
+        let mut execution_state = create_test_execution_state(vec![0], vec![]);
         let draft_tokens = [1, 2, 3];
         let verification_logits = Tensor::new(
             &[
@@ -545,7 +564,7 @@ mod tests {
             &Device::Cpu,
         )?;
 
-        let result = generator.verify_draft_tokens(&draft_tokens, &verification_logits)?;
+        let result = execution_state.verify_draft_tokens(&draft_tokens, &verification_logits)?;
 
         assert_eq!(result.accepted_token_count, draft_tokens.len());
         assert_eq!(result.maybe_replacement_token, None);
@@ -554,22 +573,39 @@ mod tests {
 
     #[test]
     fn commits_speculative_tokens_and_stops_before_eos() -> Result<()> {
-        let mut generator = create_test_generator(vec![1], vec![3]);
-        let result = generator.commit_speculative_tokens(&[2, 3], Some(4))?;
+        let mut execution_state = create_test_execution_state(vec![1], vec![3]);
+        let result = execution_state.commit_speculative_tokens(&[2, 3], Some(4));
 
         assert_eq!(result.committed_token_count, 1);
         assert!(!result.should_continue);
-        assert_eq!(generator.tokens, vec![1, 2]);
+        assert_eq!(execution_state.tokens, vec![1, 2]);
+        assert_eq!(execution_state.pending_output_token_ids, vec![2]);
         Ok(())
     }
 
     #[test]
     fn computes_acceptance_rate_only_when_draft_tokens_were_proposed() {
-        let mut generator = create_test_generator(vec![1], vec![]);
-        assert_eq!(generator.compute_draft_token_acceptance_rate(), None);
+        let mut execution_state = create_test_execution_state(vec![1], vec![]);
+        assert_eq!(execution_state.compute_draft_token_acceptance_rate(), None);
 
-        generator.accepted_draft_token_count = 3;
-        generator.proposed_draft_token_count = 4;
-        assert_eq!(generator.compute_draft_token_acceptance_rate(), Some(0.75));
+        execution_state.accepted_draft_token_count = 3;
+        execution_state.proposed_draft_token_count = 4;
+        assert_eq!(
+            execution_state.compute_draft_token_acceptance_rate(),
+            Some(0.75)
+        );
+    }
+
+    #[test]
+    fn rejects_result_before_generation_finishes() {
+        let execution_state = create_test_execution_state(vec![1], vec![]);
+
+        let error = execution_state
+            .into_completed_generation()
+            .err()
+            .expect("unfinished generation should not produce a result")
+            .to_string();
+
+        assert_eq!(error, "generation request is not finished");
     }
 }

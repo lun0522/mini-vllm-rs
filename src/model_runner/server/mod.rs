@@ -159,6 +159,9 @@ fn normalize_generate_text_request(
              capacity is {token_capacity}"
         ));
     }
+    if request.max_new_tokens == 0 {
+        return Err("max_new_tokens must be greater than zero".to_owned());
+    }
 
     // The final generated token remains pending rather than being written to the cache, so one
     // output token can be generated even when the input already fills the cache.
@@ -202,6 +205,19 @@ mod tests {
         let error = normalize_generate_text_request(&mut request, 16).unwrap_err();
 
         assert_eq!(error, "input token IDs must not be empty");
+    }
+
+    #[test]
+    fn rejects_zero_maximum_new_token_count() {
+        let mut request = GenerateTextRequest {
+            input_token_ids: vec![1],
+            max_new_tokens: 0,
+            ..Default::default()
+        };
+
+        let error = normalize_generate_text_request(&mut request, 16).unwrap_err();
+
+        assert_eq!(error, "max_new_tokens must be greater than zero");
     }
 
     #[test]
