@@ -86,14 +86,6 @@ impl ModelRunner {
         self.target.supports_multiple_active_requests()
     }
 
-    pub(super) fn evicted_cached_token_count(&self) -> usize {
-        self.target.evicted_cached_token_count().saturating_add(
-            self.draft
-                .as_ref()
-                .map_or(0, ModelInstance::evicted_cached_token_count),
-        )
-    }
-
     pub(super) fn start_request(
         &mut self,
         request: GenerateTextRequest,

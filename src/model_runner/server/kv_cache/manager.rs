@@ -58,10 +58,6 @@ impl KvCacheManager {
         self.backend.token_capacity()
     }
 
-    pub fn evicted_cached_token_count(&self) -> usize {
-        self.backend.evicted_cached_token_count()
-    }
-
     /// Restores reusable prefix pages and returns the number of restored tokens.
     pub fn restore_cached_prefix(&mut self, request_id: u64, token_ids: &[u32]) -> Result<usize> {
         self.with_request_state(

@@ -79,16 +79,10 @@ impl InferenceEngine {
     }
 
     fn start_request(&mut self, request_id: u64) -> Result<()> {
-        // TODO: Attribute evictions directly to each request. With interleaved execution, this
-        // cumulative-counter delta can include evictions caused by other requests.
-        let previous_evicted_cached_token_count = self.model_runner.evicted_cached_token_count();
         let started_request = {
             let model_runner = &mut self.model_runner;
-            self.request_manager.start_execution(
-                request_id,
-                previous_evicted_cached_token_count,
-                |request| model_runner.start_request(request),
-            )?
+            self.request_manager
+                .start_execution(request_id, |request| model_runner.start_request(request))?
         };
         self.scheduler
             .update_request_state(request_id, started_request.generation_phase)?;
@@ -151,16 +145,18 @@ impl InferenceEngine {
     }
 
     fn report_finished_request(&self, request_id: u64, finished_request: FinishedRequest) {
-        let evicted_cached_token_count = self
-            .model_runner
-            .evicted_cached_token_count()
-            .saturating_sub(finished_request.metrics.previous_evicted_cached_token_count);
-
+        let queued_at = finished_request.context.queued_at;
+        let queue_duration = finished_request
+            .metrics
+            .execution_started_at
+            .duration_since(queued_at);
+        let ttft_as_micros_string =
+            elapsed_microseconds_string(queued_at, finished_request.metrics.first_token_at);
         match &finished_request.result {
             Ok(result) => {
                 let client_stats = create_client_facing_generation_stats(
                     &result.stats,
-                    finished_request.context.queued_at,
+                    queued_at,
                     finished_request.metrics.first_token_at,
                     finished_request.metrics.last_token_at,
                 );
@@ -168,24 +164,16 @@ impl InferenceEngine {
                 log::info!(
                     "Engine state: request_id={} status=completed input_tokens={} output_tokens={} queue_us={} \
                      prefill_us={} ttft_us={} decode_us={} target_cached_tokens={} \
-                     draft_cached_tokens={} evicted_cached_tokens={} draft_accepted={} \
-                     draft_proposed={}",
+                     draft_cached_tokens={} draft_accepted={} draft_proposed={}",
                     request_id,
-                    finished_request.context.input_token_count,
-                    client_stats.output_token_count,
-                    finished_request
-                        .metrics
-                        .queue_duration(finished_request.context.queued_at)
-                        .as_micros()
-                        .separate_with_commas(),
+                    result.stats.input_token_count,
+                    result.stats.output_token_count,
+                    queue_duration.as_micros().separate_with_commas(),
                     result.stats.prefill_duration.as_micros().separate_with_commas(),
-                    duration_to_microseconds_string(finished_request.metrics.first_token_at.map(|first_token_at| {
-                        first_token_at.duration_since(finished_request.context.queued_at)
-                    })),
+                    ttft_as_micros_string,
                     result.stats.decode_duration.as_micros().separate_with_commas(),
                     result.stats.target_cached_token_count,
                     count_to_string(draft_stats.map(|stats| stats.cached_token_count)),
-                    evicted_cached_token_count,
                     count_to_string(draft_stats.map(|stats| stats.accepted_token_count)),
                     count_to_string(draft_stats.map(|stats| stats.proposed_token_count)),
                 );
@@ -195,24 +183,13 @@ impl InferenceEngine {
                 let status = generation_error_status(error);
                 log::info!(
                     "Engine state: request_id={} status={} input_tokens={} output_tokens={} queue_us={} \
-                     ttft_us={} evicted_cached_tokens={}",
+                     ttft_us={}",
                     request_id,
-                    if status.code() == tonic::Code::Cancelled {
-                        "cancelled"
-                    } else {
-                        "failed"
-                    },
+                    status.code().to_string(),
                     finished_request.context.input_token_count,
                     finished_request.metrics.output_token_count,
-                    finished_request
-                        .metrics
-                        .queue_duration(finished_request.context.queued_at)
-                        .as_micros()
-                        .separate_with_commas(),
-                    duration_to_microseconds_string(finished_request.metrics.first_token_at.map(|first_token_at| {
-                        first_token_at.duration_since(finished_request.context.queued_at)
-                    })),
-                    evicted_cached_token_count,
+                    queue_duration.as_micros().separate_with_commas(),
+                    ttft_as_micros_string,
                 );
                 finished_request.context.send_error(status);
             }
@@ -275,10 +252,15 @@ fn create_client_facing_generation_stats(
     }
 }
 
-fn duration_to_microseconds_string(duration: Option<Duration>) -> String {
-    duration.map_or_else(
+fn elapsed_microseconds_string(started_at: Instant, finished_at: Option<Instant>) -> String {
+    finished_at.map_or_else(
         || "none".to_owned(),
-        |duration| duration.as_micros().separate_with_commas(),
+        |finished_at| {
+            finished_at
+                .duration_since(started_at)
+                .as_micros()
+                .separate_with_commas()
+        },
     )
 }
 

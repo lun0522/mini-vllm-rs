@@ -62,13 +62,6 @@ pub(super) struct RequestExecutionMetrics {
     pub(super) first_token_at: Option<Instant>,
     pub(super) last_token_at: Option<Instant>,
     pub(super) output_token_count: usize,
-    pub(super) previous_evicted_cached_token_count: usize,
-}
-
-impl RequestExecutionMetrics {
-    pub(super) fn queue_duration(&self, queued_at: Instant) -> Duration {
-        self.execution_started_at.duration_since(queued_at)
-    }
 }
 
 pub(super) struct StartedRequest {
@@ -119,7 +112,6 @@ impl RequestManager {
     pub(super) fn start_execution(
         &mut self,
         request_id: u64,
-        previous_evicted_cached_token_count: usize,
         create_execution_state: impl FnOnce(GenerateTextRequest) -> Result<RequestExecutionState>,
     ) -> Result<StartedRequest> {
         let request = self.remove_request(request_id)?;
@@ -138,7 +130,6 @@ impl RequestManager {
             first_token_at: None,
             last_token_at: None,
             output_token_count: 0,
-            previous_evicted_cached_token_count,
         };
         match create_execution_state(generate_text_request) {
             Ok(execution_state) => {
@@ -335,7 +326,7 @@ mod tests {
         let mut requests = RequestManager::new();
         let (request, mut event_receiver) = request(7);
         requests.add_request(request)?;
-        let started_request = requests.start_execution(7, 3, |generate_text| {
+        let started_request = requests.start_execution(7, |generate_text| {
             RequestExecutionState::new(
                 generate_text,
                 4,
@@ -377,7 +368,6 @@ mod tests {
         assert!(request.result.is_ok());
         assert_eq!(request.context.input_token_count, 1);
         assert_eq!(request.metrics.output_token_count, 1);
-        assert_eq!(request.metrics.previous_evicted_cached_token_count, 3);
         Ok(())
     }
 
@@ -401,7 +391,7 @@ mod tests {
         requests.add_request(request)?;
         drop(event_receiver);
 
-        requests.start_execution(7, 0, |generate_text| {
+        requests.start_execution(7, |generate_text| {
             RequestExecutionState::new(
                 generate_text,
                 4,

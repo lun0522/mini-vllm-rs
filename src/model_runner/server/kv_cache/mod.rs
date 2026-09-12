@@ -38,13 +38,6 @@ impl KvCacheBackend {
         }
     }
 
-    pub(super) fn evicted_cached_token_count(&self) -> usize {
-        match self {
-            Self::Contiguous(_) => 0,
-            Self::Paged(cache) => cache.evicted_cached_token_count(),
-        }
-    }
-
     pub(super) fn layer_count(&self) -> usize {
         match self {
             Self::Contiguous(cache) => cache.layer_count(),

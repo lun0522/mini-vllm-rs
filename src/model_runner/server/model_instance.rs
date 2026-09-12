@@ -83,10 +83,6 @@ impl ModelInstance {
             .restore_cached_prefix(request_id, token_ids)
     }
 
-    pub(super) fn evicted_cached_token_count(&self) -> usize {
-        self.kv_cache_manager.evicted_cached_token_count()
-    }
-
     pub(super) fn truncate_cache(
         &mut self,
         request_id: u64,

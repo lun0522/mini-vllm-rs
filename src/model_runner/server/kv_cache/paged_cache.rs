@@ -22,7 +22,6 @@ pub(in crate::model_runner::server) struct PagedKvCache {
     prefix_block_index: Option<PrefixBlockIndex>,
     token_capacity: usize,
     layer_count: usize,
-    evicted_cached_token_count: usize,
 }
 
 /// Holds the virtual page mappings and prefix-index position for one request.
@@ -71,16 +70,11 @@ impl PagedKvCache {
             prefix_block_index,
             token_capacity,
             layer_count: model_info.layer_count,
-            evicted_cached_token_count: 0,
         })
     }
 
     pub(super) fn token_capacity(&self) -> usize {
         self.token_capacity
-    }
-
-    pub(super) fn evicted_cached_token_count(&self) -> usize {
-        self.evicted_cached_token_count
     }
 
     pub(super) fn layer_count(&self) -> usize {
@@ -257,10 +251,6 @@ impl PagedKvCache {
             };
             self.physical_page_pool
                 .release_allocated_pages(evicted_block.page_ids_by_layer.iter().copied())?;
-            self.evicted_cached_token_count = self
-                .evicted_cached_token_count
-                .checked_add(self.physical_page_pool.per_page_token_count)
-                .context("evicted cached token count overflow")?;
         }
         self.physical_page_pool
             .validate_append_capacity(current_token_count, appending_token_count)
@@ -869,7 +859,6 @@ mod tests {
                 .page_ids_by_layer,
             vec![vec![original_page_ids[0]]]
         );
-        assert_eq!(cache.evicted_cached_token_count(), 2);
         Ok(())
     }
 
@@ -898,7 +887,6 @@ mod tests {
                 .page_ids_by_layer,
             vec![vec![original_page_ids[0]]]
         );
-        assert_eq!(cache.evicted_cached_token_count(), 4);
         Ok(())
     }
 
