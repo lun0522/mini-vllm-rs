@@ -27,7 +27,7 @@ impl Error for GenerationCancelled {}
 
 #[derive(Clone, Copy)]
 pub(super) enum GenerationPhase {
-    Prefill,
+    Prefill { remaining_token_count: usize },
     Decode { generated_token_count: usize },
     Finished,
 }
@@ -110,6 +110,11 @@ impl RequestExecutionState {
             anyhow::bail!("input token IDs must not be empty");
         }
         let input_token_count = request.input_token_ids.len();
+        let cached_token_count = prefill_start_positions
+            .draft
+            .map_or(prefill_start_positions.target, |draft_start_position| {
+                prefill_start_positions.target.min(draft_start_position)
+            });
         let max_new_token_count = usize::try_from(request.max_new_tokens)
             .context("max_new_tokens does not fit in usize")?;
         Ok(Self {
@@ -125,7 +130,9 @@ impl RequestExecutionState {
             target_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
             draft_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
             prefill_start_positions,
-            phase: GenerationPhase::Prefill,
+            phase: GenerationPhase::Prefill {
+                remaining_token_count: input_token_count - cached_token_count,
+            },
             pending_output_token_ids: Vec::new(),
             prefill_duration: Duration::ZERO,
             decode_duration: Duration::ZERO,
@@ -142,7 +149,8 @@ impl RequestExecutionState {
     ) -> Result<GenerationStep> {
         self.pending_output_token_ids.clear();
         self.phase = match self.phase {
-            GenerationPhase::Prefill => {
+            // TODO: Consume only a scheduler-sized portion once chunked prefill is implemented.
+            GenerationPhase::Prefill { .. } => {
                 let started = Instant::now();
                 let phase = self.run_prefill_phase(target, draft)?;
                 self.prefill_duration += started.elapsed();
