@@ -64,6 +64,15 @@ impl LoadedModel {
     pub(crate) fn model(&mut self) -> &mut dyn CausalLanguageModel {
         &mut *self.model
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(model: Box<dyn CausalLanguageModel>) -> Self {
+        Self {
+            model,
+            device: Device::Cpu,
+            metadata: ModelMetadata::default(),
+        }
+    }
 }
 
 fn load_model_backend(gguf_path: &Path, device: &Device) -> Result<LoadedBackend> {

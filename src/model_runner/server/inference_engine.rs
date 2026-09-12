@@ -185,7 +185,7 @@ impl InferenceEngine {
                     "Engine state: request_id={} status={} input_tokens={} output_tokens={} queue_us={} \
                      ttft_us={}",
                     request_id,
-                    status.code().to_string(),
+                    status.code(),
                     finished_request.context.input_token_count,
                     finished_request.metrics.output_token_count,
                     queue_duration.as_micros().separate_with_commas(),

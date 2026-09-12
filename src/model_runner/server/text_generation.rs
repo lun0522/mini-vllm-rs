@@ -135,6 +135,7 @@ impl RequestExecutionState {
             anyhow::bail!("input token IDs must not be empty");
         }
         let input_token_count = request.input_token_ids.len();
+        validate_prefill_start_positions(input_token_count, prefill_initial_positions)?;
         let phase = determine_initial_phase(input_token_count, prefill_initial_positions);
         let max_new_token_count = usize::try_from(request.max_new_tokens)
             .context("max_new_tokens does not fit in usize")?;
@@ -172,7 +173,7 @@ impl RequestExecutionState {
         self.phase = match self.phase {
             GenerationPhase::Prefill { .. } => {
                 let started = Instant::now();
-                let phase = self.run_prefill_phase(target, draft, token_budget)?;
+                let phase = self.run_prefill_iteration(target, draft, token_budget)?;
                 self.prefill_duration += started.elapsed();
                 phase
             }
@@ -220,8 +221,7 @@ impl RequestExecutionState {
         })
     }
 
-    // TODO: simplify the logic.
-    fn run_prefill_phase(
+    fn run_prefill_iteration(
         &mut self,
         target: &mut ModelInstance,
         draft: Option<&mut ModelInstance>,
@@ -230,77 +230,85 @@ impl RequestExecutionState {
         if token_budget == 0 {
             anyhow::bail!("prefill token budget must be greater than zero");
         }
-        if let Some(draft) = draft {
-            let draft_position = self
-                .prefill_current_positions
-                .draft
-                .context("draft prefill position is missing")?;
-            let prefill_end_position = self.input_token_count - 1;
-            let chunk_end_position = self
-                .prefill_current_positions
-                .target
-                .min(draft_position)
-                .saturating_add(token_budget)
-                .min(prefill_end_position);
-            if self.prefill_current_positions.target < chunk_end_position {
-                self.forward_input_chunk(
-                    target,
-                    self.prefill_current_positions.target,
-                    chunk_end_position,
-                )?;
-                self.prefill_current_positions.target = chunk_end_position;
-            }
-            if draft_position < chunk_end_position {
-                self.forward_input_chunk(draft, draft_position, chunk_end_position)?;
-                self.prefill_current_positions.draft = Some(chunk_end_position);
-            }
-            let remaining_token_count = prefill_end_position
-                - self.prefill_current_positions.target.min(
-                    self.prefill_current_positions
-                        .draft
-                        .unwrap_or(prefill_end_position),
-                );
-            return Ok(if remaining_token_count == 0 {
-                GenerationPhase::Decode {
-                    generated_token_count: 0,
-                }
-            } else {
-                GenerationPhase::Prefill {
-                    remaining_token_count,
-                }
-            });
+        match draft {
+            Some(draft) => self.run_speculative_prefill_chunk(target, draft, token_budget),
+            None => self.run_target_prefill_chunk(target, token_budget),
+        }
+    }
+
+    fn run_speculative_prefill_chunk(
+        &mut self,
+        target: &mut ModelInstance,
+        draft: &mut ModelInstance,
+        token_budget: usize,
+    ) -> Result<GenerationPhase> {
+        let target_position = self.prefill_current_positions.target;
+        let draft_position = self
+            .prefill_current_positions
+            .draft
+            .context("draft prefill position is missing")?;
+        let prefill_end_position = self.input_token_count - 1;
+        let chunk_end_position = target_position
+            .min(draft_position)
+            .saturating_add(token_budget)
+            .min(prefill_end_position);
+
+        if target_position < chunk_end_position {
+            self.forward_input_chunk(target, target_position, chunk_end_position)?;
+            self.prefill_current_positions.target = chunk_end_position;
+        }
+        if draft_position < chunk_end_position {
+            self.forward_input_chunk(draft, draft_position, chunk_end_position)?;
+            self.prefill_current_positions.draft = Some(chunk_end_position);
         }
 
+        let current_position = self.prefill_current_positions.target.min(
+            self.prefill_current_positions
+                .draft
+                .unwrap_or(prefill_end_position),
+        );
+        Ok(determine_prefill_phase(
+            /* remaining_token_count */ prefill_end_position - current_position,
+        ))
+    }
+
+    fn run_target_prefill_chunk(
+        &mut self,
+        target: &mut ModelInstance,
+        token_budget: usize,
+    ) -> Result<GenerationPhase> {
         let start_position = self.prefill_current_positions.target;
         let chunk_end_position = start_position
             .saturating_add(token_budget)
             .min(self.input_token_count);
-        if chunk_end_position < self.input_token_count {
-            self.forward_input_chunk(target, start_position, chunk_end_position)?;
-            self.prefill_current_positions.target = chunk_end_position;
-            return Ok(GenerationPhase::Prefill {
-                remaining_token_count: self.input_token_count - chunk_end_position,
-            });
+        if chunk_end_position == self.input_token_count {
+            return self.run_final_target_prefill_chunk(target, start_position);
         }
+
+        self.forward_input_chunk(target, start_position, chunk_end_position)?;
+        self.prefill_current_positions.target = chunk_end_position;
+        Ok(determine_prefill_phase(
+            /* remaining_token_count */ self.input_token_count - chunk_end_position,
+        ))
+    }
+
+    fn run_final_target_prefill_chunk(
+        &mut self,
+        target: &mut ModelInstance,
+        start_position: usize,
+    ) -> Result<GenerationPhase> {
+        let end_position = self.input_token_count;
         let next_token = self.sample_next_token(
             target,
-            &self.tokens[start_position..chunk_end_position],
+            &self.tokens[start_position..end_position],
             start_position,
             /* appended_tokens */ &[],
             &mut self.target_logits_processor.borrow_mut(),
         )?;
-        self.prefill_current_positions.target = chunk_end_position;
+        self.prefill_current_positions.target = end_position;
         let should_decode = self.commit_next_token(next_token);
         let generated_token_count = usize::from(should_decode);
-        Ok(
-            if should_decode && generated_token_count < self.max_new_token_count {
-                GenerationPhase::Decode {
-                    generated_token_count,
-                }
-            } else {
-                GenerationPhase::Finished
-            },
-        )
+        Ok(self.determine_decode_phase(generated_token_count, should_decode))
     }
 
     fn forward_input_chunk(
@@ -345,15 +353,7 @@ impl RequestExecutionState {
             }
         };
         let generated_token_count = generated_token_count + committed_token_count;
-        Ok(
-            if should_continue && generated_token_count < self.max_new_token_count {
-                GenerationPhase::Decode {
-                    generated_token_count,
-                }
-            } else {
-                GenerationPhase::Finished
-            },
-        )
+        Ok(self.determine_decode_phase(generated_token_count, should_continue))
     }
 
     fn run_speculative_iteration(
@@ -553,6 +553,20 @@ impl RequestExecutionState {
         self.pending_output_token_ids.push(next_token);
         true
     }
+
+    fn determine_decode_phase(
+        &self,
+        generated_token_count: usize,
+        should_continue: bool,
+    ) -> GenerationPhase {
+        if should_continue && generated_token_count < self.max_new_token_count {
+            GenerationPhase::Decode {
+                generated_token_count,
+            }
+        } else {
+            GenerationPhase::Finished
+        }
+    }
 }
 
 fn determine_initial_phase(
@@ -566,6 +580,10 @@ fn determine_initial_phase(
         }
         None => input_token_count - prefill_initial_positions.target,
     };
+    determine_prefill_phase(remaining_token_count)
+}
+
+fn determine_prefill_phase(remaining_token_count: usize) -> GenerationPhase {
     if remaining_token_count == 0 {
         GenerationPhase::Decode {
             generated_token_count: 0,
@@ -577,10 +595,106 @@ fn determine_initial_phase(
     }
 }
 
+fn validate_prefill_start_positions(
+    input_token_count: usize,
+    positions: PrefillStartPositions,
+) -> Result<()> {
+    let maximum_position = input_token_count - 1;
+    if positions.target > maximum_position {
+        anyhow::bail!(
+            "target prefill position {} exceeds the maximum position {maximum_position}",
+            positions.target
+        );
+    }
+    if let Some(draft_position) = positions.draft {
+        if draft_position > maximum_position {
+            anyhow::bail!(
+                "draft prefill position {draft_position} exceeds the maximum position \
+                 {maximum_position}"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_runner::server::kv_cache::create_kv_cache;
+    use crate::model_runner::KvCacheType;
+    use crate::models::loaded_model::LoadedModel;
+    use crate::models::CausalLanguageModel;
+    use crate::models::ForwardContext;
+    use crate::models::KvCache;
+    use crate::models::ModelInfo;
+    use crate::models::ModelRole;
     use candle_core::Device;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    #[derive(Debug, PartialEq)]
+    struct ForwardCall {
+        start_position: usize,
+        token_ids: Vec<u32>,
+    }
+
+    struct TestModel {
+        info: ModelInfo,
+        next_token: u32,
+        forward_calls: Arc<Mutex<Vec<ForwardCall>>>,
+    }
+
+    impl CausalLanguageModel for TestModel {
+        fn info(&self) -> &ModelInfo {
+            &self.info
+        }
+
+        fn forward(
+            &mut self,
+            input: &Tensor,
+            context: &ForwardContext,
+            _kv_cache: &mut dyn KvCache,
+        ) -> candle_core::Result<Tensor> {
+            let token_ids = input.to_vec2::<u32>()?.into_iter().flatten().collect();
+            self.forward_calls.lock().unwrap().push(ForwardCall {
+                start_position: context.start_position,
+                token_ids,
+            });
+            let mut logits = vec![0.0f32; 8];
+            logits[self.next_token as usize] = 1.0;
+            Tensor::new(logits.as_slice(), &Device::Cpu)?.reshape((1, 1, 8))
+        }
+
+        fn forward_for_speculative_verification(
+            &mut self,
+            input: &Tensor,
+            context: &ForwardContext,
+            kv_cache: &mut dyn KvCache,
+        ) -> candle_core::Result<Tensor> {
+            self.forward(input, context, kv_cache)
+        }
+    }
+
+    fn create_test_model(next_token: u32) -> Result<(ModelInstance, Arc<Mutex<Vec<ForwardCall>>>)> {
+        let forward_calls = Arc::new(Mutex::new(Vec::new()));
+        let model = LoadedModel::for_test(Box::new(TestModel {
+            info: ModelInfo {
+                layer_count: 1,
+                kv_head_count: 1,
+                head_dimension: 1,
+                activation_dtype: DType::F32,
+            },
+            next_token,
+            forward_calls: Arc::clone(&forward_calls),
+        }));
+        let kv_cache = create_kv_cache(
+            KvCacheType::Contiguous,
+            &model,
+            ModelRole::Target,
+            /* total_size_bytes */ 128,
+        )?;
+        Ok((ModelInstance::new(model, kv_cache), forward_calls))
+    }
 
     fn create_test_execution_state(
         tokens: Vec<u32>,
@@ -665,6 +779,220 @@ mod tests {
             }
         ));
         Ok(())
+    }
+
+    #[test]
+    fn runs_a_partial_target_prefill_chunk() -> Result<()> {
+        let mut execution_state = create_test_execution_state(vec![1, 2, 3, 4], vec![]);
+        execution_state.prefill_current_positions.target = 0;
+        let (mut target, forward_calls) = create_test_model(5)?;
+
+        let phase = execution_state.run_prefill_iteration(&mut target, None, 2)?;
+
+        assert!(matches!(
+            phase,
+            GenerationPhase::Prefill {
+                remaining_token_count: 2
+            }
+        ));
+        assert_eq!(execution_state.prefill_current_positions.target, 2);
+        assert_eq!(
+            *forward_calls.lock().unwrap(),
+            vec![ForwardCall {
+                start_position: 0,
+                token_ids: vec![1, 2],
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn final_target_prefill_chunk_generates_the_first_output_token() -> Result<()> {
+        let mut execution_state = create_test_execution_state(vec![1, 2, 3, 4], vec![]);
+        execution_state.prefill_current_positions.target = 2;
+        let (mut target, forward_calls) = create_test_model(5)?;
+
+        let phase = execution_state.run_prefill_iteration(&mut target, None, 8)?;
+
+        assert!(matches!(
+            phase,
+            GenerationPhase::Decode {
+                generated_token_count: 1
+            }
+        ));
+        assert_eq!(execution_state.prefill_current_positions.target, 4);
+        assert_eq!(execution_state.tokens, vec![1, 2, 3, 4, 5]);
+        assert_eq!(execution_state.pending_output_token_ids, vec![5]);
+        assert_eq!(
+            *forward_calls.lock().unwrap(),
+            vec![ForwardCall {
+                start_position: 2,
+                token_ids: vec![3, 4],
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn speculative_prefill_advances_the_lagging_model_then_both_models() -> Result<()> {
+        let mut execution_state = create_test_execution_state(vec![1, 2, 3, 4, 5, 6], vec![]);
+        execution_state.prefill_current_positions = PrefillStartPositions {
+            target: 3,
+            draft: Some(1),
+        };
+        let (mut target, target_calls) = create_test_model(6)?;
+        let (mut draft, draft_calls) = create_test_model(6)?;
+
+        let phase = execution_state.run_prefill_iteration(&mut target, Some(&mut draft), 2)?;
+
+        assert!(matches!(
+            phase,
+            GenerationPhase::Prefill {
+                remaining_token_count: 2
+            }
+        ));
+        assert_eq!(execution_state.prefill_current_positions.target, 3);
+        assert_eq!(execution_state.prefill_current_positions.draft, Some(3));
+        assert!(target_calls.lock().unwrap().is_empty());
+        assert_eq!(
+            *draft_calls.lock().unwrap(),
+            vec![ForwardCall {
+                start_position: 1,
+                token_ids: vec![2, 3],
+            }]
+        );
+
+        let phase = execution_state.run_prefill_iteration(&mut target, Some(&mut draft), 8)?;
+
+        assert!(matches!(
+            phase,
+            GenerationPhase::Decode {
+                generated_token_count: 0
+            }
+        ));
+        assert_eq!(execution_state.prefill_current_positions.target, 5);
+        assert_eq!(execution_state.prefill_current_positions.draft, Some(5));
+        assert_eq!(
+            *target_calls.lock().unwrap(),
+            vec![ForwardCall {
+                start_position: 3,
+                token_ids: vec![4, 5],
+            }]
+        );
+        assert_eq!(
+            *draft_calls.lock().unwrap(),
+            vec![
+                ForwardCall {
+                    start_position: 1,
+                    token_ids: vec![2, 3],
+                },
+                ForwardCall {
+                    start_position: 3,
+                    token_ids: vec![4, 5],
+                },
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn speculative_prefill_advances_the_target_when_the_draft_is_ahead() -> Result<()> {
+        let mut execution_state = create_test_execution_state(vec![1, 2, 3, 4, 5, 6], vec![]);
+        execution_state.prefill_current_positions = PrefillStartPositions {
+            target: 1,
+            draft: Some(3),
+        };
+        let (mut target, target_calls) = create_test_model(6)?;
+        let (mut draft, draft_calls) = create_test_model(6)?;
+
+        let phase = execution_state.run_prefill_iteration(&mut target, Some(&mut draft), 2)?;
+
+        assert!(matches!(
+            phase,
+            GenerationPhase::Prefill {
+                remaining_token_count: 2
+            }
+        ));
+        assert_eq!(execution_state.prefill_current_positions.target, 3);
+        assert_eq!(execution_state.prefill_current_positions.draft, Some(3));
+        assert_eq!(
+            *target_calls.lock().unwrap(),
+            vec![ForwardCall {
+                start_position: 1,
+                token_ids: vec![2, 3],
+            }]
+        );
+        assert!(draft_calls.lock().unwrap().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn determines_whether_decode_should_continue() {
+        let mut execution_state = create_test_execution_state(vec![1], vec![]);
+        execution_state.max_new_token_count = 2;
+
+        assert!(matches!(
+            execution_state.determine_decode_phase(1, true),
+            GenerationPhase::Decode {
+                generated_token_count: 1
+            }
+        ));
+        assert!(matches!(
+            execution_state.determine_decode_phase(2, true),
+            GenerationPhase::Finished
+        ));
+        assert!(matches!(
+            execution_state.determine_decode_phase(1, false),
+            GenerationPhase::Finished
+        ));
+    }
+
+    #[test]
+    fn rejects_prefill_positions_past_the_restorable_input_prefix() {
+        let error = RequestExecutionState::new(
+            GenerateTextRequest {
+                input_token_ids: vec![1, 2, 3],
+                max_new_tokens: 1,
+                ..Default::default()
+            },
+            4,
+            PrefillStartPositions {
+                target: 3,
+                draft: None,
+            },
+        )
+        .err()
+        .expect("invalid prefill position should be rejected")
+        .to_string();
+
+        assert_eq!(
+            error,
+            "target prefill position 3 exceeds the maximum position 2"
+        );
+    }
+
+    #[test]
+    fn rejects_draft_prefill_positions_past_the_restorable_input_prefix() {
+        let error = RequestExecutionState::new(
+            GenerateTextRequest {
+                input_token_ids: vec![1, 2, 3],
+                max_new_tokens: 1,
+                ..Default::default()
+            },
+            4,
+            PrefillStartPositions {
+                target: 0,
+                draft: Some(3),
+            },
+        )
+        .err()
+        .expect("invalid draft prefill position should be rejected")
+        .to_string();
+
+        assert_eq!(
+            error,
+            "draft prefill position 3 exceeds the maximum position 2"
+        );
     }
 
     #[test]
