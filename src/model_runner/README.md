@@ -57,7 +57,7 @@ flowchart LR
   state, response channel, and lifecycle timing while the scheduler retains
   only the metadata needed to make decisions.
 - `server/scheduler.rs` applies the selected scheduling policy and enforces the
-  configured active-request limit without owning generation state.
+  configured active-request and token limits without owning generation state.
 - `server/model_instance.rs` keeps each loaded model paired with its cache
   manager and passes request-aware forward contexts into model execution. The
   target cache uses the configured byte budget; the draft cache is sized to
@@ -95,14 +95,15 @@ sequenceDiagram
     Rpc->>Engine: Queue InferenceRequest on the dedicated thread
     Engine->>Requests: Store request payload and response channel
     Engine->>Scheduler: Queue scheduling metadata
-    Scheduler-->>Engine: Return next admitted request ID
+    Scheduler-->>Engine: Return newly admitted request IDs
     Engine->>Requests: Start request by ID
     Engine->>Runner: Initialize model and cache state
     Runner->>Runner: Restore each model's longest cached prompt prefix
     Runner-->>Engine: Return resumable execution state
     Engine->>Requests: Store resumable execution state
-    Engine->>Requests: Borrow resumable execution state
-    Engine->>Runner: Execute next generation step
+    Engine->>Scheduler: Request a token-budgeted scheduling decision
+    Engine->>Requests: Borrow each selected resumable execution state
+    Engine->>Runner: Execute one scheduled generation step
     Runner->>Decode: Generate text with loaded model(s)
     alt Draft model configured
         Decode->>Target: Prefill through second-to-last prompt token
@@ -142,12 +143,13 @@ sequenceDiagram
   capacity, limits the requested output length to the remaining capacity, then
   queues valid tonic requests on a bounded channel.
 - `inference_engine.rs` executes scheduled requests, records request-level
-  timing, and streams generation events.
+  timing, streams generation events, and reports updated generation state to
+  the scheduler.
 - `model_runner.rs` owns the models and caches, restores reusable prefixes,
   delegates decoding to `text_generation.rs`, and finishes or clears cache
   state after each request.
-- `text_generation.rs` runs prefill and decode over token IDs, samples tokens,
-  checks cancellation and stop tokens, and records prefill, decode, and
+- `text_generation.rs` runs token-budgeted prefill chunks and decode steps,
+  samples tokens, checks cancellation and stop tokens, and records prefill, decode, and
   speculative acceptance statistics.
 - The request handler decodes generated token IDs. It streams text fragments
   immediately unless `stream_output` is false, in which case it buffers them.

@@ -27,9 +27,10 @@ Status: ✅ done · 🚧 in progress · ⬜ not started · ❌ out of scope
 - ✅ Prefix caching.
   - ✅ Reuse complete KV-cache pages for prefixes shared across requests.
   - ✅ Evict inactive cached prefixes when physical pages are exhausted.
-- ⬜ Continuous batching.
-  - ⬜ Per-request state with dynamic admission, scheduling, and cancellation.
-  - ⬜ Batched prefill and decode with chunked prefill support.
+- 🚧 Continuous batching.
+  - ✅ Per-request state with dynamic admission, scheduling, and cancellation.
+  - ✅ Interleaved execution with token-budgeted chunked prefill.
+  - ⬜ Batched model forwards for prefill and decode.
 - ⬜ Performance evaluation.
   - ⬜ Measure latency, throughput, and KV-cache memory usage.
   - ⬜ Compare baseline, continuously batched, and speculative execution.
@@ -89,11 +90,10 @@ cargo run --release -- --inference-device cpu
 Input preprocessing uses four request-handler worker threads by default. Use
 `--input-preprocessing-thread-count` to change the pool size.
 
-The future continuous-batching scheduler can be configured with
+The scheduler can be configured with
 `--max-batched-token-count`, `--max-active-request-count`, and
-`--scheduling-policy`. The current single-request worker is inherently
-first-come-first-served; `shortest-prefill-first` will take effect when queued
-requests can be scheduled together.
+`--scheduling-policy`. It interleaves request execution while model forwards
+remain single-request operations.
 
 Optionally, set the `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` environment
 variables for CPU inference to control the number of CPU worker threads.

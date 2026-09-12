@@ -32,6 +32,26 @@ pub(super) enum GenerationPhase {
     Finished,
 }
 
+impl fmt::Display for GenerationPhase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Prefill {
+                remaining_token_count,
+            } => write!(
+                formatter,
+                "prefill(remaining_tokens={remaining_token_count})"
+            ),
+            Self::Decode {
+                generated_token_count,
+            } => write!(
+                formatter,
+                "decode(generated_tokens={generated_token_count})"
+            ),
+            Self::Finished => formatter.write_str("finished"),
+        }
+    }
+}
+
 pub(super) struct GenerationStep {
     pub(super) output_token_ids: Vec<u32>,
     pub(super) phase: GenerationPhase,
@@ -87,7 +107,8 @@ pub(super) struct RequestExecutionState {
     eos_tokens: Vec<u32>,
     target_logits_processor: RefCell<LogitsProcessor>,
     draft_logits_processor: RefCell<LogitsProcessor>,
-    prefill_start_positions: PrefillStartPositions,
+    prefill_initial_positions: PrefillStartPositions,
+    prefill_current_positions: PrefillStartPositions,
     phase: GenerationPhase,
     pending_output_token_ids: Vec<u32>,
     prefill_duration: Duration,
@@ -101,20 +122,20 @@ impl RequestExecutionState {
         self.request_id
     }
 
+    pub(super) fn phase(&self) -> GenerationPhase {
+        self.phase
+    }
+
     pub(super) fn new(
         request: GenerateTextRequest,
         draft_token_count: usize,
-        prefill_start_positions: PrefillStartPositions,
+        prefill_initial_positions: PrefillStartPositions,
     ) -> Result<Self> {
         if request.input_token_ids.is_empty() {
             anyhow::bail!("input token IDs must not be empty");
         }
         let input_token_count = request.input_token_ids.len();
-        let cached_token_count = prefill_start_positions
-            .draft
-            .map_or(prefill_start_positions.target, |draft_start_position| {
-                prefill_start_positions.target.min(draft_start_position)
-            });
+        let phase = determine_initial_phase(input_token_count, prefill_initial_positions);
         let max_new_token_count = usize::try_from(request.max_new_tokens)
             .context("max_new_tokens does not fit in usize")?;
         Ok(Self {
@@ -129,10 +150,9 @@ impl RequestExecutionState {
             eos_tokens: request.end_of_sequence_token_ids,
             target_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
             draft_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
-            prefill_start_positions,
-            phase: GenerationPhase::Prefill {
-                remaining_token_count: input_token_count - cached_token_count,
-            },
+            prefill_initial_positions,
+            prefill_current_positions: prefill_initial_positions,
+            phase,
             pending_output_token_ids: Vec::new(),
             prefill_duration: Duration::ZERO,
             decode_duration: Duration::ZERO,
@@ -146,13 +166,13 @@ impl RequestExecutionState {
         &mut self,
         target: &mut ModelInstance,
         draft: Option<&mut ModelInstance>,
+        token_budget: usize,
     ) -> Result<GenerationStep> {
         self.pending_output_token_ids.clear();
         self.phase = match self.phase {
-            // TODO: Consume only a scheduler-sized portion once chunked prefill is implemented.
             GenerationPhase::Prefill { .. } => {
                 let started = Instant::now();
-                let phase = self.run_prefill_phase(target, draft)?;
+                let phase = self.run_prefill_phase(target, draft, token_budget)?;
                 self.prefill_duration += started.elapsed();
                 phase
             }
@@ -182,9 +202,9 @@ impl RequestExecutionState {
                 .context("input token count does not fit in u64")?,
             output_token_count: u64::try_from(output_token_count)
                 .context("output token count does not fit in u64")?,
-            target_cached_token_count: self.prefill_start_positions.target,
+            target_cached_token_count: self.prefill_initial_positions.target,
             draft_stats: self
-                .prefill_start_positions
+                .prefill_initial_positions
                 .draft
                 .map(|cached_token_count| DraftGenerationStats {
                     cached_token_count,
@@ -200,32 +220,76 @@ impl RequestExecutionState {
         })
     }
 
+    // TODO: simplify the logic.
     fn run_prefill_phase(
         &mut self,
         target: &mut ModelInstance,
         draft: Option<&mut ModelInstance>,
+        token_budget: usize,
     ) -> Result<GenerationPhase> {
+        if token_budget == 0 {
+            anyhow::bail!("prefill token budget must be greater than zero");
+        }
         if let Some(draft) = draft {
-            self.prefill_input_prefix(target, self.prefill_start_positions.target)?;
-            let draft_start_position = self
-                .prefill_start_positions
+            let draft_position = self
+                .prefill_current_positions
                 .draft
-                .context("draft prefill start position is missing")?;
-            self.prefill_input_prefix(draft, draft_start_position)?;
-            return Ok(GenerationPhase::Decode {
-                generated_token_count: 0,
+                .context("draft prefill position is missing")?;
+            let prefill_end_position = self.input_token_count - 1;
+            let chunk_end_position = self
+                .prefill_current_positions
+                .target
+                .min(draft_position)
+                .saturating_add(token_budget)
+                .min(prefill_end_position);
+            if self.prefill_current_positions.target < chunk_end_position {
+                self.forward_input_chunk(
+                    target,
+                    self.prefill_current_positions.target,
+                    chunk_end_position,
+                )?;
+                self.prefill_current_positions.target = chunk_end_position;
+            }
+            if draft_position < chunk_end_position {
+                self.forward_input_chunk(draft, draft_position, chunk_end_position)?;
+                self.prefill_current_positions.draft = Some(chunk_end_position);
+            }
+            let remaining_token_count = prefill_end_position
+                - self.prefill_current_positions.target.min(
+                    self.prefill_current_positions
+                        .draft
+                        .unwrap_or(prefill_end_position),
+                );
+            return Ok(if remaining_token_count == 0 {
+                GenerationPhase::Decode {
+                    generated_token_count: 0,
+                }
+            } else {
+                GenerationPhase::Prefill {
+                    remaining_token_count,
+                }
             });
         }
 
-        // TODO: Advance over a scheduler-sized input chunk and sample only after the final
-        // prefill chunk once chunked prefill is implemented.
+        let start_position = self.prefill_current_positions.target;
+        let chunk_end_position = start_position
+            .saturating_add(token_budget)
+            .min(self.input_token_count);
+        if chunk_end_position < self.input_token_count {
+            self.forward_input_chunk(target, start_position, chunk_end_position)?;
+            self.prefill_current_positions.target = chunk_end_position;
+            return Ok(GenerationPhase::Prefill {
+                remaining_token_count: self.input_token_count - chunk_end_position,
+            });
+        }
         let next_token = self.sample_next_token(
             target,
-            &self.tokens[self.prefill_start_positions.target..],
-            self.prefill_start_positions.target,
+            &self.tokens[start_position..chunk_end_position],
+            start_position,
             /* appended_tokens */ &[],
             &mut self.target_logits_processor.borrow_mut(),
         )?;
+        self.prefill_current_positions.target = chunk_end_position;
         let should_decode = self.commit_next_token(next_token);
         let generated_token_count = usize::from(should_decode);
         Ok(
@@ -239,14 +303,13 @@ impl RequestExecutionState {
         )
     }
 
-    /// Prefills through the second-to-last input token, leaving the final token as the common
-    /// starting point for draft proposal and target verification.
-    fn prefill_input_prefix(&self, model: &mut ModelInstance, start_position: usize) -> Result<()> {
-        let prefill_tokens = &self.tokens[start_position..self.tokens.len() - 1];
-        if prefill_tokens.is_empty() {
-            return Ok(());
-        }
-        let input = model.create_input_tensor(prefill_tokens)?;
+    fn forward_input_chunk(
+        &self,
+        model: &mut ModelInstance,
+        start_position: usize,
+        end_position: usize,
+    ) -> Result<()> {
+        let input = model.create_input_tensor(&self.tokens[start_position..end_position])?;
         model.forward(self.request_id, &input, start_position)?;
         Ok(())
     }
@@ -492,6 +555,28 @@ impl RequestExecutionState {
     }
 }
 
+fn determine_initial_phase(
+    input_token_count: usize,
+    prefill_initial_positions: PrefillStartPositions,
+) -> GenerationPhase {
+    // Speculative decoding cannot begin until both model caches reach the final input token.
+    let remaining_token_count = match prefill_initial_positions.draft {
+        Some(draft_initial_position) => {
+            input_token_count - 1 - prefill_initial_positions.target.min(draft_initial_position)
+        }
+        None => input_token_count - prefill_initial_positions.target,
+    };
+    if remaining_token_count == 0 {
+        GenerationPhase::Decode {
+            generated_token_count: 0,
+        }
+    } else {
+        GenerationPhase::Prefill {
+            remaining_token_count,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,7 +598,11 @@ mod tests {
             eos_tokens,
             target_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
             draft_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
-            prefill_start_positions: PrefillStartPositions {
+            prefill_initial_positions: PrefillStartPositions {
+                target: 0,
+                draft: None,
+            },
+            prefill_current_positions: PrefillStartPositions {
                 target: 0,
                 draft: None,
             },
@@ -526,6 +615,56 @@ mod tests {
             accepted_draft_token_count: 0,
             proposed_draft_token_count: 0,
         }
+    }
+
+    #[test]
+    fn initializes_target_prefill_with_uncached_input_count() -> Result<()> {
+        let execution_state = RequestExecutionState::new(
+            GenerateTextRequest {
+                request_id: 1,
+                input_token_ids: vec![1, 2, 3, 4, 5],
+                max_new_tokens: 1,
+                ..Default::default()
+            },
+            4,
+            PrefillStartPositions {
+                target: 2,
+                draft: None,
+            },
+        )?;
+
+        assert!(matches!(
+            execution_state.phase(),
+            GenerationPhase::Prefill {
+                remaining_token_count: 3
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn initializes_speculative_prefill_from_the_shorter_cached_prefix() -> Result<()> {
+        let execution_state = RequestExecutionState::new(
+            GenerateTextRequest {
+                request_id: 1,
+                input_token_ids: vec![1, 2, 3, 4, 5, 6],
+                max_new_tokens: 1,
+                ..Default::default()
+            },
+            4,
+            PrefillStartPositions {
+                target: 3,
+                draft: Some(1),
+            },
+        )?;
+
+        assert!(matches!(
+            execution_state.phase(),
+            GenerationPhase::Prefill {
+                remaining_token_count: 4
+            }
+        ));
+        Ok(())
     }
 
     #[test]

@@ -12,30 +12,20 @@ struct RequestSchedulingMetadata {
     phase: SchedulingPhase,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "scheduling decisions are not executed yet")
-)]
 #[derive(Clone, Copy)]
 pub(super) enum SchedulingPhase {
     Prefill { remaining_token_count: usize },
     Decode,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "scheduling decisions are exposed only to tests")
-)]
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct ScheduledRequest {
     pub(super) request_id: u64,
+    /// Caps prefill work. Decode receives one token of budget, but speculative decoding may emit
+    /// multiple accepted tokens from that single scheduled step.
     pub(super) token_budget: usize,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "scheduling decisions are exposed only to tests")
-)]
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct SchedulingDecision {
     pub(super) requests: Vec<ScheduledRequest>,
@@ -43,10 +33,6 @@ pub(super) struct SchedulingDecision {
 
 /// Owns scheduling metadata for requests waiting for admission and active execution.
 pub(super) struct Scheduler {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "scheduling decisions are not executed yet")
-    )]
     max_batched_token_count: usize,
     max_active_request_count: usize,
     scheduling_policy: SchedulingPolicy,
@@ -75,33 +61,30 @@ impl Scheduler {
     }
 
     /// Admits queued requests according to policy until the active-request limit is reached.
-    pub(super) fn admit_queued_requests(&mut self) {
+    pub(super) fn admit_queued_requests(&mut self) -> Vec<u64> {
         let available_slot_count = self
             .max_active_request_count
             .saturating_sub(self.active_requests.len());
         if available_slot_count == 0 {
-            return;
+            return Vec::new();
         }
-        let scheduling_policy = self.scheduling_policy;
+
         self.queued_requests
-            .sort_by(|left, right| Self::compare_requests(scheduling_policy, left, right));
+            .sort_by(|left, right| Self::compare_requests(self.scheduling_policy, left, right));
         let admitted_request_count = available_slot_count.min(self.queued_requests.len());
+        let admitted_request_ids = self.queued_requests[..admitted_request_count]
+            .iter()
+            .map(|request| request.request_id)
+            .collect();
         self.active_requests
             .extend(self.queued_requests.drain(..admitted_request_count));
+        admitted_request_ids
     }
 
-    pub(super) fn get_next_active_request(&mut self) -> Option<u64> {
-        if self.active_requests.is_empty() {
-            None
-        } else {
-            Some(self.active_requests.remove(0).request_id)
-        }
+    pub(super) fn is_vacant(&self) -> bool {
+        self.queued_requests.is_empty() && self.active_requests.is_empty()
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "request execution does not report progress yet")
-    )]
     pub(super) fn update_request_state(
         &mut self,
         request_id: u64,
@@ -138,10 +121,6 @@ impl Scheduler {
     /// Prioritizes decode work, then allocates the remaining budget among active prefills.
     /// Prefills retain admission order under FCFS and use their remaining lengths under
     /// shortest-prefill-first.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "scheduling decisions are exposed only to tests")
-    )]
     pub(super) fn create_scheduling_decision(&self) -> SchedulingDecision {
         let mut remaining_token_budget = self.max_batched_token_count;
         let mut requests = Vec::new();
@@ -217,10 +196,6 @@ mod tests {
         scheduler_with_token_budget(512, max_active_request_count, scheduling_policy)
     }
 
-    fn pop_next_request_id(scheduler: &mut Scheduler) -> Option<u64> {
-        scheduler.get_next_active_request()
-    }
-
     #[test]
     fn admits_requests_in_arrival_order() {
         let mut scheduler = scheduler(3, SchedulingPolicy::FirstComeFirstServed);
@@ -228,11 +203,9 @@ mod tests {
         scheduler.enqueue(2, 10);
         scheduler.enqueue(3, 20);
 
-        scheduler.admit_queued_requests();
+        let admitted_request_ids = scheduler.admit_queued_requests();
 
-        assert_eq!(pop_next_request_id(&mut scheduler), Some(1));
-        assert_eq!(pop_next_request_id(&mut scheduler), Some(2));
-        assert_eq!(pop_next_request_id(&mut scheduler), Some(3));
+        assert_eq!(admitted_request_ids, vec![1, 2, 3]);
     }
 
     #[test]
@@ -243,12 +216,9 @@ mod tests {
         scheduler.enqueue(3, 20);
         scheduler.enqueue(4, 10);
 
-        scheduler.admit_queued_requests();
+        let admitted_request_ids = scheduler.admit_queued_requests();
 
-        assert_eq!(pop_next_request_id(&mut scheduler), Some(2));
-        assert_eq!(pop_next_request_id(&mut scheduler), Some(4));
-        assert_eq!(pop_next_request_id(&mut scheduler), Some(3));
-        assert_eq!(pop_next_request_id(&mut scheduler), Some(1));
+        assert_eq!(admitted_request_ids, vec![2, 4, 3, 1]);
     }
 
     #[test]
@@ -258,18 +228,22 @@ mod tests {
         scheduler.enqueue(2, 20);
         scheduler.enqueue(3, 30);
 
-        scheduler.admit_queued_requests();
+        let admitted_request_ids = scheduler.admit_queued_requests();
 
+        assert_eq!(admitted_request_ids, vec![1, 2]);
         assert_eq!(scheduler.active_requests.len(), 2);
         assert_eq!(scheduler.queued_requests.len(), 1);
-        assert_eq!(pop_next_request_id(&mut scheduler), Some(1));
+        scheduler
+            .update_request_state(1, GenerationPhase::Finished)
+            .unwrap();
 
-        scheduler.admit_queued_requests();
+        let admitted_request_ids = scheduler.admit_queued_requests();
 
+        assert_eq!(admitted_request_ids, vec![3]);
         assert_eq!(scheduler.active_requests.len(), 2);
         assert!(scheduler.queued_requests.is_empty());
-        assert_eq!(pop_next_request_id(&mut scheduler), Some(2));
-        assert_eq!(pop_next_request_id(&mut scheduler), Some(3));
+        assert_eq!(scheduler.active_requests[0].request_id, 2);
+        assert_eq!(scheduler.active_requests[1].request_id, 3);
     }
 
     #[test]

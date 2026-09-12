@@ -1,16 +1,17 @@
 use crate::model_runner::SchedulerConfig;
-use crate::model_runner::SchedulingPolicy;
 use crate::proto::model_runner::TextGenerationStats;
 use crate::proto::model_runner::TokenGenerationLatency;
 use anyhow::Result;
 use std::time::Duration;
 use std::time::Instant;
 use thousands::Separable;
+use tokio::sync::mpsc;
 use tonic::Status;
 
 use super::model_runner::ModelRunner;
 use super::request_manager::FinishedRequest;
 use super::request_manager::RequestManager;
+use super::scheduler::ScheduledRequest;
 use super::scheduler::Scheduler;
 use super::text_generation;
 use super::InferenceRequest;
@@ -24,12 +25,8 @@ pub(super) struct InferenceEngine {
 
 impl InferenceEngine {
     pub(super) fn new(model_runner: ModelRunner, scheduler_config: SchedulerConfig) -> Self {
+        let scheduler_config = normalize_scheduler_config(&model_runner, scheduler_config);
         log::info!("Scheduler config: {scheduler_config}");
-        if scheduler_config.scheduling_policy == SchedulingPolicy::ShortestPrefillFirst {
-            log::warn!(
-                "Shortest-prefill-first scheduling will take effect when continuous batching is implemented"
-            );
-        }
         Self {
             model_runner,
             request_manager: RequestManager::new(),
@@ -37,7 +34,29 @@ impl InferenceEngine {
         }
     }
 
-    pub(super) fn enqueue_request(&mut self, request: InferenceRequest) -> Result<()> {
+    pub(super) fn run(mut self, mut inference_receiver: mpsc::Receiver<InferenceRequest>) {
+        loop {
+            if self.scheduler.is_vacant() {
+                let Some(request) = inference_receiver.blocking_recv() else {
+                    break;
+                };
+                if let Err(error) = self.enqueue_request(request) {
+                    log::error!("Inference engine failed to enqueue a request: {error:#}");
+                    continue;
+                }
+            }
+            while let Ok(request) = inference_receiver.try_recv() {
+                if let Err(error) = self.enqueue_request(request) {
+                    log::error!("Inference engine failed to enqueue a request: {error:#}");
+                }
+            }
+            if let Err(error) = self.process_requests() {
+                log::error!("Inference engine failed to process requests: {error:#}");
+            }
+        }
+    }
+
+    fn enqueue_request(&mut self, request: InferenceRequest) -> Result<()> {
         let request_id = request.generate_text.request_id;
         let input_token_count = request.generate_text.input_token_ids.len();
         self.request_manager.add_request(request)?;
@@ -45,19 +64,23 @@ impl InferenceEngine {
         Ok(())
     }
 
-    /// Executes every request currently admitted by the scheduler.
-    pub(super) fn process_requests(&mut self) -> Result<()> {
-        self.scheduler.admit_queued_requests();
-        // TODO: Consult the scheduler between resumable generation steps once execution is
-        // interleaved.
-        while let Some(request_id) = self.scheduler.get_next_active_request() {
-            self.process_request(request_id)?;
-            self.scheduler.admit_queued_requests();
+    /// Executes one scheduling decision.
+    fn process_requests(&mut self) -> Result<()> {
+        for request_id in self.scheduler.admit_queued_requests() {
+            if let Err(error) = self.start_request(request_id) {
+                self.abort_request(request_id, error)?;
+            }
+        }
+        let decision = self.scheduler.create_scheduling_decision();
+        for scheduled_request in decision.requests {
+            self.process_scheduled_request(scheduled_request)?;
         }
         Ok(())
     }
 
-    fn process_request(&mut self, request_id: u64) -> Result<()> {
+    fn start_request(&mut self, request_id: u64) -> Result<()> {
+        // TODO: Attribute evictions directly to each request. With interleaved execution, this
+        // cumulative-counter delta can include evictions caused by other requests.
         let previous_evicted_cached_token_count = self.model_runner.evicted_cached_token_count();
         let started_request = {
             let model_runner = &mut self.model_runner;
@@ -65,32 +88,69 @@ impl InferenceEngine {
                 request_id,
                 previous_evicted_cached_token_count,
                 |request| model_runner.start_request(request),
-            )
+            )?
         };
-        let finished_request_result = match started_request {
-            Ok(started_request) => {
-                log::info!(
-                    "Engine state: request_id={} status=started input_tokens={} ignore_eos_tokens={} queue_us={}",
-                    request_id,
-                    started_request.input_token_count,
-                    started_request.ignore_eos_tokens,
-                    started_request.queue_duration.as_micros().separate_with_commas(),
-                );
-                match self.run_request(request_id) {
-                    Ok(finished_request) => Ok(finished_request),
-                    Err(error) => match self.model_runner.abort_request(request_id) {
-                        Ok(()) => Err(error),
-                        Err(cleanup_error) => Err(error
-                            .context(format!("request cleanup also failed: {cleanup_error:#}"))),
-                    },
-                }
+        self.scheduler
+            .update_request_state(request_id, started_request.generation_phase)?;
+        log::info!(
+            "Engine state: request_id={} status=started input_tokens={} generation_phase={} \
+             ignore_eos_tokens={} queue_us={}",
+            request_id,
+            started_request.input_token_count,
+            started_request.generation_phase,
+            started_request.ignore_eos_tokens,
+            started_request
+                .queue_duration
+                .as_micros()
+                .separate_with_commas(),
+        );
+        Ok(())
+    }
+
+    fn process_scheduled_request(&mut self, scheduled_request: ScheduledRequest) -> Result<()> {
+        let request_id = scheduled_request.request_id;
+        let phase = {
+            let model_runner = &mut self.model_runner;
+            self.request_manager
+                .advance_execution(request_id, |execution_state| {
+                    model_runner.run_one_step(execution_state, scheduled_request.token_budget)
+                })
+        };
+        let phase = match phase {
+            Ok(phase) => phase,
+            Err(error) => {
+                let error = match self.model_runner.abort_request(request_id) {
+                    Ok(()) => error,
+                    Err(cleanup_error) => {
+                        error.context(format!("request cleanup also failed: {cleanup_error:#}"))
+                    }
+                };
+                self.abort_request(request_id, error)?;
+                return Ok(());
             }
-            Err(error) => Err(error),
         };
-        let finished_request = match finished_request_result {
-            Ok(finished_request) => finished_request,
-            Err(error) => self.request_manager.abort_request(request_id, error)?,
-        };
+        self.scheduler.update_request_state(request_id, phase)?;
+        if matches!(phase, text_generation::GenerationPhase::Finished) {
+            let model_runner = &mut self.model_runner;
+            let finished_request = self
+                .request_manager
+                .finish_request(request_id, |execution_state| {
+                    model_runner.finish_request(execution_state)
+                })?;
+            self.report_finished_request(request_id, finished_request);
+        }
+        Ok(())
+    }
+
+    fn abort_request(&mut self, request_id: u64, error: anyhow::Error) -> Result<()> {
+        self.scheduler
+            .update_request_state(request_id, text_generation::GenerationPhase::Finished)?;
+        let finished_request = self.request_manager.abort_request(request_id, error)?;
+        self.report_finished_request(request_id, finished_request);
+        Ok(())
+    }
+
+    fn report_finished_request(&self, request_id: u64, finished_request: FinishedRequest) {
         let evicted_cached_token_count = self
             .model_runner
             .evicted_cached_token_count()
@@ -157,28 +217,20 @@ impl InferenceEngine {
                 finished_request.context.send_error(status);
             }
         }
-        Ok(())
     }
+}
 
-    fn run_request(&mut self, request_id: u64) -> Result<FinishedRequest> {
-        loop {
-            let phase = {
-                let model_runner = &mut self.model_runner;
-                self.request_manager
-                    .advance_execution(request_id, |execution_state| {
-                        model_runner.run_one_step(execution_state)
-                    })?
-            };
-            if matches!(phase, text_generation::GenerationPhase::Finished) {
-                let model_runner = &mut self.model_runner;
-                return self
-                    .request_manager
-                    .finish_request(request_id, |execution_state| {
-                        model_runner.finish_request(execution_state)
-                    });
-            }
-        }
+fn normalize_scheduler_config(
+    model_runner: &ModelRunner,
+    mut scheduler_config: SchedulerConfig,
+) -> SchedulerConfig {
+    if !model_runner.supports_multiple_active_requests()
+        && scheduler_config.max_active_request_count > 1
+    {
+        log::warn!("Current KV cache type limits max_active_requests to 1");
+        scheduler_config.max_active_request_count = 1;
     }
+    scheduler_config
 }
 
 fn generation_error_status(error: &anyhow::Error) -> Status {

@@ -50,6 +50,10 @@ impl KvCacheManager {
         Ok(())
     }
 
+    pub fn supports_multiple_active_requests(&self) -> bool {
+        self.backend.supports_multiple_active_requests()
+    }
+
     pub fn token_capacity(&self) -> usize {
         self.backend.token_capacity()
     }

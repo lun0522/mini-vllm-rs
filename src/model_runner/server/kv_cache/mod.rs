@@ -27,6 +27,10 @@ pub(super) enum KvCacheBackend {
 }
 
 impl KvCacheBackend {
+    pub(super) fn supports_multiple_active_requests(&self) -> bool {
+        matches!(self, Self::Paged(_))
+    }
+
     pub(super) fn token_capacity(&self) -> usize {
         match self {
             Self::Contiguous(cache) => cache.token_capacity(),

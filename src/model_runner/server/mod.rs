@@ -62,7 +62,7 @@ async fn run_server(args: ModelRunnerProcessArgs) -> Result<()> {
     let token_capacity = model_runner.token_capacity();
     let listener = UnixListener::bind(&args.socket_path)
         .context("failed to bind the model runner Unix domain socket")?;
-    let (inference_sender, mut inference_receiver) = mpsc::channel(INFERENCE_QUEUE_CAPACITY);
+    let (inference_sender, inference_receiver) = mpsc::channel(INFERENCE_QUEUE_CAPACITY);
     let scheduler_config = SchedulerConfig {
         max_batched_token_count: args.max_batched_token_count,
         max_active_request_count: args.max_active_request_count,
@@ -71,15 +71,7 @@ async fn run_server(args: ModelRunnerProcessArgs) -> Result<()> {
     let inference_thread = std::thread::Builder::new()
         .name("inference-worker".to_owned())
         .spawn(move || {
-            let mut inference_engine = InferenceEngine::new(model_runner, scheduler_config);
-            while let Some(request) = inference_receiver.blocking_recv() {
-                if let Err(error) = inference_engine
-                    .enqueue_request(request)
-                    .and_then(|()| inference_engine.process_requests())
-                {
-                    log::error!("Inference engine failed to process a request: {error:#}");
-                }
-            }
+            InferenceEngine::new(model_runner, scheduler_config).run(inference_receiver);
         })
         .context("failed to start the model runner inference thread")?;
     let (shutdown, shutdown_receiver) = RpcShutdown::channel();

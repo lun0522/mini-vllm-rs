@@ -82,6 +82,10 @@ impl ModelRunner {
         self.target.token_capacity()
     }
 
+    pub(super) fn supports_multiple_active_requests(&self) -> bool {
+        self.target.supports_multiple_active_requests()
+    }
+
     pub(super) fn evicted_cached_token_count(&self) -> usize {
         self.target.evicted_cached_token_count().saturating_add(
             self.draft
@@ -104,7 +108,7 @@ impl ModelRunner {
                 .input_token_ids
                 .split_last()
                 .map_or(&[][..], |(_, prefix)| prefix);
-            let prefill_start_positions = text_generation::PrefillStartPositions {
+            let prefill_initial_positions = text_generation::PrefillStartPositions {
                 target: self
                     .target
                     .restore_cached_prefix(request_id, input_prefix)?,
@@ -117,7 +121,7 @@ impl ModelRunner {
             text_generation::RequestExecutionState::new(
                 request,
                 self.draft_token_count,
-                prefill_start_positions,
+                prefill_initial_positions,
             )
         })() {
             Ok(execution_state) => Ok(execution_state),
@@ -135,8 +139,9 @@ impl ModelRunner {
     pub(super) fn run_one_step(
         &mut self,
         execution_state: &mut text_generation::RequestExecutionState,
+        token_budget: usize,
     ) -> Result<text_generation::GenerationStep> {
-        execution_state.run_one_step(&mut self.target, self.draft.as_mut())
+        execution_state.run_one_step(&mut self.target, self.draft.as_mut(), token_budget)
     }
 
     pub(super) fn finish_request(

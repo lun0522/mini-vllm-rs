@@ -75,6 +75,7 @@ pub(super) struct StartedRequest {
     pub(super) input_token_count: usize,
     pub(super) ignore_eos_tokens: bool,
     pub(super) queue_duration: Duration,
+    pub(super) generation_phase: GenerationPhase,
 }
 
 pub(super) struct FinishedRequest {
@@ -145,6 +146,7 @@ impl RequestManager {
                     input_token_count: context.input_token_count,
                     ignore_eos_tokens,
                     queue_duration: execution_started_at.duration_since(context.queued_at),
+                    generation_phase: execution_state.phase(),
                 };
                 self.request_states.insert(
                     request_id,

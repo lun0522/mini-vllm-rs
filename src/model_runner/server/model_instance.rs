@@ -25,6 +25,10 @@ impl ModelInstance {
         self.kv_cache_manager.start_request(request_id)
     }
 
+    pub(super) fn supports_multiple_active_requests(&self) -> bool {
+        self.kv_cache_manager.supports_multiple_active_requests()
+    }
+
     pub(super) fn forward(
         &mut self,
         request_id: u64,
