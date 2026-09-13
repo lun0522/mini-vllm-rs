@@ -13,128 +13,32 @@
 //! - [Model Card](https://huggingface.co/Qwen/Qwen2)
 //!
 
-use super::common::forward_attention;
-use super::common::AttentionParameters;
+use super::common::precomput_freqs_cis;
+use super::common::QMatMul;
 use super::common::RotaryEmbeddingType;
+use super::common::SwiGluMlp;
+use super::common::TransformerBlock;
 use crate::models::CausalLanguageModel;
 use crate::models::ForwardContext;
 use crate::models::KvCache;
 use crate::models::ModelInfo;
 use anyhow::Result as AnyhowResult;
-use candle::{
-    quantized::{gguf_file, QMatMul},
-    DType, Device, IndexOp, Result, Tensor,
-};
+use candle::quantized::gguf_file;
+use candle::{Device, IndexOp, Result, Tensor};
 use candle_core as candle;
 use candle_nn::{Embedding, Module};
 use candle_transformers::quantized_nn::RmsNorm;
 use std::collections::HashMap;
 use std::fs::File;
 
-#[derive(Debug, Clone)]
-struct Mlp {
-    feed_forward_w1: QMatMul,
-    feed_forward_w2: QMatMul,
-    feed_forward_w3: QMatMul,
-}
-
-impl Module for Mlp {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let w1 = self.feed_forward_w1.forward(xs)?;
-        let w3 = self.feed_forward_w3.forward(xs)?;
-        self.feed_forward_w2
-            .forward(&(candle_nn::ops::silu(&w1)? * w3)?)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct LayerWeights {
-    attention_wq: QMatMul,
-    attention_wk: QMatMul,
-    attention_wv: QMatMul,
-    attention_bq: Tensor,
-    attention_bk: Tensor,
-    attention_bv: Tensor,
-    attention_wo: QMatMul,
-    attention_norm: RmsNorm,
-    mlp: Mlp,
-    ffn_norm: RmsNorm,
-    query_head_count: usize,
-    key_value_head_count: usize,
-    head_dim: usize,
-    cos: Tensor,
-    sin: Tensor,
-    neg_inf: Tensor,
-    span_attn: tracing::Span,
-    span_rot: tracing::Span,
-    span_mlp: tracing::Span,
-}
-
-impl LayerWeights {
-    fn forward_attn(
-        &self,
-        x: &Tensor,
-        mask: Option<&Tensor>,
-        context: &ForwardContext,
-        layer_index: usize,
-        kv_cache: &mut dyn KvCache,
-    ) -> Result<Tensor> {
-        forward_attention(
-            AttentionParameters {
-                query_proj: &self.attention_wq,
-                key_proj: &self.attention_wk,
-                value_proj: &self.attention_wv,
-                output_proj: &self.attention_wo,
-                query_bias: Some(&self.attention_bq),
-                key_bias: Some(&self.attention_bk),
-                value_bias: Some(&self.attention_bv),
-                query_head_count: self.query_head_count,
-                key_value_head_count: self.key_value_head_count,
-                head_dim: self.head_dim,
-                cos: &self.cos,
-                sin: &self.sin,
-                neg_inf: &self.neg_inf,
-                rotary_embedding_type: RotaryEmbeddingType::Neox,
-                attention_span: &self.span_attn,
-                rotary_span: &self.span_rot,
-            },
-            x,
-            mask,
-            context,
-            layer_index,
-            kv_cache,
-        )
-    }
-}
-
 pub struct ModelWeights {
     tok_embeddings: Embedding,
-    layers: Vec<LayerWeights>,
+    layers: Vec<TransformerBlock>,
     norm: RmsNorm,
     output: QMatMul,
     masks: HashMap<(usize, usize), Tensor>,
     span: tracing::Span,
     span_output: tracing::Span,
-}
-
-fn precomput_freqs_cis(
-    head_dim: usize,
-    freq_base: f32,
-    context_length: usize,
-    device: &Device,
-) -> Result<(Tensor, Tensor)> {
-    let theta: Vec<_> = (0..head_dim)
-        .step_by(2)
-        .map(|i| 1f32 / freq_base.powf(i as f32 / head_dim as f32))
-        .collect();
-    let theta = Tensor::new(theta.as_slice(), device)?;
-    let idx_theta = Tensor::arange(0, context_length as u32, device)?
-        .to_dtype(DType::F32)?
-        .reshape((context_length, 1))?
-        .matmul(&theta.reshape((1, theta.elem_count()))?)?;
-    let cos = idx_theta.cos()?;
-    let sin = idx_theta.sin()?;
-    Ok((cos, sin))
 }
 
 impl ModelWeights {
@@ -159,9 +63,8 @@ impl ModelWeights {
             .unwrap_or(10000f32);
 
         let head_dim = embedding_length / head_count;
-
+        let (cos, sin) = precomput_freqs_cis(head_dim, rope_freq_base, context_length, device)?;
         let neg_inf = Tensor::new(f32::NEG_INFINITY, device)?;
-
         let tok_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
         let tok_embeddings = tok_embeddings.dequantize(device)?;
         let norm = RmsNorm::from_qtensor(
@@ -176,10 +79,7 @@ impl ModelWeights {
             }
         };
 
-        let (cos, sin) = precomput_freqs_cis(head_dim, rope_freq_base, context_length, device)?;
-
         let mut layers = Vec::with_capacity(block_count);
-
         for layer_idx in 0..block_count {
             let prefix = format!("blk.{layer_idx}");
             let attention_wq = ct.tensor(reader, &format!("{prefix}.attn_q.weight"), device)?;
@@ -200,7 +100,7 @@ impl ModelWeights {
                     ct.tensor(reader, &format!("{prefix}.ffn_down.weight"), device)?;
                 let feed_forward_w3 =
                     ct.tensor(reader, &format!("{prefix}.ffn_up.weight"), device)?;
-                Mlp {
+                SwiGluMlp {
                     feed_forward_w1: QMatMul::from_qtensor(feed_forward_w1)?,
                     feed_forward_w2: QMatMul::from_qtensor(feed_forward_w2)?,
                     feed_forward_w3: QMatMul::from_qtensor(feed_forward_w3)?,
@@ -215,13 +115,13 @@ impl ModelWeights {
             let span_rot = tracing::span!(tracing::Level::TRACE, "attn-rot");
             let span_mlp = tracing::span!(tracing::Level::TRACE, "attn-mlp");
 
-            layers.push(LayerWeights {
+            layers.push(TransformerBlock {
                 attention_wq: QMatMul::from_qtensor(attention_wq)?,
                 attention_wk: QMatMul::from_qtensor(attention_wk)?,
                 attention_wv: QMatMul::from_qtensor(attention_wv)?,
-                attention_bq: attention_bq.dequantize(device)?,
-                attention_bk: attention_bk.dequantize(device)?,
-                attention_bv: attention_bv.dequantize(device)?,
+                attention_bq: Some(attention_bq.dequantize(device)?),
+                attention_bk: Some(attention_bk.dequantize(device)?),
+                attention_bv: Some(attention_bv.dequantize(device)?),
                 attention_wo: QMatMul::from_qtensor(attention_wo)?,
                 attention_norm: RmsNorm::from_qtensor(attention_norm, rms_norm_eps)?,
                 cos: cos.clone(),
@@ -232,9 +132,10 @@ impl ModelWeights {
                 key_value_head_count: head_count_kv,
                 head_dim,
                 neg_inf: neg_inf.clone(),
-                span_attn,
-                span_rot,
-                span_mlp,
+                rotary_embedding_type: RotaryEmbeddingType::Neox,
+                attention_span: span_attn,
+                rotary_span: span_rot,
+                mlp_span: span_mlp,
             });
         }
 
@@ -310,7 +211,7 @@ impl ModelWeights {
             let x = (attn + residual)?;
 
             // MLP
-            let _enter = layer.span_mlp.enter();
+            let _enter = layer.mlp_span.enter();
             let residual = &x;
             let x = layer.ffn_norm.forward(&x)?;
             let x = layer.mlp.forward(&x)?;
