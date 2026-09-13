@@ -54,7 +54,7 @@ pub(crate) struct CachedKeyValue {
 
 pub(crate) struct ModelInfo {
     pub(crate) layer_count: usize,
-    pub(crate) key_value_head_count: usize,
+    pub(crate) num_kv_heads: usize,
     pub(crate) head_dim: usize,
     pub(crate) activation_dtype: DType,
 }
@@ -63,7 +63,7 @@ impl ModelInfo {
     pub(crate) fn kv_cache_bytes_per_token(&self) -> usize {
         // Use the projected KV width rather than the model-wide hidden dimension because GQA
         // stores fewer key/value heads than query heads.
-        self.key_value_head_count * self.head_dim * self.activation_dtype.size_in_bytes()
+        self.num_kv_heads * self.head_dim * self.activation_dtype.size_in_bytes()
     }
 }
 

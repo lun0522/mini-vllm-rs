@@ -228,7 +228,7 @@ mod tests {
     fn derives_draft_cache_size_for_target_token_capacity() -> Result<()> {
         let draft_model_info = ModelInfo {
             layer_count: 4,
-            key_value_head_count: 2,
+            num_kv_heads: 2,
             head_dim: 8,
             activation_dtype: DType::F32,
         };

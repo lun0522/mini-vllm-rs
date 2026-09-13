@@ -62,7 +62,7 @@ pub(super) fn allocate_pool(
         (
             per_pool_page_count,
             1,
-            model_info.key_value_head_count,
+            model_info.num_kv_heads,
             per_page_token_count,
             model_info.head_dim,
         ),

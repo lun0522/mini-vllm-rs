@@ -680,7 +680,7 @@ mod tests {
         let model = LoadedModel::for_test(Box::new(TestModel {
             info: ModelInfo {
                 layer_count: 1,
-                key_value_head_count: 1,
+                num_kv_heads: 1,
                 head_dim: 1,
                 activation_dtype: DType::F32,
             },
