@@ -175,8 +175,8 @@ mod tests {
     fn test_model_info(layer_count: usize) -> ModelInfo {
         ModelInfo {
             layer_count,
-            kv_head_count: 1,
-            head_dimension: 1,
+            key_value_head_count: 1,
+            head_dim: 1,
             activation_dtype: DType::U32,
         }
     }

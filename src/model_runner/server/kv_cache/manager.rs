@@ -176,8 +176,8 @@ mod tests {
     fn paged_manager() -> Result<KvCacheManager> {
         let model_info = ModelInfo {
             layer_count: 1,
-            kv_head_count: 1,
-            head_dimension: 1,
+            key_value_head_count: 1,
+            head_dim: 1,
             activation_dtype: DType::U32,
         };
         let cache = super::super::paged_cache::PagedKvCache::new(
@@ -194,8 +194,8 @@ mod tests {
     fn contiguous_manager() -> Result<KvCacheManager> {
         let model_info = ModelInfo {
             layer_count: 1,
-            kv_head_count: 1,
-            head_dimension: 1,
+            key_value_head_count: 1,
+            head_dim: 1,
             activation_dtype: DType::U32,
         };
         let cache = super::super::contiguous_cache::ContiguousKvCache::new(

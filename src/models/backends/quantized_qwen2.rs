@@ -13,6 +13,7 @@
 //! - [Model Card](https://huggingface.co/Qwen/Qwen2)
 //!
 
+use crate::models::CachedKeyValue;
 use crate::models::CausalLanguageModel;
 use crate::models::ForwardContext;
 use crate::models::KvCache;
@@ -57,8 +58,8 @@ struct LayerWeights {
     attention_norm: RmsNorm,
     mlp: Mlp,
     ffn_norm: RmsNorm,
-    n_head: usize,
-    n_kv_head: usize,
+    query_head_count: usize,
+    key_value_head_count: usize,
     head_dim: usize,
     cos: Tensor,
     sin: Tensor,
@@ -77,7 +78,7 @@ fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: &Tensor) -> Result<Ten
 impl LayerWeights {
     fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
         let _enter = self.span_rot.enter();
-        let (_b_sz, _n_head, seq_len, _n_embd) = x.dims4()?;
+        let (_batch_size, _head_count, seq_len, _head_dim) = x.dims4()?;
         let cos = self.cos.narrow(0, index_pos, seq_len)?;
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
         candle_nn::rotary_emb::rope(&x.contiguous()?, &cos, &sin)
@@ -91,47 +92,75 @@ impl LayerWeights {
         layer_index: usize,
         kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
-        let index_pos = context.start_position;
         let _enter = self.span_attn.enter();
-        let (b_sz, seq_len, n_embd) = x.dims3()?;
 
+        let index_pos = context.start_position;
+        let (batch_size, query_length, embedding_length) = x.dims3()?;
+
+        // query_length is the number of tokens in this forward call.
+        // key_value_length also includes tokens already stored in the KV cache.
+        // x, q: [batch_size, query_length, embedding_length]
+        // k, v: [batch_size, query_length, key_value_head_count * head_dim]
+        // key_value_head_count * head_dim can be less than embedding_length for GQA or MQA.
         let q = self.attention_wq.forward(x)?;
         let k = self.attention_wk.forward(x)?;
         let v = self.attention_wv.forward(x)?;
 
+        // Biases are broadcasted across batch_size and query_length.
+        // The dimensions of q, k, and v remain unchanged.
         let q = q.broadcast_add(&self.attention_bq)?;
         let k = k.broadcast_add(&self.attention_bk)?;
         let v = v.broadcast_add(&self.attention_bv)?;
 
+        // After transpose:
+        // q: [batch_size, query_head_count, query_length, head_dim]
+        // k, v: [batch_size, key_value_head_count, query_length, head_dim]
         let q = q
-            .reshape((b_sz, seq_len, self.n_head, self.head_dim))?
+            .reshape((
+                batch_size,
+                query_length,
+                self.query_head_count,
+                self.head_dim,
+            ))?
             .transpose(1, 2)?
             .contiguous()?;
         let k = k
-            .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
+            .reshape((
+                batch_size,
+                query_length,
+                self.key_value_head_count,
+                self.head_dim,
+            ))?
             .transpose(1, 2)?
             .contiguous()?;
         let v = v
-            .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
+            .reshape((
+                batch_size,
+                query_length,
+                self.key_value_head_count,
+                self.head_dim,
+            ))?
             .transpose(1, 2)?
             .contiguous()?;
 
-        // let (q, k) = self
-        //     .rotary_embedding
-        //     .apply_rotary_emb_qkv(&q, &k, index_pos)?;
+        // Rotary embeddings preserve the dimensions of q and k.
         let q = self.apply_rotary_emb(&q, index_pos)?;
         let k = self.apply_rotary_emb(&k, index_pos)?;
 
-        let cached = kv_cache
+        // Cached k and v:
+        // [batch_size, key_value_head_count, key_value_length, head_dim].
+        let CachedKeyValue { key: k, value: v } = kv_cache
             .append(context, layer_index, &k, &v)
             .map_err(candle_core::Error::wrap)?;
-        let k = cached.key;
-        let v = cached.value;
 
-        // Support for MQA, useful for 70B models and mistral.
-        let k = repeat_kv(k, self.n_head / self.n_kv_head)?;
-        let v = repeat_kv(v, self.n_head / self.n_kv_head)?;
+        // Expand grouped-query or multi-query heads to match q:
+        // [batch_size, query_head_count, key_value_length, head_dim].
+        let repetition_count = self.query_head_count / self.key_value_head_count;
+        let k = repeat_kv(k, repetition_count)?;
+        let v = repeat_kv(v, repetition_count)?;
 
+        // Attention scores:
+        // [batch_size, query_head_count, query_length, key_value_length].
         let att = (q.matmul(&k.t()?)? / (self.head_dim as f64).sqrt())?;
         let att = match mask {
             None => att,
@@ -141,9 +170,19 @@ impl LayerWeights {
             }
         };
         let att = candle_nn::ops::softmax_last_dim(&att)?;
+
+        // y: [batch_size, query_head_count, query_length, head_dim].
         // Convert to contiguous as matmul doesn't support strided vs for now.
         let y = att.matmul(&v.contiguous()?)?;
-        let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, n_embd])?;
+
+        // After transpose and reshape:
+        // [batch_size, query_length, embedding_length].
+        let y = y
+            .transpose(1, 2)?
+            .reshape(&[batch_size, query_length, embedding_length])?;
+
+        // The output projection preserves
+        // [batch_size, query_length, embedding_length].
         let y = self.attention_wo.forward(&y)?;
         Ok(y)
     }
@@ -270,8 +309,8 @@ impl ModelWeights {
                 sin: sin.clone(),
                 mlp,
                 ffn_norm: RmsNorm::from_qtensor(ffn_norm, rms_norm_eps)?,
-                n_head: head_count,
-                n_kv_head: head_count_kv,
+                query_head_count: head_count,
+                key_value_head_count: head_count_kv,
                 head_dim,
                 neg_inf: neg_inf.clone(),
                 span_attn,
@@ -378,8 +417,8 @@ impl Qwen2Backend {
         let attention = &model.layers[0];
         let model_info = ModelInfo {
             layer_count: model.layers.len(),
-            kv_head_count: attention.n_kv_head,
-            head_dimension: attention.head_dim,
+            key_value_head_count: attention.key_value_head_count,
+            head_dim: attention.head_dim,
             activation_dtype: model.tok_embeddings.embeddings().dtype(),
         };
         Ok(Self { model, model_info })

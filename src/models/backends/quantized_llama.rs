@@ -564,8 +564,8 @@ impl LlamaBackend {
         let attention = &model.layers[0];
         let model_info = ModelInfo {
             layer_count: model.layers.len(),
-            kv_head_count: attention.n_kv_head,
-            head_dimension: attention.head_dim,
+            key_value_head_count: attention.n_kv_head,
+            head_dim: attention.head_dim,
             activation_dtype: model.tok_embeddings.embeddings().dtype(),
         };
         Ok(Self { model, model_info })

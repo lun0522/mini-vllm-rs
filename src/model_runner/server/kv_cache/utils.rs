@@ -62,9 +62,9 @@ pub(super) fn allocate_pool(
         (
             per_pool_page_count,
             1,
-            model_info.kv_head_count,
+            model_info.key_value_head_count,
             per_page_token_count,
-            model_info.head_dimension,
+            model_info.head_dim,
         ),
         model_info.activation_dtype,
         device,
