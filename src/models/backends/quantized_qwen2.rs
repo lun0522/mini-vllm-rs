@@ -13,7 +13,9 @@
 //! - [Model Card](https://huggingface.co/Qwen/Qwen2)
 //!
 
-use crate::models::CachedKeyValue;
+use super::common::forward_attention;
+use super::common::AttentionParameters;
+use super::common::RotaryEmbeddingType;
 use crate::models::CausalLanguageModel;
 use crate::models::ForwardContext;
 use crate::models::KvCache;
@@ -26,7 +28,6 @@ use candle::{
 use candle_core as candle;
 use candle_nn::{Embedding, Module};
 use candle_transformers::quantized_nn::RmsNorm;
-use candle_transformers::utils::repeat_kv;
 use std::collections::HashMap;
 use std::fs::File;
 
@@ -69,21 +70,7 @@ struct LayerWeights {
     span_mlp: tracing::Span,
 }
 
-fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: &Tensor) -> Result<Tensor> {
-    let shape = mask.shape();
-    let m = mask.where_cond(&on_true.broadcast_as(shape.dims())?, on_false)?;
-    Ok(m)
-}
-
 impl LayerWeights {
-    fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
-        let _enter = self.span_rot.enter();
-        let (_batch_size, _head_count, seq_len, _head_dim) = x.dims4()?;
-        let cos = self.cos.narrow(0, index_pos, seq_len)?;
-        let sin = self.sin.narrow(0, index_pos, seq_len)?;
-        candle_nn::rotary_emb::rope(&x.contiguous()?, &cos, &sin)
-    }
-
     fn forward_attn(
         &self,
         x: &Tensor,
@@ -92,99 +79,31 @@ impl LayerWeights {
         layer_index: usize,
         kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
-        let _enter = self.span_attn.enter();
-
-        let index_pos = context.start_position;
-        let (batch_size, query_length, embedding_length) = x.dims3()?;
-
-        // query_length is the number of tokens in this forward call.
-        // key_value_length also includes tokens already stored in the KV cache.
-        // x, q: [batch_size, query_length, embedding_length]
-        // k, v: [batch_size, query_length, key_value_head_count * head_dim]
-        // key_value_head_count * head_dim can be less than embedding_length for GQA or MQA.
-        let q = self.attention_wq.forward(x)?;
-        let k = self.attention_wk.forward(x)?;
-        let v = self.attention_wv.forward(x)?;
-
-        // Biases are broadcasted across batch_size and query_length.
-        // The dimensions of q, k, and v remain unchanged.
-        let q = q.broadcast_add(&self.attention_bq)?;
-        let k = k.broadcast_add(&self.attention_bk)?;
-        let v = v.broadcast_add(&self.attention_bv)?;
-
-        // After transpose:
-        // q: [batch_size, query_head_count, query_length, head_dim]
-        // k, v: [batch_size, key_value_head_count, query_length, head_dim]
-        let q = q
-            .reshape((
-                batch_size,
-                query_length,
-                self.query_head_count,
-                self.head_dim,
-            ))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let k = k
-            .reshape((
-                batch_size,
-                query_length,
-                self.key_value_head_count,
-                self.head_dim,
-            ))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let v = v
-            .reshape((
-                batch_size,
-                query_length,
-                self.key_value_head_count,
-                self.head_dim,
-            ))?
-            .transpose(1, 2)?
-            .contiguous()?;
-
-        // Rotary embeddings preserve the dimensions of q and k.
-        let q = self.apply_rotary_emb(&q, index_pos)?;
-        let k = self.apply_rotary_emb(&k, index_pos)?;
-
-        // Cached k and v:
-        // [batch_size, key_value_head_count, key_value_length, head_dim].
-        let CachedKeyValue { key: k, value: v } = kv_cache
-            .append(context, layer_index, &k, &v)
-            .map_err(candle_core::Error::wrap)?;
-
-        // Expand grouped-query or multi-query heads to match q:
-        // [batch_size, query_head_count, key_value_length, head_dim].
-        let repetition_count = self.query_head_count / self.key_value_head_count;
-        let k = repeat_kv(k, repetition_count)?;
-        let v = repeat_kv(v, repetition_count)?;
-
-        // Attention scores:
-        // [batch_size, query_head_count, query_length, key_value_length].
-        let att = (q.matmul(&k.t()?)? / (self.head_dim as f64).sqrt())?;
-        let att = match mask {
-            None => att,
-            Some(mask) => {
-                let mask = mask.broadcast_as(att.shape())?;
-                masked_fill(&att, &mask, &self.neg_inf)?
-            }
-        };
-        let att = candle_nn::ops::softmax_last_dim(&att)?;
-
-        // y: [batch_size, query_head_count, query_length, head_dim].
-        // Convert to contiguous as matmul doesn't support strided vs for now.
-        let y = att.matmul(&v.contiguous()?)?;
-
-        // After transpose and reshape:
-        // [batch_size, query_length, embedding_length].
-        let y = y
-            .transpose(1, 2)?
-            .reshape(&[batch_size, query_length, embedding_length])?;
-
-        // The output projection preserves
-        // [batch_size, query_length, embedding_length].
-        let y = self.attention_wo.forward(&y)?;
-        Ok(y)
+        forward_attention(
+            AttentionParameters {
+                query_proj: &self.attention_wq,
+                key_proj: &self.attention_wk,
+                value_proj: &self.attention_wv,
+                output_proj: &self.attention_wo,
+                query_bias: Some(&self.attention_bq),
+                key_bias: Some(&self.attention_bk),
+                value_bias: Some(&self.attention_bv),
+                query_head_count: self.query_head_count,
+                key_value_head_count: self.key_value_head_count,
+                head_dim: self.head_dim,
+                cos: &self.cos,
+                sin: &self.sin,
+                neg_inf: &self.neg_inf,
+                rotary_embedding_type: RotaryEmbeddingType::Neox,
+                attention_span: &self.span_attn,
+                rotary_span: &self.span_rot,
+            },
+            x,
+            mask,
+            context,
+            layer_index,
+            kv_cache,
+        )
     }
 }
 

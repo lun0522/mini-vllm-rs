@@ -18,6 +18,9 @@
 
 use std::collections::HashMap;
 
+use super::common::forward_attention;
+use super::common::AttentionParameters;
+use super::common::RotaryEmbeddingType;
 use crate::models::CausalLanguageModel;
 use crate::models::ForwardContext;
 use crate::models::KvCache;
@@ -46,7 +49,9 @@ impl QMatMul {
         let span = tracing::span!(tracing::Level::TRACE, "qmatmul");
         Ok(Self { inner, span })
     }
+}
 
+impl Module for QMatMul {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let _enter = self.span.enter();
         self.inner.forward(xs)
@@ -161,11 +166,6 @@ struct LayerWeights {
     n_head: usize,
     n_kv_head: usize,
     head_dim: usize,
-    /// RoPE convention: true = NEOX (non-interleaved, pairs i with i+d/2),
-    /// false = NORM (interleaved, pairs 2i with 2i+1).
-    /// Must match the model architecture — using the wrong convention corrupts
-    /// attention patterns and causes severe output degradation.
-    rope_is_neox: bool,
     cos: Tensor,
     sin: Tensor,
     neg_inf: Tensor,
@@ -174,26 +174,7 @@ struct LayerWeights {
     span_mlp: tracing::Span,
 }
 
-fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: &Tensor) -> Result<Tensor> {
-    let shape = mask.shape();
-    let m = mask.where_cond(&on_true.broadcast_as(shape.dims())?, on_false)?;
-    Ok(m)
-}
-
 impl LayerWeights {
-    fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
-        let _enter = self.span_rot.enter();
-        let (_b_sz, _n_head, seq_len, _n_embd) = x.dims4()?;
-        let cos = self.cos.narrow(0, index_pos, seq_len)?;
-        let sin = self.sin.narrow(0, index_pos, seq_len)?;
-        let x = x.contiguous()?;
-        if self.rope_is_neox {
-            candle_nn::rotary_emb::rope(&x, &cos, &sin)
-        } else {
-            candle_nn::rotary_emb::rope_i(&x, &cos, &sin)
-        }
-    }
-
     fn forward_attn(
         &self,
         x: &Tensor,
@@ -202,68 +183,31 @@ impl LayerWeights {
         layer_index: usize,
         kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
-        let index_pos = context.start_position;
-        let _enter = self.span_attn.enter();
-        let (b_sz, seq_len, n_embd) = x.dims3()?;
-        let q = self.attention_wq.forward(x)?;
-        let k = self.attention_wk.forward(x)?;
-        let v = self.attention_wv.forward(x)?;
-
-        let q = q
-            .reshape((b_sz, seq_len, self.n_head, self.head_dim))?
-            .transpose(1, 2)?;
-        let k = k
-            .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
-            .transpose(1, 2)?;
-        let v = v
-            .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
-            .transpose(1, 2)?
-            // This call to contiguous ensures that the fast kernel can be called below. It's
-            // actually a no-op except when processing the initial prompt so has no significant
-            // impact on performance.
-            .contiguous()?;
-
-        let q = self.apply_rotary_emb(&q, index_pos)?;
-        let k = self.apply_rotary_emb(&k, index_pos)?;
-
-        let cached = kv_cache
-            .append(context, layer_index, &k, &v)
-            .map_err(candle_core::Error::wrap)?;
-        let k = cached.key;
-        let v = cached.value;
-
-        let y = if q.device().is_metal() && seq_len == 1 {
-            // SDPA will do MQA for us
-            candle_nn::ops::sdpa(
-                &q,
-                &k,
-                &v,
-                None,
-                false,
-                1. / (self.head_dim as f32).sqrt(),
-                1.,
-            )?
-        } else {
-            // Support for MQA, useful for 70B models and mistral.
-            let k = candle_transformers::utils::repeat_kv(k, self.n_head / self.n_kv_head)?;
-            let v = candle_transformers::utils::repeat_kv(v, self.n_head / self.n_kv_head)?;
-
-            let att = (q.matmul(&k.t()?)? / (self.head_dim as f64).sqrt())?;
-            let att = match mask {
-                None => att,
-                Some(mask) => {
-                    let mask = mask.broadcast_as(att.shape())?;
-                    masked_fill(&att, &mask, &self.neg_inf)?
-                }
-            };
-            let att = candle_nn::ops::softmax_last_dim(&att)?;
-            // Convert to contiguous as matmul doesn't support strided vs for now.
-            att.matmul(&v.contiguous()?)?
-        };
-
-        let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, n_embd])?;
-        let y = self.attention_wo.forward(&y)?;
-        Ok(y)
+        forward_attention(
+            AttentionParameters {
+                query_proj: &self.attention_wq,
+                key_proj: &self.attention_wk,
+                value_proj: &self.attention_wv,
+                output_proj: &self.attention_wo,
+                query_bias: None,
+                key_bias: None,
+                value_bias: None,
+                query_head_count: self.n_head,
+                key_value_head_count: self.n_kv_head,
+                head_dim: self.head_dim,
+                cos: &self.cos,
+                sin: &self.sin,
+                neg_inf: &self.neg_inf,
+                rotary_embedding_type: RotaryEmbeddingType::Interleaved,
+                attention_span: &self.span_attn,
+                rotary_span: &self.span_rot,
+            },
+            x,
+            mask,
+            context,
+            layer_index,
+            kv_cache,
+        )
     }
 }
 
@@ -329,40 +273,6 @@ impl ModelWeights {
         let rope_freq_base = md_get("llama.rope.freq_base")
             .and_then(|m| m.to_f32())
             .unwrap_or(10000f32);
-
-        // Determine RoPE convention from model architecture (matching llama.cpp).
-        // NEOX (non-interleaved): pairs (i, i+d/2) — Qwen, Qwen2, Falcon, Phi, etc.
-        // NORM (interleaved): pairs (2i, 2i+1) — Llama, Mistral, DeepSeek, etc.
-        // See llama_model_rope_type() in llama.cpp for the authoritative mapping.
-        let arch = ct
-            .metadata
-            .get("general.architecture")
-            .and_then(|v| v.to_string().ok())
-            .cloned()
-            .unwrap_or_default();
-        let rope_is_neox = matches!(
-            arch.as_str(),
-            "qwen"
-                | "qwen2"
-                | "qwen2moe"
-                | "qwen3"
-                | "qwen3moe"
-                | "falcon"
-                | "grok"
-                | "dbrx"
-                | "phi2"
-                | "phi3"
-                | "phimoe"
-                | "stablelm"
-                | "starcoder2"
-                | "bert"
-                | "nomic-bert"
-                | "jina-bert-v2"
-                | "olmo2"
-                | "olmoe"
-                | "codeshell"
-                | "plamo"
-        );
 
         let (cos, sin) = precomput_freqs_cis(rope_dim, rope_freq_base, device)?;
         let neg_inf = Tensor::new(f32::NEG_INFINITY, device)?;
@@ -437,7 +347,6 @@ impl ModelWeights {
                 n_head: head_count,
                 n_kv_head: head_count_kv,
                 head_dim: embedding_length / head_count,
-                rope_is_neox,
                 cos: cos.clone(),
                 sin: sin.clone(),
                 neg_inf: neg_inf.clone(),
