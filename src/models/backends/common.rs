@@ -98,6 +98,34 @@ impl Module for SwiGluMlp {
     }
 }
 
+#[expect(dead_code, reason = "reserved for continuous batching")]
+pub(super) struct BatchedForwardContext {
+    pub(super) request_id: u64,
+    pub(super) start_pos: usize,
+    pub(super) cached_kv_len: usize,
+    pub(super) q_start_index: usize,
+    pub(super) q_len: usize,
+}
+
+#[expect(dead_code, reason = "reserved for continuous batching")]
+pub(super) trait BatchedKvCache {
+    fn append(
+        &mut self,
+        request_id: u64,
+        layer_index: usize,
+        key: &Tensor,
+        value: &Tensor,
+    ) -> anyhow::Result<CachedKeyValue>;
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct RotaryEmbeddingContext {
+    pub(super) rope_type: RotaryEmbeddingType,
+    pub(super) cos: Tensor,
+    pub(super) sin: Tensor,
+    pub(super) span_rope: tracing::Span,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct TransformerBlock {
     pub(super) attn_wq: QMatMul,
@@ -113,12 +141,9 @@ pub(super) struct TransformerBlock {
     pub(super) num_q_heads: usize,
     pub(super) num_kv_heads: usize,
     pub(super) head_dim: usize,
-    pub(super) cos: Tensor,
-    pub(super) sin: Tensor,
+    pub(super) rope_context: RotaryEmbeddingContext,
     pub(super) neg_inf: Tensor,
-    pub(super) rope_type: RotaryEmbeddingType,
     pub(super) span_attn: tracing::Span,
-    pub(super) span_rope: tracing::Span,
     pub(super) span_mlp: tracing::Span,
 }
 
@@ -134,6 +159,22 @@ impl TransformerBlock {
         let residual = x;
         let x = self.attn_norm.forward(x)?;
         let x = self.forward_attention(&x, mask, context, layer_index, kv_cache)?;
+        let x = (x + residual)?;
+        self.forward_mlp(&x)
+    }
+
+    /// Runs one complete transformer block over packed requests.
+    #[expect(dead_code, reason = "reserved for continuous batching")]
+    pub(super) fn forward_batched(
+        &self,
+        x: &Tensor,
+        contexts: &[BatchedForwardContext],
+        layer_index: usize,
+        cache: &mut dyn BatchedKvCache,
+    ) -> Result<Tensor> {
+        let residual = x;
+        let x = self.attn_norm.forward(x)?;
+        let x = self.forward_batched_attention(&x, contexts, layer_index, cache)?;
         let x = (x + residual)?;
         self.forward_mlp(&x)
     }
@@ -179,22 +220,8 @@ impl TransformerBlock {
             .contiguous()?;
 
         // Rotary embeddings preserve the dimensions of q and k.
-        let q = apply_rotary_embedding(
-            self.rope_type,
-            &q,
-            index_pos,
-            &self.cos,
-            &self.sin,
-            &self.span_rope,
-        )?;
-        let k = apply_rotary_embedding(
-            self.rope_type,
-            &k,
-            index_pos,
-            &self.cos,
-            &self.sin,
-            &self.span_rope,
-        )?;
+        let q = self.apply_rotary_embedding(&q, index_pos)?;
+        let k = self.apply_rotary_embedding(&k, index_pos)?;
 
         // Cached k and v:
         // [batch_size, num_kv_heads, kv_len, head_dim].
@@ -248,12 +275,135 @@ impl TransformerBlock {
         self.attn_wo.forward(&y)
     }
 
+    /// Projects requests packed along the query-token dimension, then computes
+    /// attention separately for each request to avoid materializing cross-request
+    /// attention scores. The per-request outputs are packed again before the
+    /// output projection.
+    ///
+    /// `packed_` values contain data from every request, while `request_` values
+    /// contain one request's slice. `full` K/V values include both the cached
+    /// prefix and the current query tokens.
+    pub(super) fn forward_batched_attention(
+        &self,
+        packed_x: &Tensor,
+        contexts: &[BatchedForwardContext],
+        layer_index: usize,
+        cache: &mut dyn BatchedKvCache,
+    ) -> Result<Tensor> {
+        validate_batched_attention_input(packed_x, contexts)?;
+
+        // packed_x: [1, packed_q_len, embedding_len].
+        // packed_q: [1, num_q_heads, packed_q_len, head_dim].
+        // packed_k, packed_v: [1, num_kv_heads, packed_q_len, head_dim].
+        let (_, packed_q_len, embedding_len) = packed_x.dims3()?;
+        let packed_q = apply_projection(packed_x, &self.attn_wq, self.attn_bq.as_ref())?
+            .reshape((1, packed_q_len, self.num_q_heads, self.head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let packed_k = apply_projection(packed_x, &self.attn_wk, self.attn_bk.as_ref())?
+            .reshape((1, packed_q_len, self.num_kv_heads, self.head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let packed_v = apply_projection(packed_x, &self.attn_wv, self.attn_bv.as_ref())?
+            .reshape((1, packed_q_len, self.num_kv_heads, self.head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?;
+
+        let mut request_attention_outputs = Vec::with_capacity(contexts.len());
+        for context in contexts {
+            // request_q: [1, num_q_heads, q_len, head_dim].
+            // request_k, request_v: [1, num_kv_heads, q_len, head_dim].
+            let request_q =
+                packed_q.narrow(/* dim */ 2, context.q_start_index, context.q_len)?;
+            let request_k =
+                packed_k.narrow(/* dim */ 2, context.q_start_index, context.q_len)?;
+            let request_v =
+                packed_v.narrow(/* dim */ 2, context.q_start_index, context.q_len)?;
+            let request_q = self.apply_rotary_embedding(&request_q, context.start_pos)?;
+            let request_k = self.apply_rotary_embedding(&request_k, context.start_pos)?;
+
+            let CachedKeyValue {
+                key: request_full_cached_k,
+                value: request_full_cached_v,
+            } = cache
+                .append(context.request_id, layer_index, &request_k, &request_v)
+                .map_err(candle_core::Error::wrap)?;
+            let (_, _, request_full_cached_kv_len, _) = request_full_cached_k.dims4()?;
+            let expected_full_cached_kv_len = context.cached_kv_len + context.q_len;
+            if request_full_cached_kv_len != expected_full_cached_kv_len {
+                candle_core::bail!("KV cache returned an inconsistent sequence length")
+            }
+
+            // request_y: [1, num_q_heads, q_len, head_dim].
+            let request_y = if request_q.device().is_metal() && context.q_len == 1 {
+                // Metal SDPA handles GQA or MQA without explicitly repeating K and V.
+                candle_nn::ops::sdpa(
+                    &request_q,
+                    &request_full_cached_k,
+                    &request_full_cached_v,
+                    None,
+                    false,
+                    1. / (self.head_dim as f32).sqrt(),
+                    1.,
+                )?
+            } else {
+                // Expand grouped-query or multi-query heads to match request_q:
+                // request_full_cached_k, request_full_cached_v:
+                // [1, num_q_heads, request_full_cached_kv_len, head_dim].
+                let repetition_count = self.num_q_heads / self.num_kv_heads;
+                let request_full_cached_k = repeat_kv(request_full_cached_k, repetition_count)?;
+                let request_full_cached_v = repeat_kv(request_full_cached_v, repetition_count)?;
+
+                // request_attn_scores:
+                // [1, num_q_heads, q_len, request_full_cached_kv_len].
+                let request_attn_scores = (request_q.matmul(&request_full_cached_k.t()?)?
+                    / (self.head_dim as f64).sqrt())?;
+                // request_mask: [q_len, request_full_cached_kv_len].
+                let request_mask = candle_transformers::utils::build_causal_mask(
+                    context.q_len,
+                    context.cached_kv_len,
+                    packed_x.device(),
+                )?
+                .broadcast_as(request_attn_scores.shape())?;
+                let request_attn_scores =
+                    masked_fill(&request_attn_scores, &request_mask, &self.neg_inf)?;
+                let request_attn_weights = candle_nn::ops::softmax_last_dim(&request_attn_scores)?;
+                request_attn_weights.matmul(&request_full_cached_v.contiguous()?)?
+            };
+            request_attention_outputs.push(request_y);
+        }
+
+        // packed_y: [1, num_q_heads, packed_q_len, head_dim].
+        let packed_y = Tensor::cat(
+            &request_attention_outputs.iter().collect::<Vec<_>>(),
+            /* dim */ 2,
+        )?;
+        // After transpose and reshape:
+        // packed_y: [1, packed_q_len, embedding_len].
+        let packed_y = packed_y
+            .transpose(1, 2)?
+            .reshape((1, packed_q_len, embedding_len))?;
+        self.attn_wo.forward(&packed_y)
+    }
+
     fn forward_mlp(&self, x: &Tensor) -> Result<Tensor> {
         let _enter = self.span_mlp.enter();
         let residual = x;
         let x = self.mlp_norm.forward(x)?;
         let x = self.mlp.forward(&x)?;
         x + residual
+    }
+
+    fn apply_rotary_embedding(&self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
+        let context = &self.rope_context;
+        let _enter = context.span_rope.enter();
+        let (_, _, query_len, _) = x.dims4()?;
+        let cos = context.cos.narrow(0, index_pos, query_len)?;
+        let sin = context.sin.narrow(0, index_pos, query_len)?;
+        match context.rope_type {
+            RotaryEmbeddingType::Neox => candle_nn::rotary_emb::rope(x, &cos, &sin),
+            RotaryEmbeddingType::Interleaved => candle_nn::rotary_emb::rope_i(x, &cos, &sin),
+        }
     }
 }
 
@@ -373,22 +523,25 @@ fn apply_projection(input: &Tensor, proj: &QMatMul, bias: Option<&Tensor>) -> Re
     }
 }
 
-fn apply_rotary_embedding(
-    rope_type: RotaryEmbeddingType,
-    x: &Tensor,
-    index_pos: usize,
-    cos: &Tensor,
-    sin: &Tensor,
-    span: &tracing::Span,
-) -> Result<Tensor> {
-    let _enter = span.enter();
-    let (_, _, query_len, _) = x.dims4()?;
-    let cos = cos.narrow(0, index_pos, query_len)?;
-    let sin = sin.narrow(0, index_pos, query_len)?;
-    match rope_type {
-        RotaryEmbeddingType::Neox => candle_nn::rotary_emb::rope(x, &cos, &sin),
-        RotaryEmbeddingType::Interleaved => candle_nn::rotary_emb::rope_i(x, &cos, &sin),
+fn validate_batched_attention_input(x: &Tensor, contexts: &[BatchedForwardContext]) -> Result<()> {
+    if contexts.is_empty() {
+        candle_core::bail!("batched attention requires at least one request")
     }
+    let (batch_size, packed_q_len, _) = x.dims3()?;
+    if batch_size != 1 {
+        candle_core::bail!("batched attention requires batch size 1")
+    }
+    let mut expected_q_start_index = 0;
+    for context in contexts {
+        if context.q_len == 0 || context.q_start_index != expected_q_start_index {
+            candle_core::bail!("batched attention contexts must cover contiguous query ranges")
+        }
+        expected_q_start_index += context.q_len;
+    }
+    if expected_q_start_index != packed_q_len {
+        candle_core::bail!("batched attention contexts must cover every packed query token")
+    }
+    Ok(())
 }
 
 fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: &Tensor) -> Result<Tensor> {

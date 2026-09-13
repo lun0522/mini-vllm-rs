@@ -18,6 +18,7 @@
 
 use super::common::precompute_rotary_embedding_frequencies;
 use super::common::QMatMul;
+use super::common::RotaryEmbeddingContext;
 use super::common::RotaryEmbeddingType;
 use super::common::SwiGluMlp;
 use super::common::TransformerBlock;
@@ -152,12 +153,14 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
             num_q_heads: head_count,
             num_kv_heads: head_count_kv,
             head_dim: embedding_length / head_count,
-            cos: cos.clone(),
-            sin: sin.clone(),
+            rope_context: RotaryEmbeddingContext {
+                rope_type: RotaryEmbeddingType::Interleaved,
+                cos: cos.clone(),
+                sin: sin.clone(),
+                span_rope,
+            },
             neg_inf: neg_inf.clone(),
-            rope_type: RotaryEmbeddingType::Interleaved,
             span_attn,
-            span_rope,
             span_mlp,
         })
     }
