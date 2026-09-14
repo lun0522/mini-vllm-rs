@@ -131,9 +131,10 @@ impl RequestExecutionState {
         draft_token_count: usize,
         prefill_initial_positions: PrefillStartPositions,
     ) -> Result<Self> {
-        if request.input_token_ids.is_empty() {
-            anyhow::bail!("input token IDs must not be empty");
-        }
+        anyhow::ensure!(
+            !request.input_token_ids.is_empty(),
+            "input token IDs must not be empty"
+        );
         let input_token_count = request.input_token_ids.len();
         validate_prefill_start_positions(input_token_count, prefill_initial_positions)?;
         let phase = determine_initial_phase(input_token_count, prefill_initial_positions);
@@ -194,9 +195,10 @@ impl RequestExecutionState {
     }
 
     pub(super) fn into_completed_generation(self) -> Result<CompletedGeneration> {
-        if !matches!(self.phase, GenerationPhase::Finished) {
-            anyhow::bail!("generation request is not finished");
-        }
+        anyhow::ensure!(
+            matches!(self.phase, GenerationPhase::Finished),
+            "generation request is not finished"
+        );
         let output_token_count = self.tokens.len() - self.input_token_count;
         let stats = TextGenerationStats {
             input_token_count: u64::try_from(self.input_token_count)
@@ -227,9 +229,10 @@ impl RequestExecutionState {
         draft: Option<&mut ModelInstance>,
         token_budget: usize,
     ) -> Result<GenerationPhase> {
-        if token_budget == 0 {
-            anyhow::bail!("prefill token budget must be greater than zero");
-        }
+        anyhow::ensure!(
+            token_budget > 0,
+            "prefill token budget must be greater than zero"
+        );
         match draft {
             Some(draft) => self.run_speculative_prefill_chunk(target, draft, token_budget),
             None => self.run_target_prefill_chunk(target, token_budget),
@@ -600,19 +603,17 @@ fn validate_prefill_start_positions(
     positions: PrefillStartPositions,
 ) -> Result<()> {
     let maximum_position = input_token_count - 1;
-    if positions.target > maximum_position {
-        anyhow::bail!(
-            "target prefill position {} exceeds the maximum position {maximum_position}",
-            positions.target
-        );
-    }
+    anyhow::ensure!(
+        positions.target <= maximum_position,
+        "target prefill position {} exceeds the maximum position {maximum_position}",
+        positions.target
+    );
     if let Some(draft_position) = positions.draft {
-        if draft_position > maximum_position {
-            anyhow::bail!(
-                "draft prefill position {draft_position} exceeds the maximum position \
-                 {maximum_position}"
-            );
-        }
+        anyhow::ensure!(
+            draft_position <= maximum_position,
+            "draft prefill position {draft_position} exceeds the maximum position \
+             {maximum_position}"
+        );
     }
     Ok(())
 }

@@ -3,6 +3,8 @@ use crate::proto::request_handler::GenerateText;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use log::error;
+use log::info;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -47,7 +49,7 @@ impl InputPreprocessingPool {
                 .name(format!("input-preprocessor-{worker_index}"))
                 .spawn(move || {
                     if let Err(error) = run_worker(worker_index, tokenizer, command_receiver) {
-                        log::error!("Input preprocessing worker {worker_index} failed: {error:#}");
+                        error!("Input preprocessing worker {worker_index} failed: {error:#}");
                     }
                 })
                 .with_context(|| {
@@ -82,7 +84,7 @@ impl Drop for InputPreprocessingPool {
         }
         for worker_thread in self.worker_threads.drain(..) {
             if worker_thread.join().is_err() {
-                log::error!("Input preprocessing worker panicked during shutdown");
+                error!("Input preprocessing worker panicked during shutdown");
             }
         }
     }
@@ -106,7 +108,7 @@ fn run_worker(
                 result_sender,
             } => {
                 let request_id = request.request_id;
-                log::info!(
+                info!(
                     "Input preprocessing state: request_id={request_id} worker_index={worker_index} status=started"
                 );
                 let stream_output = request.stream_output;
@@ -118,7 +120,7 @@ fn run_worker(
                             token_decoder: tokenizer.create_token_decoder(),
                             stream_output,
                         });
-                log::info!(
+                info!(
                     "Input preprocessing state: request_id={request_id} worker_index={worker_index} status=finished success={}",
                     result.is_ok()
                 );

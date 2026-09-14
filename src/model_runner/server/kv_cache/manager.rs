@@ -6,6 +6,7 @@ use crate::models::CachedKeyValue;
 use crate::models::ForwardContext;
 use crate::models::KvCache;
 use anyhow::bail;
+use anyhow::ensure;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::Tensor;
@@ -31,14 +32,16 @@ impl KvCacheManager {
     }
 
     pub fn start_request(&mut self, request_id: u64) -> Result<()> {
-        if self.request_states.contains_key(&request_id) {
-            bail!("KV cache request {request_id} already exists");
-        }
+        ensure!(
+            !self.request_states.contains_key(&request_id),
+            "KV cache request {request_id} already exists"
+        );
         let request_state = match &self.backend {
             KvCacheBackend::Contiguous(_) => {
-                if !self.request_states.is_empty() {
-                    bail!("contiguous KV cache already has an active request");
-                }
+                ensure!(
+                    self.request_states.is_empty(),
+                    "contiguous KV cache already has an active request"
+                );
                 RequestKvCacheState::Contiguous(RequestContiguousCacheState::new(
                     self.backend.layer_count(),
                 ))

@@ -11,6 +11,8 @@ use crate::proto::model_runner::ModelRunnerCommand;
 use crate::utils::rpc_shutdown::RpcShutdown;
 use anyhow::Context;
 use anyhow::Result;
+use log::info;
+use log::warn;
 use std::time::Instant;
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
@@ -132,7 +134,7 @@ impl ModelRunnerService for ModelRunnerRpcService {
             })
             .await
             .map_err(|_| Status::unavailable("model runner inference thread stopped"))?;
-        log::info!("Model runner queue state: request_id={request_id} status=queued");
+        info!("Model runner queue state: request_id={request_id} status=queued");
         Ok(Response::new(ReceiverStream::new(event_receiver)))
     }
 
@@ -174,12 +176,10 @@ fn normalize_generate_text_request(
     let maximum_new_token_count = u64::try_from(token_capacity - input_token_count + 1)
         .map_err(|_| "maximum new token count does not fit in u64".to_owned())?;
     if request.max_new_tokens > maximum_new_token_count {
-        log::warn!(
+        warn!(
             "Requested {} new tokens, but the KV cache can hold at most {} for this input; \
              reducing max_new_tokens to {}",
-            request.max_new_tokens,
-            maximum_new_token_count,
-            maximum_new_token_count,
+            request.max_new_tokens, maximum_new_token_count, maximum_new_token_count,
         );
         request.max_new_tokens = maximum_new_token_count;
     }

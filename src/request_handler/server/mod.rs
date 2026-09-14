@@ -12,6 +12,7 @@ use crate::utils::rpc_shutdown::RpcShutdown;
 use anyhow::Context;
 use anyhow::Result;
 use argh::FromArgs;
+use log::info;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -147,7 +148,7 @@ impl RequestHandlerService for RequestHandlerRpcService {
         let mut request = request.into_inner();
         let request_id = self.request_id.next().map_err(Status::resource_exhausted)?;
         request.request_id = request_id;
-        log::info!("Request handler state: request_id={request_id} status=arrived");
+        info!("Request handler state: request_id={request_id} status=arrived");
         let request = self
             .input_preprocessing_pool
             .preprocess(request)

@@ -6,6 +6,7 @@ use crate::utils::domain_socket;
 use crate::utils::rpc_shutdown::RpcShutdown;
 use anyhow::Context;
 use anyhow::Result;
+use log::error;
 use std::path::Path;
 use std::path::PathBuf;
 use tokio::net::UnixListener;
@@ -52,7 +53,7 @@ impl Drop for ControlServer {
     fn drop(&mut self) {
         if let Err(error) = domain_socket::remove(&self.socket_path, "main process control socket")
         {
-            log::error!("Failed to remove the main process control socket: {error:#}");
+            error!("Failed to remove the main process control socket: {error:#}");
         }
     }
 }

@@ -5,6 +5,7 @@ use crate::model_runner::SchedulingPolicy;
 use crate::proto::model_config::ModelConfig;
 use crate::utils::textproto::parse_textproto;
 use argh::FromArgs;
+use log::warn;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -157,7 +158,7 @@ fn default_control_socket() -> PathBuf {
 
 fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
     if args.target_kv_cache_size_bytes == 0 {
-        log::warn!(
+        warn!(
             "Invalid target KV-cache size {}; using default value \
              {}",
             args.target_kv_cache_size_bytes.separate_with_commas(),
@@ -166,19 +167,19 @@ fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
         args.target_kv_cache_size_bytes = DEFAULT_TARGET_KV_CACHE_SIZE_BYTES;
     }
     if args.max_batched_token_count == 0 {
-        log::warn!(
+        warn!(
             "Invalid maximum batched token count 0; using default value {DEFAULT_MAX_BATCHED_TOKEN_COUNT}"
         );
         args.max_batched_token_count = DEFAULT_MAX_BATCHED_TOKEN_COUNT;
     }
     if args.max_active_request_count == 0 {
-        log::warn!(
+        warn!(
             "Invalid maximum active request count 0; using default value {DEFAULT_MAX_ACTIVE_REQUEST_COUNT}"
         );
         args.max_active_request_count = DEFAULT_MAX_ACTIVE_REQUEST_COUNT;
     }
     if args.input_preprocessing_thread_count == 0 {
-        log::warn!(
+        warn!(
             "Invalid input preprocessing thread count 0; using default value \
              {DEFAULT_INPUT_PREPROCESSING_THREAD_COUNT}"
         );

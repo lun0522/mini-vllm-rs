@@ -2,6 +2,9 @@ use crate::model_runner::SchedulerConfig;
 use crate::proto::model_runner::TextGenerationStats;
 use crate::proto::model_runner::TokenGenerationLatency;
 use anyhow::Result;
+use log::error;
+use log::info;
+use log::warn;
 use std::time::Duration;
 use std::time::Instant;
 use thousands::Separable;
@@ -26,7 +29,7 @@ pub(super) struct InferenceEngine {
 impl InferenceEngine {
     pub(super) fn new(model_runner: ModelRunner, scheduler_config: SchedulerConfig) -> Self {
         let scheduler_config = normalize_scheduler_config(&model_runner, scheduler_config);
-        log::info!("Scheduler config: {scheduler_config}");
+        info!("Scheduler config: {scheduler_config}");
         Self {
             model_runner,
             request_manager: RequestManager::new(),
@@ -41,17 +44,17 @@ impl InferenceEngine {
                     break;
                 };
                 if let Err(error) = self.enqueue_request(request) {
-                    log::error!("Inference engine failed to enqueue a request: {error:#}");
+                    error!("Inference engine failed to enqueue a request: {error:#}");
                     continue;
                 }
             }
             while let Ok(request) = inference_receiver.try_recv() {
                 if let Err(error) = self.enqueue_request(request) {
-                    log::error!("Inference engine failed to enqueue a request: {error:#}");
+                    error!("Inference engine failed to enqueue a request: {error:#}");
                 }
             }
             if let Err(error) = self.process_requests() {
-                log::error!("Inference engine failed to process requests: {error:#}");
+                error!("Inference engine failed to process requests: {error:#}");
             }
         }
     }
@@ -86,7 +89,7 @@ impl InferenceEngine {
         };
         self.scheduler
             .update_request_state(request_id, started_request.generation_phase)?;
-        log::info!(
+        info!(
             "Engine state: request_id={} status=started input_tokens={} generation_phase={} \
              ignore_eos_tokens={} queue_us={}",
             request_id,
@@ -161,7 +164,7 @@ impl InferenceEngine {
                     finished_request.metrics.last_token_at,
                 );
                 let draft_stats = result.stats.draft_stats.as_ref();
-                log::info!(
+                info!(
                     "Engine state: request_id={} status=completed input_tokens={} output_tokens={} queue_us={} \
                      prefill_us={} ttft_us={} decode_us={} target_cached_tokens={} \
                      draft_cached_tokens={} draft_accepted={} draft_proposed={}",
@@ -181,7 +184,7 @@ impl InferenceEngine {
             }
             Err(error) => {
                 let status = generation_error_status(error);
-                log::info!(
+                info!(
                     "Engine state: request_id={} status={} input_tokens={} output_tokens={} queue_us={} \
                      ttft_us={}",
                     request_id,
@@ -204,7 +207,7 @@ fn normalize_scheduler_config(
     if !model_runner.supports_multiple_active_requests()
         && scheduler_config.max_active_request_count > 1
     {
-        log::warn!("Current KV cache type limits max_active_requests to 1");
+        warn!("Current KV cache type limits max_active_requests to 1");
         scheduler_config.max_active_request_count = 1;
     }
     scheduler_config

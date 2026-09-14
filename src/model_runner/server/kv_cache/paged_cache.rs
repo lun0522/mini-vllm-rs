@@ -10,10 +10,12 @@ use crate::models::CachedKeyValue;
 use crate::models::ModelInfo;
 use crate::models::ModelRole;
 use anyhow::bail;
+use anyhow::ensure;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::Device;
 use candle_core::Tensor;
+use log::info;
 use thousands::Separable;
 
 /// Coordinates shared physical pages and prefix metadata with request-specific virtual tables.
@@ -59,7 +61,7 @@ impl PagedKvCache {
         let prefix_block_index = enable_prefix_caching
             .then(|| PrefixBlockIndex::new(per_page_token_count))
             .transpose()?;
-        log::info!(
+        info!(
             "Created {model_role} model paged KV cache with {} pages per pool and capacity for \
              {token_capacity} cached tokens using {} bytes",
             physical_page_pool.page_count,
@@ -91,9 +93,10 @@ impl PagedKvCache {
             return Ok(0);
         };
         let prefix_match = prefix_block_index.find_longest_cached_prefix(input_token_ids)?;
-        if request_state.active_block_tables.is_populated() {
-            bail!("cannot attach a cached prefix to non-empty active block tables");
-        }
+        ensure!(
+            !request_state.active_block_tables.is_populated(),
+            "cannot attach a cached prefix to non-empty active block tables"
+        );
         let matched_token_count = prefix_match.cursor.matched_token_count();
         self.physical_page_pool
             .retain_allocated_pages_or_rollback(prefix_match.page_ids_by_layer.iter().flatten())?;

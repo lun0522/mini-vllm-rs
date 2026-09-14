@@ -1,6 +1,6 @@
 use super::LayerCache;
 use crate::models::ModelInfo;
-use anyhow::bail;
+use anyhow::ensure;
 use anyhow::Result;
 use candle_core::Device;
 use candle_core::Tensor;
@@ -15,24 +15,23 @@ pub(super) fn validate_cache_append(
     key: &Tensor,
     value: &Tensor,
 ) -> Result<usize> {
-    if start_position != token_count {
-        bail!(
-            "KV-cache layer {layer_index} contains {token_count} tokens, but append starts at \
-             position {start_position}"
-        );
-    }
+    ensure!(
+        start_position == token_count,
+        "KV-cache layer {layer_index} contains {token_count} tokens, but append starts at \
+         position {start_position}"
+    );
     let key_dimensions = key.dims4()?;
     let value_dimensions = value.dims4()?;
-    if key_dimensions != value_dimensions {
-        bail!(
-            "key and value cache tensors have different dimensions: {key_dimensions:?} and \
-             {value_dimensions:?}"
-        );
-    }
+    ensure!(
+        key_dimensions == value_dimensions,
+        "key and value cache tensors have different dimensions: {key_dimensions:?} and \
+         {value_dimensions:?}"
+    );
     let appending_token_count = key_dimensions.2;
-    if appending_token_count == 0 {
-        bail!("cannot append an empty KV-cache tensor");
-    }
+    ensure!(
+        appending_token_count > 0,
+        "cannot append an empty KV-cache tensor"
+    );
     Ok(appending_token_count)
 }
 
@@ -42,12 +41,11 @@ pub(super) fn validate_truncation<T: LayerCache>(
 ) -> Result<()> {
     for (layer_index, layer_cache) in layer_caches.iter().enumerate() {
         let current_token_count = layer_cache.cached_token_count();
-        if target_token_count > current_token_count {
-            bail!(
-                "cannot truncate KV-cache layer {layer_index} from {current_token_count} to \
-                 {target_token_count} tokens"
-            );
-        }
+        ensure!(
+            target_token_count <= current_token_count,
+            "cannot truncate KV-cache layer {layer_index} from {current_token_count} to \
+             {target_token_count} tokens"
+        );
     }
     Ok(())
 }

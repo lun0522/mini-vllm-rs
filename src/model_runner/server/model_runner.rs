@@ -33,9 +33,10 @@ impl ModelRunner {
         target_kv_cache_size_bytes: usize,
     ) -> Result<Self> {
         // TODO: Support speculative decoding in the continuous-batching execution path.
-        if enable_continuous_batching && draft_model_path.is_some() {
-            anyhow::bail!("continuous batching does not yet support speculative decoding");
-        }
+        anyhow::ensure!(
+            !enable_continuous_batching || draft_model_path.is_none(),
+            "continuous batching does not yet support speculative decoding"
+        );
         let device = Self::get_inference_device(inference_device)?;
         let loaded_model = LoadedModel::new(model_path, device)?;
         let loaded_draft_model = draft_model_path

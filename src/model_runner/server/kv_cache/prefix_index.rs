@@ -1,5 +1,6 @@
 use super::physical_page_pool::PageId;
 use anyhow::bail;
+use anyhow::ensure;
 use anyhow::Context;
 use anyhow::Result;
 use std::cell::RefCell;
@@ -104,9 +105,10 @@ pub(super) struct PrefixBlockIndex {
 
 impl PrefixBlockIndex {
     pub(super) fn new(per_block_token_count: usize) -> Result<Self> {
-        if per_block_token_count == 0 {
-            bail!("prefix block token count must be greater than zero");
-        }
+        ensure!(
+            per_block_token_count > 0,
+            "prefix block token count must be greater than zero"
+        );
         Ok(Self {
             per_block_token_count,
             blocks_map: HashMap::new(),
@@ -166,9 +168,10 @@ impl PrefixBlockIndex {
         let current_timestamp = self.current_timestamp.borrow_mut().begin_access()?;
 
         let starting_block_index = cursor.matched_token_count / self.per_block_token_count;
-        if starting_block_index > complete_block_count {
-            bail!("restored prefix is longer than the completed cached sequence");
-        }
+        ensure!(
+            starting_block_index <= complete_block_count,
+            "restored prefix is longer than the completed cached sequence"
+        );
         let mut parent_id = cursor.block_id;
         let mut previous_block_key = cursor.block_key.clone();
         let mut is_appending_new_branch = false;

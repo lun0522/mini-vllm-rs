@@ -11,6 +11,8 @@ use crate::utils::child_process::ChildProcess;
 use crate::utils::domain_socket;
 use anyhow::Context;
 use anyhow::Result;
+use log::error;
+use log::info;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -74,7 +76,7 @@ impl ModelRunnerProcess {
     }
 
     pub(crate) async fn shutdown(mut self) -> Result<()> {
-        log::info!("Shutting down the model runner process");
+        info!("Shutting down the model runner process");
         let shutdown_result = self
             .rpc_client
             .handle_command(ModelRunnerCommand {
@@ -97,10 +99,10 @@ impl ModelRunnerProcess {
 impl Drop for ModelRunnerProcess {
     fn drop(&mut self) {
         if let Err(error) = self.child_process.stop() {
-            log::error!("Failed to stop the model runner during cleanup: {error:#}");
+            error!("Failed to stop the model runner during cleanup: {error:#}");
         }
         if let Err(error) = domain_socket::remove(&self.socket_path, "model runner socket") {
-            log::error!("Failed to remove the model runner socket: {error:#}");
+            error!("Failed to remove the model runner socket: {error:#}");
         }
     }
 }

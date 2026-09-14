@@ -14,12 +14,14 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
 const CONNECTION_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 pub(crate) fn ensure_available(socket_path: &Path, socket_name: &str) -> Result<()> {
-    if socket_path
+    let socket_exists = socket_path
         .try_exists()
-        .with_context(|| format!("failed to inspect the {socket_name} path"))?
-    {
-        anyhow::bail!("{socket_name} '{}' already exists", socket_path.display());
-    }
+        .with_context(|| format!("failed to inspect the {socket_name} path"))?;
+    anyhow::ensure!(
+        !socket_exists,
+        "{socket_name} '{}' already exists",
+        socket_path.display()
+    );
     Ok(())
 }
 

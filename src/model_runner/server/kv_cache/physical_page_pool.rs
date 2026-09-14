@@ -3,6 +3,7 @@ use super::utils::pool_page;
 use super::utils::TOKEN_DIMENSION;
 use crate::models::ModelInfo;
 use anyhow::bail;
+use anyhow::ensure;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::Device;
@@ -82,13 +83,12 @@ impl PhysicalPagePool {
         let page_size_bytes = model_info.kv_cache_bytes_per_token() * per_page_token_count;
         let per_pool_size_bytes = total_size_bytes / 2;
         let per_pool_page_count = per_pool_size_bytes / page_size_bytes;
-        if per_pool_page_count == 0 {
-            bail!(
-                "paged KV cache size {} bytes cannot hold one \
-                 {per_page_token_count}-token page per pool",
-                total_size_bytes.separate_with_commas()
-            );
-        }
+        ensure!(
+            per_pool_page_count > 0,
+            "paged KV cache size {} bytes cannot hold one \
+             {per_page_token_count}-token page per pool",
+            total_size_bytes.separate_with_commas()
+        );
         Ok(Self {
             per_page_token_count,
             page_count: per_pool_page_count,
@@ -194,9 +194,11 @@ impl PhysicalPagePool {
         input_offset: usize,
         token_count: usize,
     ) -> Result<()> {
-        if !self.page_states[page_id.0].is_writable() {
-            bail!("cannot mutate written physical page {}", page_id.0);
-        }
+        ensure!(
+            self.page_states[page_id.0].is_writable(),
+            "cannot mutate written physical page {}",
+            page_id.0
+        );
         let key_slice = key.narrow(TOKEN_DIMENSION, input_offset, token_count)?;
         let value_slice = value.narrow(TOKEN_DIMENSION, input_offset, token_count)?;
         let key_page = pool_page(&self.key_pool, page_id.0)?;
@@ -214,13 +216,12 @@ impl PhysicalPagePool {
         let required_page_count =
             self.compute_required_page_count(current_token_count, appending_token_count);
         let available_page_count = self.free_page_ids.len();
-        if required_page_count > available_page_count {
-            bail!(
-                "paged KV cache requires {required_page_count} additional physical pages but only \
-                 {available_page_count} of {} are available",
-                self.page_count
-            );
-        }
+        ensure!(
+            required_page_count <= available_page_count,
+            "paged KV cache requires {required_page_count} additional physical pages but only \
+             {available_page_count} of {} are available",
+            self.page_count
+        );
         Ok(())
     }
 

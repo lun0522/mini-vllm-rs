@@ -5,6 +5,8 @@ use crate::utils::child_process::ChildProcess;
 use crate::utils::domain_socket;
 use anyhow::Context;
 use anyhow::Result;
+use log::error;
+use log::info;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -65,7 +67,7 @@ impl RequestHandlerProcess {
     }
 
     pub(crate) async fn shutdown(mut self) -> Result<()> {
-        log::info!("Shutting down the request handler process");
+        info!("Shutting down the request handler process");
         let shutdown_result = self
             .rpc_client
             .shutdown(Shutdown {})
@@ -87,10 +89,10 @@ impl RequestHandlerProcess {
 impl Drop for RequestHandlerProcess {
     fn drop(&mut self) {
         if let Err(error) = self.child_process.stop() {
-            log::error!("Failed to stop the request handler during cleanup: {error:#}");
+            error!("Failed to stop the request handler during cleanup: {error:#}");
         }
         if let Err(error) = domain_socket::remove(&self.socket_path, "request handler socket") {
-            log::error!("Failed to remove the request handler socket: {error:#}");
+            error!("Failed to remove the request handler socket: {error:#}");
         }
     }
 }

@@ -8,9 +8,11 @@ use crate::models::CachedKeyValue;
 use crate::models::ModelInfo;
 use crate::models::ModelRole;
 use anyhow::bail;
+use anyhow::ensure;
 use anyhow::Result;
 use candle_core::Device;
 use candle_core::Tensor;
+use log::info;
 use thousands::Separable;
 
 #[derive(Default)]
@@ -59,13 +61,12 @@ impl ContiguousKvCache {
         let per_pool_size_bytes = total_size_bytes / 2;
         let per_layer_token_capacity =
             per_pool_size_bytes / model_info.layer_count / model_info.kv_cache_bytes_per_token();
-        if per_layer_token_capacity == 0 {
-            bail!(
-                "contiguous KV cache size {} bytes cannot hold one token for each of {} layers",
-                total_size_bytes.separate_with_commas(),
-                model_info.layer_count
-            );
-        }
+        ensure!(
+            per_layer_token_capacity > 0,
+            "contiguous KV cache size {} bytes cannot hold one token for each of {} layers",
+            total_size_bytes.separate_with_commas(),
+            model_info.layer_count
+        );
         let cache = Self {
             per_layer_token_capacity,
             key_pool: allocate_pool(
@@ -85,7 +86,7 @@ impl ContiguousKvCache {
             * model_info.layer_count
             * per_layer_token_capacity
             * model_info.kv_cache_bytes_per_token();
-        log::info!(
+        info!(
             "Created {model_role} model contiguous KV cache with capacity for \
              {per_layer_token_capacity} cached tokens using {} bytes",
             allocated_size_bytes.separate_with_commas()
@@ -128,13 +129,12 @@ impl ContiguousKvCache {
         let appending_token_count =
             validate_cache_append(current_token_count, layer_index, start_position, key, value)?;
         let available_token_count = self.per_layer_token_capacity - current_token_count;
-        if appending_token_count > available_token_count {
-            bail!(
-                "contiguous KV cache requires {appending_token_count} additional tokens for layer \
-                 {layer_index} but only {available_token_count} of {} are available",
-                self.per_layer_token_capacity
-            );
-        }
+        ensure!(
+            appending_token_count <= available_token_count,
+            "contiguous KV cache requires {appending_token_count} additional tokens for layer \
+             {layer_index} but only {available_token_count} of {} are available",
+            self.per_layer_token_capacity
+        );
 
         let key_layer = pool_page(&self.key_pool, layer_index)?;
         let value_layer = pool_page(&self.value_pool, layer_index)?;

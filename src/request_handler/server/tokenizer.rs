@@ -32,9 +32,10 @@ impl TokenizerWrapper {
         validate_model_vocabulary(&tokenizer, target_model_metadata, ModelRole::Target)?;
         let architecture = ModelArchitecture::try_from(target_model_metadata.architecture)
             .context("model runner reported an invalid model architecture")?;
-        if architecture == ModelArchitecture::Unspecified {
-            anyhow::bail!("model architecture is unspecified");
-        }
+        anyhow::ensure!(
+            architecture != ModelArchitecture::Unspecified,
+            "model architecture is unspecified"
+        );
         let end_of_sequence_token_ids =
             resolve_end_of_sequence_token_ids(&tokenizer, architecture)?;
 
@@ -72,9 +73,10 @@ impl TokenizerWrapper {
             .map_err(Error::msg)
             .context("failed to tokenize the prompt")?;
         let input_token_ids = encoding.get_ids().to_vec();
-        if input_token_ids.is_empty() {
-            anyhow::bail!("formatted prompt produced no token IDs");
-        }
+        anyhow::ensure!(
+            !input_token_ids.is_empty(),
+            "formatted prompt produced no token IDs"
+        );
         let end_of_sequence_token_ids = if request.ignore_eos_tokens {
             Vec::new()
         } else {
@@ -148,9 +150,10 @@ fn load_tokenizer(path: &Path) -> Result<Tokenizer> {
 }
 
 fn validate_generation_parameters(request: &GenerateText) -> Result<()> {
-    if !request.repeat_penalty.is_finite() || request.repeat_penalty <= 0.0 {
-        anyhow::bail!("repeat_penalty must be finite and greater than zero");
-    }
+    anyhow::ensure!(
+        request.repeat_penalty.is_finite() && request.repeat_penalty > 0.0,
+        "repeat_penalty must be finite and greater than zero"
+    );
     Ok(())
 }
 
@@ -169,13 +172,12 @@ fn resolve_end_of_sequence_token_ids(
         .iter()
         .filter_map(|token| tokenizer.token_to_id(token))
         .collect();
-    if token_ids.is_empty() {
-        anyhow::bail!(
-            "tokenizer does not contain any supported end-of-sequence token for {architecture:?}: \
-             {}",
-            tokens.join(", ")
-        );
-    }
+    anyhow::ensure!(
+        !token_ids.is_empty(),
+        "tokenizer does not contain any supported end-of-sequence token for {architecture:?}: \
+         {}",
+        tokens.join(", ")
+    );
     Ok(token_ids)
 }
 
@@ -227,22 +229,20 @@ fn validate_model_vocabulary(
         .copied()
         .max()
         .map_or(0, |maximum_id| u64::from(maximum_id) + 1);
-    if model_metadata.input_vocabulary_size < required_size {
-        anyhow::bail!(
-            "{model_role} model input vocabulary has {} entries but the shared tokenizer requires \
-             token IDs through {}",
-            model_metadata.input_vocabulary_size,
-            required_size.saturating_sub(1),
-        );
-    }
-    if model_metadata.output_vocabulary_size < required_size {
-        anyhow::bail!(
-            "{model_role} model output vocabulary has {} entries but the shared tokenizer requires \
-             token IDs through {}",
-            model_metadata.output_vocabulary_size,
-            required_size.saturating_sub(1),
-        );
-    }
+    anyhow::ensure!(
+        model_metadata.input_vocabulary_size >= required_size,
+        "{model_role} model input vocabulary has {} entries but the shared tokenizer requires \
+         token IDs through {}",
+        model_metadata.input_vocabulary_size,
+        required_size.saturating_sub(1),
+    );
+    anyhow::ensure!(
+        model_metadata.output_vocabulary_size >= required_size,
+        "{model_role} model output vocabulary has {} entries but the shared tokenizer requires \
+         token IDs through {}",
+        model_metadata.output_vocabulary_size,
+        required_size.saturating_sub(1),
+    );
     Ok(())
 }
 

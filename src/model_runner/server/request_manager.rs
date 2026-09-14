@@ -2,6 +2,7 @@ use crate::proto::model_runner::generate_text_event;
 use crate::proto::model_runner::GenerateTextEvent;
 use crate::proto::model_runner::GenerateTextRequest;
 use anyhow::bail;
+use anyhow::ensure;
 use anyhow::Context;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -91,9 +92,10 @@ impl RequestManager {
 
     pub(super) fn add_request(&mut self, request: InferenceRequest) -> Result<()> {
         let request_id = request.generate_text.request_id;
-        if self.request_states.contains_key(&request_id) {
-            bail!("inference request {request_id} already exists");
-        }
+        ensure!(
+            !self.request_states.contains_key(&request_id),
+            "inference request {request_id} already exists"
+        );
         self.request_states.insert(
             request_id,
             RequestState::Queued {
