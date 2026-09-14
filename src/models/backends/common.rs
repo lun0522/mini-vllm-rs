@@ -1,3 +1,5 @@
+use crate::models::BatchedForwardInput;
+use crate::models::BatchedKvCache;
 use crate::models::CachedKeyValue;
 use crate::models::ForwardContext;
 use crate::models::KvCache;
@@ -105,17 +107,6 @@ pub(super) struct BatchedForwardContext {
     pub(super) cached_kv_len: usize,
     pub(super) q_start_index: usize,
     pub(super) q_len: usize,
-}
-
-#[expect(dead_code, reason = "reserved for continuous batching")]
-pub(super) trait BatchedKvCache {
-    fn append(
-        &mut self,
-        request_id: u64,
-        layer_index: usize,
-        key: &Tensor,
-        value: &Tensor,
-    ) -> anyhow::Result<CachedKeyValue>;
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +274,7 @@ impl TransformerBlock {
     /// `packed_` values contain data from every request, while `request_` values
     /// contain one request's slice. `full` K/V values include both the cached
     /// prefix and the current query tokens.
+    #[expect(dead_code, reason = "reserved for continuous batching")]
     pub(super) fn forward_batched_attention(
         &self,
         packed_x: &Tensor,
@@ -290,8 +282,6 @@ impl TransformerBlock {
         layer_index: usize,
         cache: &mut dyn BatchedKvCache,
     ) -> Result<Tensor> {
-        validate_batched_attention_input(packed_x, contexts)?;
-
         // packed_x: [1, packed_q_len, embedding_len].
         // packed_q: [1, num_q_heads, packed_q_len, head_dim].
         // packed_k, packed_v: [1, num_kv_heads, packed_q_len, head_dim].
@@ -408,29 +398,29 @@ impl TransformerBlock {
 }
 
 pub(super) struct TransformerModelWeights {
-    tok_embeddings: Embedding,
+    token_embeddings: Embedding,
     layers: Vec<TransformerBlock>,
-    norm: RmsNorm,
-    output: QMatMul,
+    output_norm: RmsNorm,
+    output_proj: QMatMul,
     mask_cache: CausalMaskCache,
-    span: tracing::Span,
+    span_model: tracing::Span,
     span_output: tracing::Span,
 }
 
 impl TransformerModelWeights {
     pub(super) fn new(
-        tok_embeddings: Embedding,
+        token_embeddings: Embedding,
         layers: Vec<TransformerBlock>,
-        norm: RmsNorm,
-        output: QMatMul,
+        output_norm: RmsNorm,
+        output_proj: QMatMul,
     ) -> Self {
         Self {
-            tok_embeddings,
+            token_embeddings,
             layers,
-            norm,
-            output,
+            output_norm,
+            output_proj,
             mask_cache: CausalMaskCache::default(),
-            span: tracing::span!(tracing::Level::TRACE, "model"),
+            span_model: tracing::span!(tracing::Level::TRACE, "model"),
             span_output: tracing::span!(tracing::Level::TRACE, "output"),
         }
     }
@@ -441,7 +431,7 @@ impl TransformerModelWeights {
             layer_count: self.layers.len(),
             num_kv_heads: attention.num_kv_heads,
             head_dim: attention.head_dim,
-            activation_dtype: self.tok_embeddings.embeddings().dtype(),
+            activation_dtype: self.token_embeddings.embeddings().dtype(),
         }
     }
 
@@ -455,7 +445,41 @@ impl TransformerModelWeights {
         let x = self.forward_hidden(x, context, kv_cache)?;
         let x = x.i((.., seq_len - 1, ..))?;
         let _enter = self.span_output.enter();
-        self.output.forward(&x)
+        self.output_proj.forward(&x)?.squeeze(0)
+    }
+
+    #[expect(dead_code, reason = "reserved for continuous batching")]
+    pub(super) fn forward_batched(
+        &mut self,
+        inputs: &[BatchedForwardInput],
+        kv_cache: &mut dyn BatchedKvCache,
+    ) -> Result<Vec<Tensor>> {
+        let _enter = self.span_model.enter();
+
+        // packed_input: [1, packed_q_len].
+        let (packed_input, contexts) = prepare_batched_forward(inputs)?;
+        // packed_hidden_states: [1, packed_q_len, embedding_len].
+        let mut packed_hidden_states = self.token_embeddings.forward(&packed_input)?;
+        for (layer_index, layer) in self.layers.iter().enumerate() {
+            packed_hidden_states =
+                layer.forward_batched(&packed_hidden_states, &contexts, layer_index, kv_cache)?;
+        }
+        let packed_hidden_states = self.output_norm.forward(&packed_hidden_states)?;
+        // packed_last_hidden_states: [request_count, embedding_len].
+        let packed_last_hidden_states =
+            select_batched_last_hidden_states(&packed_hidden_states, &contexts)?;
+
+        let _enter = self.span_output.enter();
+        // packed_logits: [request_count, vocabulary_size].
+        let packed_logits = self.output_proj.forward(&packed_last_hidden_states)?;
+        (0..inputs.len())
+            .map(|request_index| {
+                // request_logits: [vocabulary_size].
+                packed_logits
+                    .narrow(/* dim */ 0, request_index, /* len */ 1)?
+                    .squeeze(0)
+            })
+            .collect()
     }
 
     pub(super) fn forward_for_speculative_verification(
@@ -466,7 +490,7 @@ impl TransformerModelWeights {
     ) -> Result<Tensor> {
         let x = self.forward_hidden(x, context, kv_cache)?;
         let _enter = self.span_output.enter();
-        self.output.forward(&x)
+        self.output_proj.forward(&x)
     }
 
     fn forward_hidden(
@@ -480,12 +504,12 @@ impl TransformerModelWeights {
         let mask = self
             .mask_cache
             .get_or_create(seq_len, index_pos, x.device())?;
-        let _enter = self.span.enter();
-        let mut layer_in = self.tok_embeddings.forward(x)?;
+        let _enter = self.span_model.enter();
+        let mut layer_in = self.token_embeddings.forward(x)?;
         for (layer_index, layer) in self.layers.iter().enumerate() {
             layer_in = layer.forward(&layer_in, mask.as_ref(), context, layer_index, kv_cache)?;
         }
-        self.norm.forward(&layer_in)
+        self.output_norm.forward(&layer_in)
     }
 }
 
@@ -523,25 +547,72 @@ fn apply_projection(input: &Tensor, proj: &QMatMul, bias: Option<&Tensor>) -> Re
     }
 }
 
-fn validate_batched_attention_input(x: &Tensor, contexts: &[BatchedForwardContext]) -> Result<()> {
-    if contexts.is_empty() {
-        candle_core::bail!("batched attention requires at least one request")
+#[expect(dead_code, reason = "reserved for continuous batching")]
+fn validate_batched_forward_inputs(inputs: &[BatchedForwardInput]) -> Result<()> {
+    if inputs.is_empty() {
+        candle_core::bail!("batched forward requires at least one request")
     }
-    let (batch_size, packed_q_len, _) = x.dims3()?;
-    if batch_size != 1 {
-        candle_core::bail!("batched attention requires batch size 1")
-    }
-    let mut expected_q_start_index = 0;
-    for context in contexts {
-        if context.q_len == 0 || context.q_start_index != expected_q_start_index {
-            candle_core::bail!("batched attention contexts must cover contiguous query ranges")
+    for input in inputs {
+        let (batch_size, q_len) = input.input.dims2()?;
+        if batch_size != 1 {
+            candle_core::bail!("each batched forward input must have batch size 1")
         }
-        expected_q_start_index += context.q_len;
-    }
-    if expected_q_start_index != packed_q_len {
-        candle_core::bail!("batched attention contexts must cover every packed query token")
+        if q_len == 0 {
+            candle_core::bail!("each batched forward input must contain at least one token")
+        }
     }
     Ok(())
+}
+
+#[expect(dead_code, reason = "reserved for continuous batching")]
+fn prepare_batched_forward(
+    inputs: &[BatchedForwardInput],
+) -> Result<(Tensor, Vec<BatchedForwardContext>)> {
+    validate_batched_forward_inputs(inputs)?;
+
+    // Each input: [1, q_len].
+    let mut input_tensors = Vec::with_capacity(inputs.len());
+    let mut contexts = Vec::with_capacity(inputs.len());
+    let mut q_start_index = 0;
+    for input in inputs {
+        let (_, q_len) = input.input.dims2()?;
+        input_tensors.push(&input.input);
+        contexts.push(BatchedForwardContext {
+            request_id: input.request_id,
+            start_pos: input.start_position,
+            cached_kv_len: input.start_position,
+            q_start_index,
+            q_len,
+        });
+        q_start_index += q_len;
+    }
+
+    // packed_input: [1, packed_q_len].
+    let packed_input = Tensor::cat(&input_tensors, /* dim */ 1)?;
+    Ok((packed_input, contexts))
+}
+
+#[expect(dead_code, reason = "reserved for continuous batching")]
+fn select_batched_last_hidden_states(
+    packed_hidden_states: &Tensor,
+    contexts: &[BatchedForwardContext],
+) -> Result<Tensor> {
+    let mut request_last_hidden_states = Vec::with_capacity(contexts.len());
+    for context in contexts {
+        // request_last_hidden_state: [1, 1, embedding_len].
+        let request_last_hidden_state = packed_hidden_states.narrow(
+            /* dim */ 1,
+            context.q_start_index + context.q_len - 1,
+            /* len */ 1,
+        )?;
+        request_last_hidden_states.push(request_last_hidden_state);
+    }
+    // packed_last_hidden_states: [request_count, embedding_len].
+    Tensor::cat(
+        &request_last_hidden_states.iter().collect::<Vec<_>>(),
+        /* dim */ 1,
+    )?
+    .squeeze(0)
 }
 
 fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: &Tensor) -> Result<Tensor> {

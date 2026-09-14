@@ -520,7 +520,7 @@ impl RequestExecutionState {
     ) -> Result<u32> {
         let input = model.create_input_tensor(input_tokens)?;
         let logits = model.forward(self.request_id, &input, start_position)?;
-        let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
+        let logits = logits.to_dtype(DType::F32)?;
         self.sample_logits(&logits, appended_tokens, logits_processor)
     }
 
@@ -623,6 +623,8 @@ mod tests {
     use crate::model_runner::server::kv_cache::create_kv_cache;
     use crate::model_runner::KvCacheType;
     use crate::models::loaded_model::LoadedModel;
+    use crate::models::BatchedForwardInput;
+    use crate::models::BatchedKvCache;
     use crate::models::CausalLanguageModel;
     use crate::models::ForwardContext;
     use crate::models::KvCache;
@@ -662,7 +664,15 @@ mod tests {
             });
             let mut logits = vec![0.0f32; 8];
             logits[self.next_token as usize] = 1.0;
-            Tensor::new(logits.as_slice(), &Device::Cpu)?.reshape((1, 1, 8))
+            Tensor::new(logits.as_slice(), &Device::Cpu)
+        }
+
+        fn forward_batched(
+            &mut self,
+            _inputs: &[BatchedForwardInput],
+            _kv_cache: &mut dyn BatchedKvCache,
+        ) -> candle_core::Result<Vec<Tensor>> {
+            candle_core::bail!("batched forward is not used by text-generation unit tests")
         }
 
         fn forward_for_speculative_verification(
@@ -671,7 +681,7 @@ mod tests {
             context: &ForwardContext,
             kv_cache: &mut dyn KvCache,
         ) -> candle_core::Result<Tensor> {
-            self.forward(input, context, kv_cache)
+            self.forward(input, context, kv_cache)?.reshape((1, 1, 8))
         }
     }
 

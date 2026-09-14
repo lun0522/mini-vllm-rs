@@ -10,13 +10,22 @@ use std::fmt;
 pub(crate) trait CausalLanguageModel: Send {
     fn info(&self) -> &ModelInfo;
 
-    /// Returns next-token logits shaped `(batch_size, 1, vocabulary_size)`.
+    /// Returns next-token logits shaped `(vocabulary_size)`.
     fn forward(
         &mut self,
         input: &Tensor,
         context: &ForwardContext,
         kv_cache: &mut dyn KvCache,
     ) -> candle_core::Result<Tensor>;
+
+    /// Returns one next-token logits tensor per request, each shaped
+    /// `(vocabulary_size)`, in input order.
+    #[expect(dead_code, reason = "reserved for continuous batching")]
+    fn forward_batched(
+        &mut self,
+        inputs: &[BatchedForwardInput],
+        kv_cache: &mut dyn BatchedKvCache,
+    ) -> candle_core::Result<Vec<Tensor>>;
 
     /// Returns logits for every input position, shaped
     /// `(batch_size, sequence_length, vocabulary_size)`. Speculative decoding uses these logits
@@ -35,12 +44,33 @@ pub(crate) struct ForwardContext {
     pub(crate) start_position: usize,
 }
 
+/// Provides one request's input and position to a batched model forward pass.
+#[expect(dead_code, reason = "reserved for continuous batching")]
+pub(crate) struct BatchedForwardInput {
+    pub(crate) request_id: u64,
+    pub(crate) input: Tensor,
+    pub(crate) start_position: usize,
+}
+
 /// Provides request-specific key and value tensors to model layers.
 pub(crate) trait KvCache: Send {
     /// Stores newly computed key/value tensors and returns the complete layer cache for attention.
     fn append(
         &mut self,
         context: &ForwardContext,
+        layer_index: usize,
+        key: &Tensor,
+        value: &Tensor,
+    ) -> anyhow::Result<CachedKeyValue>;
+}
+
+/// Provides request-specific key and value tensors during batched model execution.
+#[expect(dead_code, reason = "reserved for continuous batching")]
+pub(crate) trait BatchedKvCache: Send {
+    /// Stores newly computed key/value tensors and returns the complete layer cache for attention.
+    fn append(
+        &mut self,
+        request_id: u64,
         layer_index: usize,
         key: &Tensor,
         value: &Tensor,

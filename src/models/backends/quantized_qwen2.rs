@@ -20,6 +20,8 @@ use super::common::RotaryEmbeddingType;
 use super::common::SwiGluMlp;
 use super::common::TransformerBlock;
 use super::common::TransformerModelWeights;
+use crate::models::BatchedForwardInput;
+use crate::models::BatchedKvCache;
 use crate::models::CausalLanguageModel;
 use crate::models::ForwardContext;
 use crate::models::KvCache;
@@ -60,7 +62,15 @@ impl CausalLanguageModel for Qwen2Backend {
         context: &ForwardContext,
         kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
-        self.model.forward(input, context, kv_cache)?.unsqueeze(1)
+        self.model.forward(input, context, kv_cache)
+    }
+
+    fn forward_batched(
+        &mut self,
+        inputs: &[BatchedForwardInput],
+        kv_cache: &mut dyn BatchedKvCache,
+    ) -> Result<Vec<Tensor>> {
+        self.model.forward_batched(inputs, kv_cache)
     }
 
     fn forward_for_speculative_verification(
@@ -98,9 +108,9 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
     let (cos, sin) =
         precompute_rotary_embedding_frequencies(head_dim, rope_freq_base, context_length, device)?;
     let neg_inf = Tensor::new(f32::NEG_INFINITY, device)?;
-    let tok_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
-    let tok_embeddings = tok_embeddings.dequantize(device)?;
-    let norm = RmsNorm::from_qtensor(
+    let token_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
+    let token_embeddings = token_embeddings.dequantize(device)?;
+    let output_norm = RmsNorm::from_qtensor(
         ct.tensor(reader, "output_norm.weight", device)?,
         rms_norm_eps,
     )?;
@@ -170,9 +180,9 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
     }
 
     Ok(TransformerModelWeights::new(
-        Embedding::new(tok_embeddings, embedding_length),
+        Embedding::new(token_embeddings, embedding_length),
         layers,
-        norm,
+        output_norm,
         output,
     ))
 }
