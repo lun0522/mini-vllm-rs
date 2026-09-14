@@ -100,7 +100,6 @@ impl Module for SwiGluMlp {
     }
 }
 
-#[expect(dead_code, reason = "reserved for continuous batching")]
 pub(super) struct BatchedForwardContext {
     pub(super) request_id: u64,
     pub(super) start_pos: usize,
@@ -155,7 +154,6 @@ impl TransformerBlock {
     }
 
     /// Runs one complete transformer block over packed requests.
-    #[expect(dead_code, reason = "reserved for continuous batching")]
     pub(super) fn forward_batched(
         &self,
         x: &Tensor,
@@ -274,7 +272,6 @@ impl TransformerBlock {
     /// `packed_` values contain data from every request, while `request_` values
     /// contain one request's slice. `full` K/V values include both the cached
     /// prefix and the current query tokens.
-    #[expect(dead_code, reason = "reserved for continuous batching")]
     pub(super) fn forward_batched_attention(
         &self,
         packed_x: &Tensor,
@@ -316,7 +313,13 @@ impl TransformerBlock {
                 key: request_full_cached_k,
                 value: request_full_cached_v,
             } = cache
-                .append(context.request_id, layer_index, &request_k, &request_v)
+                .append(
+                    context.request_id,
+                    layer_index,
+                    context.cached_kv_len,
+                    &request_k,
+                    &request_v,
+                )
                 .map_err(candle_core::Error::wrap)?;
             let (_, _, request_full_cached_kv_len, _) = request_full_cached_k.dims4()?;
             let expected_full_cached_kv_len = context.cached_kv_len + context.q_len;
@@ -448,7 +451,6 @@ impl TransformerModelWeights {
         self.output_proj.forward(&x)?.squeeze(0)
     }
 
-    #[expect(dead_code, reason = "reserved for continuous batching")]
     pub(super) fn forward_batched(
         &mut self,
         inputs: &[BatchedForwardInput],
@@ -547,7 +549,6 @@ fn apply_projection(input: &Tensor, proj: &QMatMul, bias: Option<&Tensor>) -> Re
     }
 }
 
-#[expect(dead_code, reason = "reserved for continuous batching")]
 fn validate_batched_forward_inputs(inputs: &[BatchedForwardInput]) -> Result<()> {
     if inputs.is_empty() {
         candle_core::bail!("batched forward requires at least one request")
@@ -564,7 +565,6 @@ fn validate_batched_forward_inputs(inputs: &[BatchedForwardInput]) -> Result<()>
     Ok(())
 }
 
-#[expect(dead_code, reason = "reserved for continuous batching")]
 fn prepare_batched_forward(
     inputs: &[BatchedForwardInput],
 ) -> Result<(Tensor, Vec<BatchedForwardContext>)> {
@@ -592,7 +592,6 @@ fn prepare_batched_forward(
     Ok((packed_input, contexts))
 }
 
-#[expect(dead_code, reason = "reserved for continuous batching")]
 fn select_batched_last_hidden_states(
     packed_hidden_states: &Tensor,
     contexts: &[BatchedForwardContext],

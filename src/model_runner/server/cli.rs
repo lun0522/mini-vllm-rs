@@ -16,6 +16,9 @@ pub(crate) struct ModelRunnerProcessArgs {
     /// number of tokens proposed by the draft model per speculative decoding step
     #[argh(option)]
     pub(super) draft_token_count: usize,
+    /// enable continuous batching
+    #[argh(switch)]
+    pub(super) enable_continuous_batching: bool,
     /// device used for model inference
     #[argh(option)]
     pub(super) inference_device: InferenceDevice,

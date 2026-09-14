@@ -29,9 +29,10 @@ use crate::models::CausalLanguageModel;
 use crate::models::ForwardContext;
 use crate::models::KvCache;
 use crate::models::ModelInfo;
-use anyhow::Result as AnyhowResult;
+use anyhow::Result;
 use candle::quantized::gguf_file;
-use candle::{Device, Result, Tensor};
+use candle::Device;
+use candle::Tensor;
 use candle_core as candle;
 use candle_nn::Embedding;
 use candle_transformers::quantized_nn::RmsNorm;
@@ -47,7 +48,7 @@ impl LlamaBackend {
         content: gguf_file::Content,
         gguf_file: &mut File,
         device: &Device,
-    ) -> AnyhowResult<Self> {
+    ) -> Result<Self> {
         let model = load_model_weights_from_gguf(content, gguf_file, device)?;
         let model_info = model.model_info();
         Ok(Self { model, model_info })
@@ -65,7 +66,7 @@ impl CausalLanguageModel for LlamaBackend {
         context: &ForwardContext,
         kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
-        self.model.forward(input, context, kv_cache)
+        Ok(self.model.forward(input, context, kv_cache)?)
     }
 
     fn forward_batched(
@@ -73,7 +74,7 @@ impl CausalLanguageModel for LlamaBackend {
         inputs: &[BatchedForwardInput],
         kv_cache: &mut dyn BatchedKvCache,
     ) -> Result<Vec<Tensor>> {
-        self.model.forward_batched(inputs, kv_cache)
+        Ok(self.model.forward_batched(inputs, kv_cache)?)
     }
 
     fn forward_for_speculative_verification(
@@ -82,8 +83,9 @@ impl CausalLanguageModel for LlamaBackend {
         context: &ForwardContext,
         kv_cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
-        self.model
-            .forward_for_speculative_verification(input, context, kv_cache)
+        Ok(self
+            .model
+            .forward_for_speculative_verification(input, context, kv_cache)?)
     }
 }
 
@@ -91,7 +93,7 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
     ct: gguf_file::Content,
     reader: &mut R,
     device: &Device,
-) -> Result<TransformerModelWeights> {
+) -> candle::Result<TransformerModelWeights> {
     let md_get = |s: &str| match ct.metadata.get(s) {
         None => candle::bail!("cannot find {s} in metadata"),
         Some(v) => Ok(v),

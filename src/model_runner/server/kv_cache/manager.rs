@@ -1,6 +1,7 @@
 use super::contiguous_cache::RequestContiguousCacheState;
 use super::paged_cache::RequestPagedCacheState;
 use super::KvCacheBackend;
+use crate::models::BatchedKvCache;
 use crate::models::CachedKeyValue;
 use crate::models::ForwardContext;
 use crate::models::KvCache;
@@ -165,6 +166,29 @@ impl KvCache for KvCacheManager {
     }
 }
 
+impl BatchedKvCache for KvCacheManager {
+    fn append(
+        &mut self,
+        request_id: u64,
+        layer_index: usize,
+        start_position: usize,
+        key: &Tensor,
+        value: &Tensor,
+    ) -> Result<CachedKeyValue> {
+        self.with_request_state(
+            request_id,
+            /* handle_contiguous */
+            |cache, request_state| {
+                cache.append(request_state, layer_index, start_position, key, value)
+            },
+            /* handle_paged */
+            |cache, request_state| {
+                cache.append(request_state, layer_index, start_position, key, value)
+            },
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,7 +210,7 @@ mod tests {
             &Device::Cpu,
             2,
             true,
-            16,
+            48,
         )?;
         Ok(KvCacheManager::new(KvCacheBackend::Paged(Box::new(cache))))
     }
@@ -209,6 +233,17 @@ mod tests {
         ))))
     }
 
+    fn cache_tensor(start: u32, token_count: usize) -> Result<Tensor> {
+        Ok(
+            Tensor::arange(start, start + token_count as u32, &Device::Cpu)?.reshape((
+                1,
+                1,
+                token_count,
+                1,
+            ))?,
+        )
+    }
+
     #[test]
     fn stores_independent_paged_states_by_request_id() -> Result<()> {
         let mut manager = paged_manager()?;
@@ -221,6 +256,29 @@ mod tests {
         assert!(manager.request_states.contains_key(&2));
         manager.remove_request(2)?;
         assert!(manager.request_states.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn batched_cache_appends_to_the_selected_request() -> Result<()> {
+        let mut manager = paged_manager()?;
+        manager.start_request(1)?;
+        manager.start_request(2)?;
+
+        let request_1_prefix = cache_tensor(10, 2)?;
+        BatchedKvCache::append(&mut manager, 1, 0, 0, &request_1_prefix, &request_1_prefix)?;
+        let request_2_prefix = cache_tensor(20, 1)?;
+        let request_2_cache =
+            BatchedKvCache::append(&mut manager, 2, 0, 0, &request_2_prefix, &request_2_prefix)?;
+        let request_1_suffix = cache_tensor(12, 1)?;
+        let request_1_cache =
+            BatchedKvCache::append(&mut manager, 1, 0, 2, &request_1_suffix, &request_1_suffix)?;
+
+        assert_eq!(
+            request_1_cache.key.flatten_all()?.to_vec1::<u32>()?,
+            [10, 11, 12]
+        );
+        assert_eq!(request_2_cache.key.flatten_all()?.to_vec1::<u32>()?, [20]);
         Ok(())
     }
 

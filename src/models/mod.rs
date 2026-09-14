@@ -2,6 +2,7 @@ mod backends;
 pub(crate) mod loaded_model;
 pub(crate) mod model_downloader;
 
+use anyhow::Result;
 use candle_core::DType;
 use candle_core::Tensor;
 use std::fmt;
@@ -16,16 +17,15 @@ pub(crate) trait CausalLanguageModel: Send {
         input: &Tensor,
         context: &ForwardContext,
         kv_cache: &mut dyn KvCache,
-    ) -> candle_core::Result<Tensor>;
+    ) -> Result<Tensor>;
 
     /// Returns one next-token logits tensor per request, each shaped
     /// `(vocabulary_size)`, in input order.
-    #[expect(dead_code, reason = "reserved for continuous batching")]
     fn forward_batched(
         &mut self,
         inputs: &[BatchedForwardInput],
         kv_cache: &mut dyn BatchedKvCache,
-    ) -> candle_core::Result<Vec<Tensor>>;
+    ) -> Result<Vec<Tensor>>;
 
     /// Returns logits for every input position, shaped
     /// `(batch_size, sequence_length, vocabulary_size)`. Speculative decoding uses these logits
@@ -35,7 +35,7 @@ pub(crate) trait CausalLanguageModel: Send {
         input: &Tensor,
         context: &ForwardContext,
         kv_cache: &mut dyn KvCache,
-    ) -> candle_core::Result<Tensor>;
+    ) -> Result<Tensor>;
 }
 
 /// Identifies the request and token position processed by one model forward pass.
@@ -45,7 +45,6 @@ pub(crate) struct ForwardContext {
 }
 
 /// Provides one request's input and position to a batched model forward pass.
-#[expect(dead_code, reason = "reserved for continuous batching")]
 pub(crate) struct BatchedForwardInput {
     pub(crate) request_id: u64,
     pub(crate) input: Tensor,
@@ -61,20 +60,20 @@ pub(crate) trait KvCache: Send {
         layer_index: usize,
         key: &Tensor,
         value: &Tensor,
-    ) -> anyhow::Result<CachedKeyValue>;
+    ) -> Result<CachedKeyValue>;
 }
 
 /// Provides request-specific key and value tensors during batched model execution.
-#[expect(dead_code, reason = "reserved for continuous batching")]
 pub(crate) trait BatchedKvCache: Send {
     /// Stores newly computed key/value tensors and returns the complete layer cache for attention.
     fn append(
         &mut self,
         request_id: u64,
         layer_index: usize,
+        start_position: usize,
         key: &Tensor,
         value: &Tensor,
-    ) -> anyhow::Result<CachedKeyValue>;
+    ) -> Result<CachedKeyValue>;
 }
 
 pub(crate) struct CachedKeyValue {

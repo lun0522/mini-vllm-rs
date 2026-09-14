@@ -1,4 +1,5 @@
 use crate::models::loaded_model::LoadedModel;
+use crate::models::BatchedForwardInput;
 use crate::models::ForwardContext;
 use crate::proto::model_runner::ModelMetadata;
 use anyhow::Result;
@@ -11,13 +12,19 @@ use super::kv_cache::KvCacheManager;
 pub(super) struct ModelInstance {
     model: LoadedModel,
     kv_cache_manager: KvCacheManager,
+    enable_continuous_batching: bool,
 }
 
 impl ModelInstance {
-    pub(super) fn new(model: LoadedModel, kv_cache: KvCacheBackend) -> Self {
+    pub(super) fn new(
+        model: LoadedModel,
+        kv_cache: KvCacheBackend,
+        enable_continuous_batching: bool,
+    ) -> Self {
         Self {
             model,
             kv_cache_manager: KvCacheManager::new(kv_cache),
+            enable_continuous_batching,
         }
     }
 
@@ -34,14 +41,32 @@ impl ModelInstance {
         request_id: u64,
         input: &Tensor,
         start_position: usize,
-    ) -> candle_core::Result<Tensor> {
-        let context = ForwardContext {
-            request_id,
-            start_position,
-        };
-        self.model
-            .model()
-            .forward(input, &context, &mut self.kv_cache_manager)
+    ) -> Result<Tensor> {
+        if self.enable_continuous_batching {
+            let batched_input = BatchedForwardInput {
+                request_id,
+                input: input.clone(),
+                start_position,
+            };
+            let mut outputs = self
+                .model
+                .model()
+                .forward_batched(&[batched_input], &mut self.kv_cache_manager)?;
+            anyhow::ensure!(
+                outputs.len() == 1,
+                "batched model forward returned {} outputs for one request",
+                outputs.len()
+            );
+            Ok(outputs.remove(0))
+        } else {
+            let context = ForwardContext {
+                request_id,
+                start_position,
+            };
+            self.model
+                .model()
+                .forward(input, &context, &mut self.kv_cache_manager)
+        }
     }
 
     pub(super) fn model_metadata(&self) -> ModelMetadata {
@@ -61,7 +86,7 @@ impl ModelInstance {
         request_id: u64,
         input: &Tensor,
         start_position: usize,
-    ) -> candle_core::Result<Tensor> {
+    ) -> Result<Tensor> {
         let context = ForwardContext {
             request_id,
             start_position,

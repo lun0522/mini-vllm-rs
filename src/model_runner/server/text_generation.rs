@@ -656,7 +656,7 @@ mod tests {
             input: &Tensor,
             context: &ForwardContext,
             _kv_cache: &mut dyn KvCache,
-        ) -> candle_core::Result<Tensor> {
+        ) -> Result<Tensor> {
             let token_ids = input.to_vec2::<u32>()?.into_iter().flatten().collect();
             self.forward_calls.lock().unwrap().push(ForwardCall {
                 start_position: context.start_position,
@@ -664,15 +664,15 @@ mod tests {
             });
             let mut logits = vec![0.0f32; 8];
             logits[self.next_token as usize] = 1.0;
-            Tensor::new(logits.as_slice(), &Device::Cpu)
+            Ok(Tensor::new(logits.as_slice(), &Device::Cpu)?)
         }
 
         fn forward_batched(
             &mut self,
             _inputs: &[BatchedForwardInput],
             _kv_cache: &mut dyn BatchedKvCache,
-        ) -> candle_core::Result<Vec<Tensor>> {
-            candle_core::bail!("batched forward is not used by text-generation unit tests")
+        ) -> Result<Vec<Tensor>> {
+            anyhow::bail!("batched forward is not used by text-generation unit tests")
         }
 
         fn forward_for_speculative_verification(
@@ -680,8 +680,8 @@ mod tests {
             input: &Tensor,
             context: &ForwardContext,
             kv_cache: &mut dyn KvCache,
-        ) -> candle_core::Result<Tensor> {
-            self.forward(input, context, kv_cache)?.reshape((1, 1, 8))
+        ) -> Result<Tensor> {
+            Ok(self.forward(input, context, kv_cache)?.reshape((1, 1, 8))?)
         }
     }
 
@@ -703,7 +703,7 @@ mod tests {
             ModelRole::Target,
             /* total_size_bytes */ 128,
         )?;
-        Ok((ModelInstance::new(model, kv_cache), forward_calls))
+        Ok((ModelInstance::new(model, kv_cache, false), forward_calls))
     }
 
     fn create_test_execution_state(
