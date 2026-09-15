@@ -216,7 +216,7 @@ impl RequestManager {
                 metrics,
             },
         );
-        Ok(step.phase)
+        Ok(step.generation_phase)
     }
 
     /// Advances all valid scheduled requests in one model execution.
@@ -436,7 +436,7 @@ impl RequestManager {
                     );
                     results.push(RequestExecutionResult {
                         request_id,
-                        result: Ok(generation_step.phase),
+                        result: Ok(generation_step.generation_phase),
                     });
                 }
                 Err(error) => {
@@ -534,7 +534,7 @@ mod tests {
             assert_eq!(state.request_id(), 7);
             Ok(GenerationStep {
                 output_token_ids: vec![42],
-                phase: GenerationPhase::Finished,
+                generation_phase: GenerationPhase::Finished,
             })
         })?;
         assert!(matches!(
@@ -613,7 +613,7 @@ mod tests {
             assert_eq!(execution_batch.len(), 1);
             Ok(vec![GenerationStep {
                 output_token_ids: Vec::new(),
-                phase: GenerationPhase::Finished,
+                generation_phase: GenerationPhase::Finished,
             }])
         });
 
@@ -652,7 +652,7 @@ mod tests {
         let error = match requests.advance_execution(7, |_| {
             Ok(GenerationStep {
                 output_token_ids: vec![42],
-                phase: GenerationPhase::Finished,
+                generation_phase: GenerationPhase::Finished,
             })
         }) {
             Ok(_) => panic!("token send should fail"),

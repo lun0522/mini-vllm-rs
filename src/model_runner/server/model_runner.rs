@@ -152,7 +152,7 @@ impl ModelRunner {
         &mut self,
         execution_batch: &mut text_generation::RequestExecutionBatch,
     ) -> Result<Vec<text_generation::GenerationStep>> {
-        execution_batch.run_batched_steps(&mut self.target)
+        execution_batch.run_batched_steps(&mut self.target, self.draft.as_mut())
     }
 
     pub(super) fn finish_request(
