@@ -5,12 +5,14 @@ use anyhow::bail;
 use anyhow::ensure;
 use anyhow::Context;
 use anyhow::Result;
+use log::error;
 use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tonic::Status;
 
+use super::scheduler::ScheduledRequest;
 use super::text_generation;
 use super::text_generation::CompletedGeneration;
 use super::text_generation::GenerationPhase;
@@ -72,15 +74,26 @@ pub(super) struct StartedRequest {
     pub(super) generation_phase: GenerationPhase,
 }
 
-pub(super) struct FinishedRequest {
+pub(super) struct RequestOutcome {
     pub(super) context: RequestContext,
     pub(super) metrics: RequestExecutionMetrics,
     pub(super) result: Result<CompletedGeneration>,
 }
 
+pub(super) struct RequestExecutionResult {
+    pub(super) request_id: u64,
+    pub(super) result: Result<GenerationPhase>,
+}
+
 /// Owns request payloads, execution state, response channels, and lifecycle timing.
 pub(super) struct RequestManager {
     request_states: HashMap<u64, RequestState>,
+}
+
+struct ScheduledExecutionMetadata {
+    request_id: u64,
+    context: RequestContext,
+    metrics: RequestExecutionMetrics,
 }
 
 impl RequestManager {
@@ -206,12 +219,59 @@ impl RequestManager {
         Ok(step.phase)
     }
 
+    /// Advances all valid scheduled requests in one model execution.
+    ///
+    /// Results may not preserve `scheduled_requests` order because invalid or
+    /// cancelled requests are recorded before the remaining batch executes.
+    /// Each result therefore includes its request ID.
+    pub(super) fn advance_executions(
+        &mut self,
+        scheduled_requests: &[ScheduledRequest],
+        run_batched_steps: impl FnOnce(
+            &mut text_generation::RequestExecutionBatch,
+        ) -> Result<Vec<GenerationStep>>,
+    ) -> Vec<RequestExecutionResult> {
+        let mut results = Vec::with_capacity(scheduled_requests.len());
+        let (execution_metadata, mut execution_batch) =
+            self.prepare_scheduled_executions(scheduled_requests, &mut results);
+        if execution_batch.is_empty() {
+            return results;
+        }
+
+        match run_batched_steps(&mut execution_batch) {
+            Ok(generation_steps) if generation_steps.len() == execution_batch.len() => {
+                self.apply_generation_steps(
+                    execution_metadata,
+                    execution_batch,
+                    generation_steps,
+                    &mut results,
+                );
+            }
+            Ok(generation_steps) => {
+                let error = anyhow::anyhow!(
+                    "model execution returned {} steps for {} requests",
+                    generation_steps.len(),
+                    execution_batch.len()
+                );
+                self.fail_scheduled_executions(execution_metadata, error, &mut results);
+            }
+            Err(error) => self.fail_scheduled_executions(execution_metadata, error, &mut results),
+        };
+        results
+    }
+
+    pub(super) fn has_started_execution(&self, request_id: u64) -> bool {
+        self.request_states
+            .get(&request_id)
+            .is_some_and(|state| !matches!(state, RequestState::Queued { .. }))
+    }
+
     /// Removes an executing request and applies its model-side completion operation.
     pub(super) fn finish_request(
         &mut self,
         request_id: u64,
         complete_execution: impl FnOnce(RequestExecutionState) -> Result<CompletedGeneration>,
-    ) -> Result<FinishedRequest> {
+    ) -> Result<RequestOutcome> {
         let request = self.remove_request(request_id)?;
         let RequestState::Executing {
             context,
@@ -222,7 +282,7 @@ impl RequestManager {
             self.request_states.insert(request_id, request);
             bail!("inference request {request_id} is not executing");
         };
-        Ok(FinishedRequest {
+        Ok(RequestOutcome {
             context,
             metrics,
             result: complete_execution(*execution_state),
@@ -234,7 +294,7 @@ impl RequestManager {
         &mut self,
         request_id: u64,
         error: anyhow::Error,
-    ) -> Result<FinishedRequest> {
+    ) -> Result<RequestOutcome> {
         let request = self.remove_request(request_id)?;
         let (context, metrics) = match request {
             RequestState::Executing {
@@ -252,7 +312,7 @@ impl RequestManager {
                 bail!("inference request {request_id} has not started");
             }
         };
-        Ok(FinishedRequest {
+        Ok(RequestOutcome {
             context,
             metrics,
             result: Err(error),
@@ -263,6 +323,137 @@ impl RequestManager {
         self.request_states
             .remove(&request_id)
             .with_context(|| format!("inference request {request_id} does not exist"))
+    }
+
+    fn prepare_scheduled_executions(
+        &mut self,
+        scheduled_requests: &[ScheduledRequest],
+        results: &mut Vec<RequestExecutionResult>,
+    ) -> (
+        Vec<ScheduledExecutionMetadata>,
+        text_generation::RequestExecutionBatch,
+    ) {
+        let mut execution_metadata = Vec::with_capacity(scheduled_requests.len());
+        let mut execution_batch =
+            text_generation::RequestExecutionBatch::with_capacity(scheduled_requests.len());
+        for scheduled_request in scheduled_requests {
+            let request_id = scheduled_request.request_id;
+            let request = match self.remove_request(request_id) {
+                Ok(request) => request,
+                Err(error) => {
+                    error!("Cannot advance scheduled request {request_id}: {error:#}");
+                    results.push(RequestExecutionResult {
+                        request_id,
+                        result: Err(error),
+                    });
+                    continue;
+                }
+            };
+
+            let RequestState::Executing {
+                context,
+                execution_state,
+                metrics,
+            } = request
+            else {
+                self.request_states.insert(request_id, request);
+                let error = anyhow::anyhow!("inference request {request_id} is not executing");
+                error!("Cannot advance scheduled request {request_id}: {error:#}");
+                results.push(RequestExecutionResult {
+                    request_id,
+                    result: Err(error),
+                });
+                continue;
+            };
+
+            if context.event_sender.is_closed() {
+                self.request_states
+                    .insert(request_id, RequestState::Cancelled { context, metrics });
+                results.push(RequestExecutionResult {
+                    request_id,
+                    result: Err(text_generation::GenerationCancelled.into()),
+                });
+            } else {
+                execution_metadata.push(ScheduledExecutionMetadata {
+                    request_id,
+                    context,
+                    metrics,
+                });
+                execution_batch.push(execution_state, scheduled_request.token_budget);
+            }
+        }
+        (execution_metadata, execution_batch)
+    }
+
+    fn fail_scheduled_executions(
+        &mut self,
+        execution_metadata: Vec<ScheduledExecutionMetadata>,
+        error: anyhow::Error,
+        results: &mut Vec<RequestExecutionResult>,
+    ) {
+        let error_message = format!("{error:#}");
+        for metadata in execution_metadata {
+            self.request_states.insert(
+                metadata.request_id,
+                RequestState::FailedToExecute {
+                    context: metadata.context,
+                    metrics: metadata.metrics,
+                },
+            );
+            results.push(RequestExecutionResult {
+                request_id: metadata.request_id,
+                result: Err(anyhow::anyhow!(error_message.clone())),
+            });
+        }
+    }
+
+    fn apply_generation_steps(
+        &mut self,
+        execution_metadata: Vec<ScheduledExecutionMetadata>,
+        execution_batch: text_generation::RequestExecutionBatch,
+        generation_steps: Vec<GenerationStep>,
+        results: &mut Vec<RequestExecutionResult>,
+    ) {
+        for ((mut metadata, execution_state), generation_step) in execution_metadata
+            .into_iter()
+            .zip(execution_batch.into_execution_states())
+            .zip(generation_steps)
+        {
+            let request_id = metadata.request_id;
+            match send_output_tokens(
+                &metadata.context,
+                &mut metadata.metrics,
+                generation_step.output_token_ids,
+            ) {
+                Ok(()) => {
+                    self.request_states.insert(
+                        request_id,
+                        RequestState::Executing {
+                            context: metadata.context,
+                            execution_state,
+                            metrics: metadata.metrics,
+                        },
+                    );
+                    results.push(RequestExecutionResult {
+                        request_id,
+                        result: Ok(generation_step.phase),
+                    });
+                }
+                Err(error) => {
+                    self.request_states.insert(
+                        request_id,
+                        RequestState::Cancelled {
+                            context: metadata.context,
+                            metrics: metadata.metrics,
+                        },
+                    );
+                    results.push(RequestExecutionResult {
+                        request_id,
+                        result: Err(error),
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -383,6 +574,61 @@ mod tests {
         let error = requests.add_request(duplicate).unwrap_err().to_string();
 
         assert_eq!(error, "inference request 7 already exists");
+        Ok(())
+    }
+
+    #[test]
+    fn skips_invalid_scheduled_requests_and_advances_the_rest() -> Result<()> {
+        let mut requests = RequestManager::new();
+        let (active_request, _event_receiver) = request(7);
+        requests.add_request(active_request)?;
+        requests.start_execution(7, |generate_text| {
+            RequestExecutionState::new(
+                generate_text,
+                4,
+                PrefillStartPositions {
+                    target: 0,
+                    draft: None,
+                },
+            )
+        })?;
+        let (queued_request, _queued_event_receiver) = request(9);
+        requests.add_request(queued_request)?;
+        let scheduled_requests = [
+            ScheduledRequest {
+                request_id: 8,
+                token_budget: 1,
+            },
+            ScheduledRequest {
+                request_id: 9,
+                token_budget: 1,
+            },
+            ScheduledRequest {
+                request_id: 7,
+                token_budget: 1,
+            },
+        ];
+
+        let results = requests.advance_executions(&scheduled_requests, |execution_batch| {
+            assert_eq!(execution_batch.len(), 1);
+            Ok(vec![GenerationStep {
+                output_token_ids: Vec::new(),
+                phase: GenerationPhase::Finished,
+            }])
+        });
+
+        assert_eq!(results[0].request_id, 8);
+        let Err(error) = &results[0].result else {
+            panic!("missing request should fail")
+        };
+        assert_eq!(error.to_string(), "inference request 8 does not exist");
+        assert_eq!(results[1].request_id, 9);
+        let Err(error) = &results[1].result else {
+            panic!("queued request should fail")
+        };
+        assert_eq!(error.to_string(), "inference request 9 is not executing");
+        assert_eq!(results[2].request_id, 7);
+        assert!(matches!(&results[2].result, Ok(GenerationPhase::Finished)));
         Ok(())
     }
 

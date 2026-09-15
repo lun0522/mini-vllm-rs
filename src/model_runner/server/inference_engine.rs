@@ -12,8 +12,9 @@ use tokio::sync::mpsc;
 use tonic::Status;
 
 use super::model_runner::ModelRunner;
-use super::request_manager::FinishedRequest;
+use super::request_manager::RequestExecutionResult;
 use super::request_manager::RequestManager;
+use super::request_manager::RequestOutcome;
 use super::scheduler::ScheduledRequest;
 use super::scheduler::Scheduler;
 use super::text_generation;
@@ -71,12 +72,16 @@ impl InferenceEngine {
     fn process_requests(&mut self) -> Result<()> {
         for request_id in self.scheduler.admit_queued_requests() {
             if let Err(error) = self.start_request(request_id) {
-                self.abort_request(request_id, error)?;
+                self.finalize_request_abort(request_id, error)?;
             }
         }
         let decision = self.scheduler.create_scheduling_decision();
-        for scheduled_request in decision.requests {
-            self.process_scheduled_request(scheduled_request)?;
+        if self.model_runner.is_continuous_batching_enabled() {
+            self.process_scheduled_batch(decision.requests)?;
+        } else {
+            for scheduled_request in decision.requests {
+                self.process_scheduled_request(scheduled_request)?;
+            }
         }
         Ok(())
     }
@@ -104,64 +109,99 @@ impl InferenceEngine {
         Ok(())
     }
 
+    fn process_scheduled_batch(&mut self, scheduled_requests: Vec<ScheduledRequest>) -> Result<()> {
+        let model_runner = &mut self.model_runner;
+        let results = self
+            .request_manager
+            .advance_executions(&scheduled_requests, |execution_batch| {
+                model_runner.run_batched_steps(execution_batch)
+            });
+        for RequestExecutionResult { request_id, result } in results {
+            match result {
+                Ok(phase) => self.complete_execution_step(request_id, phase)?,
+                Err(error) if self.request_manager.has_started_execution(request_id) => {
+                    let error = self.abort_model_execution(request_id, error);
+                    self.finalize_request_abort(request_id, error)?;
+                }
+                Err(_) => self.scheduler.remove_active_request(request_id)?,
+            }
+        }
+        Ok(())
+    }
+
     fn process_scheduled_request(&mut self, scheduled_request: ScheduledRequest) -> Result<()> {
         let request_id = scheduled_request.request_id;
-        let phase = {
+        let result = {
             let model_runner = &mut self.model_runner;
             self.request_manager
                 .advance_execution(request_id, |execution_state| {
                     model_runner.run_one_step(execution_state, scheduled_request.token_budget)
                 })
         };
-        let phase = match phase {
-            Ok(phase) => phase,
+        match result {
+            Ok(phase) => self.complete_execution_step(request_id, phase)?,
             Err(error) => {
-                let error = match self.model_runner.abort_request(request_id) {
-                    Ok(()) => error,
-                    Err(cleanup_error) => {
-                        error.context(format!("request cleanup also failed: {cleanup_error:#}"))
-                    }
-                };
-                self.abort_request(request_id, error)?;
-                return Ok(());
+                let error = self.abort_model_execution(request_id, error);
+                self.finalize_request_abort(request_id, error)?;
             }
         };
+        Ok(())
+    }
+
+    fn complete_execution_step(
+        &mut self,
+        request_id: u64,
+        phase: text_generation::GenerationPhase,
+    ) -> Result<()> {
         self.scheduler.update_request_state(request_id, phase)?;
-        if matches!(phase, text_generation::GenerationPhase::Finished) {
-            let model_runner = &mut self.model_runner;
-            let finished_request = self
-                .request_manager
-                .finish_request(request_id, |execution_state| {
-                    model_runner.finish_request(execution_state)
-                })?;
-            self.report_finished_request(request_id, finished_request);
+        if !matches!(phase, text_generation::GenerationPhase::Finished) {
+            return Ok(());
         }
+
+        let model_runner = &mut self.model_runner;
+        let request_outcome = self
+            .request_manager
+            .finish_request(request_id, |execution_state| {
+                model_runner.finish_request(execution_state)
+            })?;
+        self.report_request_outcome(request_id, request_outcome);
         Ok(())
     }
 
-    fn abort_request(&mut self, request_id: u64, error: anyhow::Error) -> Result<()> {
-        self.scheduler
-            .update_request_state(request_id, text_generation::GenerationPhase::Finished)?;
-        let finished_request = self.request_manager.abort_request(request_id, error)?;
-        self.report_finished_request(request_id, finished_request);
+    /// Releases model state and attaches any cleanup failure to the execution error.
+    fn abort_model_execution(&mut self, request_id: u64, error: anyhow::Error) -> anyhow::Error {
+        match self.model_runner.abort_request(request_id) {
+            Ok(()) => error,
+            Err(cleanup_error) => {
+                error.context(format!("request cleanup also failed: {cleanup_error:#}"))
+            }
+        }
+    }
+
+    /// Removes an aborted request from engine state and reports its error to the client.
+    /// Any allocated model state must already have been released.
+    fn finalize_request_abort(&mut self, request_id: u64, error: anyhow::Error) -> Result<()> {
+        self.scheduler.remove_active_request(request_id)?;
+        let request_outcome = self.request_manager.abort_request(request_id, error)?;
+        self.report_request_outcome(request_id, request_outcome);
         Ok(())
     }
 
-    fn report_finished_request(&self, request_id: u64, finished_request: FinishedRequest) {
-        let queued_at = finished_request.context.queued_at;
-        let queue_duration = finished_request
+    fn report_request_outcome(&self, request_id: u64, request_outcome: RequestOutcome) {
+        let queued_at = request_outcome.context.queued_at;
+        let queue_duration = request_outcome
             .metrics
             .execution_started_at
             .duration_since(queued_at);
         let ttft_as_micros_string =
-            elapsed_microseconds_string(queued_at, finished_request.metrics.first_token_at);
-        match &finished_request.result {
+            elapsed_microseconds_string(queued_at, request_outcome.metrics.first_token_at);
+        match &request_outcome.result {
             Ok(result) => {
                 let client_stats = create_client_facing_generation_stats(
                     &result.stats,
                     queued_at,
-                    finished_request.metrics.first_token_at,
-                    finished_request.metrics.last_token_at,
+                    request_outcome.metrics.first_token_at,
+                    request_outcome.metrics.last_token_at,
                 );
                 let draft_stats = result.stats.draft_stats.as_ref();
                 info!(
@@ -180,7 +220,7 @@ impl InferenceEngine {
                     count_to_string(draft_stats.map(|stats| stats.accepted_token_count)),
                     count_to_string(draft_stats.map(|stats| stats.proposed_token_count)),
                 );
-                finished_request.context.send_stats(client_stats);
+                request_outcome.context.send_stats(client_stats);
             }
             Err(error) => {
                 let status = generation_error_status(error);
@@ -189,12 +229,12 @@ impl InferenceEngine {
                      ttft_us={}",
                     request_id,
                     status.code(),
-                    finished_request.context.input_token_count,
-                    finished_request.metrics.output_token_count,
+                    request_outcome.context.input_token_count,
+                    request_outcome.metrics.output_token_count,
                     queue_duration.as_micros().separate_with_commas(),
                     ttft_as_micros_string,
                 );
-                finished_request.context.send_error(status);
+                request_outcome.context.send_error(status);
             }
         }
     }

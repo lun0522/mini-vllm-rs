@@ -118,6 +118,16 @@ impl Scheduler {
         Ok(())
     }
 
+    pub(super) fn remove_active_request(&mut self, request_id: u64) -> Result<()> {
+        let request_index = self
+            .active_requests
+            .iter()
+            .position(|request| request.request_id == request_id)
+            .with_context(|| format!("active request {request_id} does not exist"))?;
+        self.active_requests.remove(request_index);
+        Ok(())
+    }
+
     /// Prioritizes decode work, then allocates the remaining budget among active prefills.
     /// Prefills retain admission order under FCFS and use their remaining lengths under
     /// shortest-prefill-first.

@@ -298,12 +298,16 @@ impl TransformerBlock {
 
         let mut request_attention_outputs = Vec::with_capacity(contexts.len());
         for context in contexts {
+            // Narrowing packed Q/K preserves packed strides, so materialize each
+            // request slice before passing it to Candle's contiguous-only RoPE kernels.
             // request_q: [1, num_q_heads, q_len, head_dim].
             // request_k, request_v: [1, num_kv_heads, q_len, head_dim].
-            let request_q =
-                packed_q.narrow(/* dim */ 2, context.q_start_index, context.q_len)?;
-            let request_k =
-                packed_k.narrow(/* dim */ 2, context.q_start_index, context.q_len)?;
+            let request_q = packed_q
+                .narrow(/* dim */ 2, context.q_start_index, context.q_len)?
+                .contiguous()?;
+            let request_k = packed_k
+                .narrow(/* dim */ 2, context.q_start_index, context.q_len)?
+                .contiguous()?;
             let request_v =
                 packed_v.narrow(/* dim */ 2, context.q_start_index, context.q_len)?;
             let request_q = self.apply_rotary_embedding(&request_q, context.start_pos)?;

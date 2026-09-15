@@ -20,6 +20,7 @@ pub(super) struct ModelRunner {
     target: ModelInstance,
     draft: Option<ModelInstance>,
     draft_token_count: usize,
+    enable_continuous_batching: bool,
 }
 
 impl ModelRunner {
@@ -65,13 +66,14 @@ impl ModelRunner {
                     ModelRole::Draft,
                     draft_kv_cache_size_bytes,
                 )?;
-                Ok::<_, anyhow::Error>(ModelInstance::new(model, kv_cache, false))
+                Ok::<_, anyhow::Error>(ModelInstance::new(model, kv_cache))
             })
             .transpose()?;
         Ok(Self {
-            target: ModelInstance::new(loaded_model, target_kv_cache, enable_continuous_batching),
+            target: ModelInstance::new(loaded_model, target_kv_cache),
             draft,
             draft_token_count,
+            enable_continuous_batching,
         })
     }
 
@@ -90,6 +92,10 @@ impl ModelRunner {
 
     pub(super) fn supports_multiple_active_requests(&self) -> bool {
         self.target.supports_multiple_active_requests()
+    }
+
+    pub(super) fn is_continuous_batching_enabled(&self) -> bool {
+        self.enable_continuous_batching
     }
 
     pub(super) fn start_request(
@@ -140,6 +146,13 @@ impl ModelRunner {
         token_budget: usize,
     ) -> Result<text_generation::GenerationStep> {
         execution_state.run_one_step(&mut self.target, self.draft.as_mut(), token_budget)
+    }
+
+    pub(super) fn run_batched_steps(
+        &mut self,
+        execution_batch: &mut text_generation::RequestExecutionBatch,
+    ) -> Result<Vec<text_generation::GenerationStep>> {
+        execution_batch.run_batched_steps(&mut self.target)
     }
 
     pub(super) fn finish_request(
