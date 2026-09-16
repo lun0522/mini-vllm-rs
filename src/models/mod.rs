@@ -29,7 +29,6 @@ pub(crate) trait CausalLanguageModel: Send {
 
     /// Returns one all-position logits tensor per request, each shaped
     /// `(sequence_length, vocabulary_size)`, for speculative verification.
-    #[expect(dead_code, reason = "reserved for batched speculative decode")]
     fn forward_batched_for_speculative_verification(
         &mut self,
         inputs: &[BatchedForwardInput],

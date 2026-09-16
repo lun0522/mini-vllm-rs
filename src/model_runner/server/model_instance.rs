@@ -54,7 +54,6 @@ impl ModelInstance {
             .forward_batched(inputs, &mut self.kv_cache_manager)
     }
 
-    #[expect(dead_code, reason = "reserved for batched speculative decode")]
     pub(super) fn forward_batched_for_speculative_verification(
         &mut self,
         inputs: &[BatchedForwardInput],

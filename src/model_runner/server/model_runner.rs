@@ -33,11 +33,6 @@ impl ModelRunner {
         kv_cache_type: KvCacheType,
         target_kv_cache_size_bytes: usize,
     ) -> Result<Self> {
-        // TODO: Support speculative decoding in the continuous-batching execution path.
-        anyhow::ensure!(
-            !enable_continuous_batching || draft_model_path.is_none(),
-            "continuous batching does not yet support speculative decoding"
-        );
         let device = Self::get_inference_device(inference_device)?;
         let loaded_model = LoadedModel::new(model_path, device)?;
         let loaded_draft_model = draft_model_path
@@ -242,28 +237,6 @@ fn compute_kv_cache_size_bytes(model_info: &ModelInfo, token_capacity: usize) ->
 mod tests {
     use super::*;
     use candle_core::DType;
-    use std::path::Path;
-
-    #[test]
-    fn rejects_speculative_decoding_with_continuous_batching() {
-        let error = ModelRunner::new(
-            Path::new("target.gguf"),
-            Some(Path::new("draft.gguf")),
-            4,
-            true,
-            InferenceDevice::Cpu,
-            KvCacheType::Contiguous,
-            1024,
-        )
-        .err()
-        .expect("the incompatible configuration should fail")
-        .to_string();
-
-        assert_eq!(
-            error,
-            "continuous batching does not yet support speculative decoding"
-        );
-    }
 
     #[test]
     fn derives_draft_cache_size_for_target_token_capacity() -> Result<()> {
