@@ -98,6 +98,15 @@ struct BatchedModelInputs {
     draft_inputs: Vec<BatchedForwardInput>,
 }
 
+#[expect(dead_code, reason = "reserved for batched speculative decode")]
+struct BatchedDraftProposal {
+    request_index: usize,
+    original_cached_token_count: usize,
+    maximum_token_count: usize,
+    // May already contain the first proposal sampled from the final draft-prefill logits.
+    token_ids: Vec<u32>,
+}
+
 struct DraftVerificationResult {
     accepted_token_count: usize,
     maybe_replacement_token: Option<u32>,
@@ -777,7 +786,8 @@ impl RequestExecutionBatch {
             target_request_indices,
             target_inputs,
             draft_inputs,
-        } = self.create_batched_model_inputs(&prepared_forwards, target, draft.as_deref())?;
+        } =
+            self.create_initial_batched_model_inputs(&prepared_forwards, target, draft.as_deref())?;
 
         let mut target_logits = vec![None; self.requests.len()];
         if !target_inputs.is_empty() {
@@ -825,7 +835,7 @@ impl RequestExecutionBatch {
             .collect()
     }
 
-    fn create_batched_model_inputs(
+    fn create_initial_batched_model_inputs(
         &self,
         prepared_forwards: &[PreparedForward],
         target: &ModelInstance,
@@ -872,6 +882,135 @@ impl RequestExecutionBatch {
             target_inputs,
             draft_inputs,
         })
+    }
+
+    /// Completes each request's draft proposal, preserving any first token sampled from its final
+    /// draft-prefill logits.
+    #[expect(dead_code, reason = "reserved for batched speculative decode")]
+    fn generate_batched_draft_proposals(
+        &mut self,
+        draft: &mut ModelInstance,
+        proposals: &mut [BatchedDraftProposal],
+    ) -> Result<()> {
+        loop {
+            let proposal_indices = self.extract_active_draft_proposal_indices(proposals);
+            if proposal_indices.is_empty() {
+                return Ok(());
+            }
+            let proposal_inputs =
+                self.create_draft_proposal_inputs(draft, proposals, &proposal_indices)?;
+            let logits = draft.forward_batched(&proposal_inputs)?;
+            self.sample_and_append_draft_proposals(proposals, &proposal_indices, logits)?;
+        }
+    }
+
+    fn extract_active_draft_proposal_indices(
+        &self,
+        proposals: &[BatchedDraftProposal],
+    ) -> Vec<usize> {
+        let mut active_proposal_indices = Vec::new();
+        for (proposal_index, proposal) in proposals.iter().enumerate() {
+            let reached_token_limit = proposal.token_ids.len() >= proposal.maximum_token_count;
+            let reached_end_of_sequence = proposal.token_ids.last().is_some_and(|token_id| {
+                self.requests[proposal.request_index]
+                    .execution_state
+                    .eos_tokens
+                    .contains(token_id)
+            });
+            if !reached_token_limit && !reached_end_of_sequence {
+                active_proposal_indices.push(proposal_index);
+            }
+        }
+        active_proposal_indices
+    }
+
+    fn create_draft_proposal_inputs(
+        &self,
+        draft: &ModelInstance,
+        proposals: &[BatchedDraftProposal],
+        active_proposal_indices: &[usize],
+    ) -> Result<Vec<BatchedForwardInput>> {
+        active_proposal_indices
+            .iter()
+            .map(|&proposal_index| {
+                let proposal = &proposals[proposal_index];
+                let execution_state = &self.requests[proposal.request_index].execution_state;
+                let input_token_id = proposal
+                    .token_ids
+                    .last()
+                    .copied()
+                    .or_else(|| execution_state.tokens.last().copied())
+                    .context("generation context is empty")?;
+                Ok(BatchedForwardInput {
+                    request_id: execution_state.request_id,
+                    input: draft.create_input_tensor(&[input_token_id])?,
+                    start_position: proposal.original_cached_token_count + proposal.token_ids.len(),
+                })
+            })
+            .collect()
+    }
+
+    fn sample_and_append_draft_proposals(
+        &self,
+        proposals: &mut [BatchedDraftProposal],
+        active_proposal_indices: &[usize],
+        logits: Vec<Tensor>,
+    ) -> Result<()> {
+        ensure!(
+            logits.len() == active_proposal_indices.len(),
+            "batched draft model forward returned {} outputs for {} requests",
+            logits.len(),
+            active_proposal_indices.len()
+        );
+        for (proposal_index, logits) in active_proposal_indices.iter().copied().zip(logits) {
+            let proposal = &mut proposals[proposal_index];
+            let execution_state = &self.requests[proposal.request_index].execution_state;
+            let logits = logits.to_dtype(DType::F32)?;
+            let next_token = execution_state.sample_logits(
+                &logits,
+                &proposal.token_ids,
+                &mut execution_state.draft_logits_processor.borrow_mut(),
+            )?;
+            proposal.token_ids.push(next_token);
+        }
+        Ok(())
+    }
+
+    #[expect(dead_code, reason = "reserved for batched speculative decode")]
+    fn append_target_verification_inputs(
+        &self,
+        target: &ModelInstance,
+        proposals: &[BatchedDraftProposal],
+        model_inputs: &mut BatchedModelInputs,
+    ) -> Result<()> {
+        model_inputs.target_request_indices.reserve(proposals.len());
+        model_inputs.target_inputs.reserve(proposals.len());
+        for proposal in proposals {
+            ensure!(
+                !proposal.token_ids.is_empty(),
+                "target verification requires at least one draft token"
+            );
+            let execution_state = &self.requests[proposal.request_index].execution_state;
+            // Verify the last known token followed by every speculative token except the last;
+            // each resulting logit predicts the speculative token at the same position.
+            let mut input_token_ids = Vec::with_capacity(proposal.token_ids.len());
+            input_token_ids.push(
+                *execution_state
+                    .tokens
+                    .last()
+                    .context("generation context is empty")?,
+            );
+            input_token_ids.extend_from_slice(&proposal.token_ids[..proposal.token_ids.len() - 1]);
+            model_inputs
+                .target_request_indices
+                .push(proposal.request_index);
+            model_inputs.target_inputs.push(BatchedForwardInput {
+                request_id: execution_state.request_id,
+                input: target.create_input_tensor(&input_token_ids)?,
+                start_position: proposal.original_cached_token_count,
+            });
+        }
+        Ok(())
     }
 }
 
