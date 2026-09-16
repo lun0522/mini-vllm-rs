@@ -1,4 +1,5 @@
 use crate::models::BatchedForwardInput;
+use crate::models::BatchedForwardOutput;
 use crate::models::BatchedKvCache;
 use crate::models::CachedKeyValue;
 use crate::models::ForwardContext;
@@ -371,10 +372,7 @@ impl TransformerBlock {
         }
 
         // packed_y: [1, num_q_heads, packed_q_len, head_dim].
-        let packed_y = Tensor::cat(
-            &request_attention_outputs.iter().collect::<Vec<_>>(),
-            /* dim */ 2,
-        )?;
+        let packed_y = Tensor::cat(&request_attention_outputs, /* dim */ 2)?;
         // After transpose and reshape:
         // packed_y: [1, packed_q_len, embedding_len].
         let packed_y = packed_y
@@ -455,47 +453,41 @@ impl TransformerModelWeights {
         self.output_proj.forward(&x)?.squeeze(0)
     }
 
-    pub(super) fn forward_batched(
+    pub(super) fn forward_batched_with_speculative_verification(
         &mut self,
-        inputs: &[BatchedForwardInput],
+        generation_inputs: &[BatchedForwardInput],
+        verification_inputs: &[BatchedForwardInput],
         kv_cache: &mut dyn BatchedKvCache,
-    ) -> Result<Vec<Tensor>> {
-        let (packed_hidden_states, contexts) = self.forward_batched_hidden(inputs, kv_cache)?;
-        // packed_last_hidden_states: [request_count, embedding_len].
-        let packed_last_hidden_states =
-            select_batched_last_hidden_states(&packed_hidden_states, &contexts)?;
-
-        let _enter = self.span_output.enter();
-        // packed_logits: [request_count, vocabulary_size].
-        let packed_logits = self.output_proj.forward(&packed_last_hidden_states)?;
-        (0..inputs.len())
-            .map(|request_index| {
-                // request_logits: [vocabulary_size].
-                packed_logits
-                    .narrow(/* dim */ 0, request_index, /* len */ 1)?
-                    .squeeze(0)
-            })
-            .collect()
-    }
-
-    pub(super) fn forward_batched_for_speculative_verification(
-        &mut self,
-        inputs: &[BatchedForwardInput],
-        kv_cache: &mut dyn BatchedKvCache,
-    ) -> Result<Vec<Tensor>> {
-        let (packed_hidden_states, contexts) = self.forward_batched_hidden(inputs, kv_cache)?;
-        let _enter = self.span_output.enter();
-        // packed_logits: [1, packed_q_len, vocabulary_size].
-        let packed_logits = self.output_proj.forward(&packed_hidden_states)?;
-        contexts
+    ) -> Result<BatchedForwardOutput> {
+        let combined_inputs = generation_inputs
             .iter()
-            .map(|context| {
-                // request_logits: [q_len, vocabulary_size].
-                packed_logits
-                    .narrow(/* dim */ 1, context.q_start_index, context.q_len)?
-                    .squeeze(0)
+            .chain(verification_inputs)
+            .map(|input| BatchedForwardInput {
+                request_id: input.request_id,
+                input: input.input.clone(),
+                start_position: input.start_position,
             })
-            .collect()
+            .collect::<Vec<_>>();
+        let (packed_hidden_states, contexts) =
+            self.forward_batched_hidden(&combined_inputs, kv_cache)?;
+
+        let (generation_contexts, verification_contexts) =
+            contexts.split_at(generation_inputs.len());
+        let packed_output_hidden_states = pack_output_hidden_states(
+            &packed_hidden_states,
+            generation_contexts,
+            verification_contexts,
+        )?;
+
+        let _enter = self.span_output.enter();
+        // packed_logits:
+        // [generation_request_count + verification_token_count, vocabulary_size].
+        let packed_logits = self.output_proj.forward(&packed_output_hidden_states)?;
+        create_batched_forward_output(
+            &packed_logits,
+            generation_inputs.len(),
+            verification_contexts,
+        )
     }
 
     pub(super) fn forward_for_speculative_verification(
@@ -624,7 +616,36 @@ fn prepare_batched_forward(
     Ok((packed_input, contexts))
 }
 
-fn select_batched_last_hidden_states(
+fn pack_output_hidden_states(
+    packed_hidden_states: &Tensor,
+    generation_contexts: &[BatchedForwardContext],
+    verification_contexts: &[BatchedForwardContext],
+) -> Result<Tensor> {
+    let mut output_hidden_states = if generation_contexts.is_empty() {
+        Vec::with_capacity(verification_contexts.len())
+    } else {
+        let mut states = Vec::with_capacity(1 + verification_contexts.len());
+        // generation_hidden_states: [generation_request_count, embedding_len].
+        states.push(pack_generation_output_hidden_states(
+            packed_hidden_states,
+            generation_contexts,
+        )?);
+        states
+    };
+    for context in verification_contexts {
+        // verification_hidden_state: [q_len, embedding_len].
+        output_hidden_states.push(
+            packed_hidden_states
+                .narrow(/* dim */ 1, context.q_start_index, context.q_len)?
+                .squeeze(0)?,
+        );
+    }
+    // packed_output_hidden_states:
+    // [generation_request_count + total_verification_token_count, embedding_len]
+    Tensor::cat(&output_hidden_states, /* dim */ 0)
+}
+
+fn pack_generation_output_hidden_states(
     packed_hidden_states: &Tensor,
     contexts: &[BatchedForwardContext],
 ) -> Result<Tensor> {
@@ -639,11 +660,35 @@ fn select_batched_last_hidden_states(
         request_last_hidden_states.push(request_last_hidden_state);
     }
     // packed_last_hidden_states: [request_count, embedding_len].
-    Tensor::cat(
-        &request_last_hidden_states.iter().collect::<Vec<_>>(),
-        /* dim */ 1,
-    )?
-    .squeeze(0)
+    Tensor::cat(&request_last_hidden_states, /* dim */ 1)?.squeeze(0)
+}
+
+fn create_batched_forward_output(
+    packed_logits: &Tensor,
+    generation_request_count: usize,
+    verification_contexts: &[BatchedForwardContext],
+) -> Result<BatchedForwardOutput> {
+    let generation_logits = (0..generation_request_count)
+        .map(|request_index| {
+            packed_logits
+                .narrow(/* dim */ 0, request_index, /* len */ 1)?
+                .squeeze(0)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut verification_start_index = generation_request_count;
+    let verification_logits = verification_contexts
+        .iter()
+        .map(|context| {
+            let logits =
+                packed_logits.narrow(/* dim */ 0, verification_start_index, context.q_len)?;
+            verification_start_index += context.q_len;
+            Ok(logits)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(BatchedForwardOutput {
+        generation_logits,
+        verification_logits,
+    })
 }
 
 fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: &Tensor) -> Result<Tensor> {

@@ -21,6 +21,7 @@ use super::common::SwiGluMlp;
 use super::common::TransformerBlock;
 use super::common::TransformerModelWeights;
 use crate::models::BatchedForwardInput;
+use crate::models::BatchedForwardOutput;
 use crate::models::BatchedKvCache;
 use crate::models::CausalLanguageModel;
 use crate::models::ForwardContext;
@@ -66,22 +67,17 @@ impl CausalLanguageModel for Qwen2Backend {
         Ok(self.model.forward(input, context, kv_cache)?)
     }
 
-    fn forward_batched(
+    fn forward_batched_with_speculative_verification(
         &mut self,
-        inputs: &[BatchedForwardInput],
+        generation_inputs: &[BatchedForwardInput],
+        verification_inputs: &[BatchedForwardInput],
         kv_cache: &mut dyn BatchedKvCache,
-    ) -> Result<Vec<Tensor>> {
-        Ok(self.model.forward_batched(inputs, kv_cache)?)
-    }
-
-    fn forward_batched_for_speculative_verification(
-        &mut self,
-        inputs: &[BatchedForwardInput],
-        kv_cache: &mut dyn BatchedKvCache,
-    ) -> Result<Vec<Tensor>> {
-        Ok(self
-            .model
-            .forward_batched_for_speculative_verification(inputs, kv_cache)?)
+    ) -> Result<BatchedForwardOutput> {
+        Ok(self.model.forward_batched_with_speculative_verification(
+            generation_inputs,
+            verification_inputs,
+            kv_cache,
+        )?)
     }
 
     fn forward_for_speculative_verification(

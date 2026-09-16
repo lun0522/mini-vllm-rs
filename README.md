@@ -27,11 +27,10 @@ Status: ✅ done · 🚧 in progress · ⬜ not started · ❌ out of scope
 - ✅ Prefix caching.
   - ✅ Reuse complete KV-cache pages for prefixes shared across requests.
   - ✅ Evict inactive cached prefixes when physical pages are exhausted.
-- 🚧 Continuous batching.
+- ✅ Continuous batching.
   - ✅ Per-request state with dynamic admission, scheduling, and cancellation.
   - ✅ Interleaved execution with token-budgeted chunked prefill.
-  - ⬜ Reserve paged KV-cache capacity when admitting and scheduling requests.
-  - ⬜ Batched model forwards for prefill and decode.
+  - ✅ Batched model forwards for prefill, decode, and speculative verification.
 - ⬜ Performance evaluation.
   - ⬜ Measure latency, throughput, and KV-cache memory usage.
   - ⬜ Compare baseline, continuously batched, and speculative execution.
@@ -139,8 +138,10 @@ Input preprocessing uses four request-handler worker threads by default. Use
 
 The scheduler can be configured with
 `--max-batched-token-count`, `--max-active-request-count`, and
-`--scheduling-policy`. It interleaves request execution while model forwards
-remain single-request operations.
+`--scheduling-policy`. Pass `--enable-continuous-batching` to execute scheduled
+requests together in batched model forwards. Without the flag, the same
+scheduler executes each selected request sequentially as a baseline without
+batching overhead.
 
 Optionally, set the `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` environment
 variables for CPU inference to control the number of CPU worker threads.

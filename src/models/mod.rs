@@ -25,15 +25,27 @@ pub(crate) trait CausalLanguageModel: Send {
         &mut self,
         inputs: &[BatchedForwardInput],
         kv_cache: &mut dyn BatchedKvCache,
-    ) -> Result<Vec<Tensor>>;
+    ) -> Result<Vec<Tensor>> {
+        Ok(self
+            .forward_batched_with_speculative_verification(
+                inputs,
+                /* verification_inputs */ &[],
+                kv_cache,
+            )?
+            .generation_logits)
+    }
 
-    /// Returns one all-position logits tensor per request, each shaped
-    /// `(sequence_length, vocabulary_size)`, for speculative verification.
-    fn forward_batched_for_speculative_verification(
+    /// Runs regular and speculative-verification requests in one model pass.
+    ///
+    /// Generation outputs contain one `(vocabulary_size)` tensor per `generation_inputs` entry.
+    /// Verification outputs contain one `(sequence_length, vocabulary_size)` tensor per
+    /// `verification_inputs` entry. Both output groups preserve their respective input order.
+    fn forward_batched_with_speculative_verification(
         &mut self,
-        inputs: &[BatchedForwardInput],
+        generation_inputs: &[BatchedForwardInput],
+        verification_inputs: &[BatchedForwardInput],
         kv_cache: &mut dyn BatchedKvCache,
-    ) -> Result<Vec<Tensor>>;
+    ) -> Result<BatchedForwardOutput>;
 
     /// Returns logits for every input position, shaped
     /// `(batch_size, sequence_length, vocabulary_size)`. Speculative decoding uses these logits
@@ -57,6 +69,12 @@ pub(crate) struct BatchedForwardInput {
     pub(crate) request_id: u64,
     pub(crate) input: Tensor,
     pub(crate) start_position: usize,
+}
+
+/// Separates outputs with different shapes from one combined batched model pass.
+pub(crate) struct BatchedForwardOutput {
+    pub(crate) generation_logits: Vec<Tensor>,
+    pub(crate) verification_logits: Vec<Tensor>,
 }
 
 /// Provides request-specific key and value tensors to model layers.
