@@ -77,6 +77,16 @@ impl CausalLanguageModel for LlamaBackend {
         Ok(self.model.forward_batched(inputs, kv_cache)?)
     }
 
+    fn forward_batched_for_speculative_verification(
+        &mut self,
+        inputs: &[BatchedForwardInput],
+        kv_cache: &mut dyn BatchedKvCache,
+    ) -> Result<Vec<Tensor>> {
+        Ok(self
+            .model
+            .forward_batched_for_speculative_verification(inputs, kv_cache)?)
+    }
+
     fn forward_for_speculative_verification(
         &mut self,
         input: &Tensor,

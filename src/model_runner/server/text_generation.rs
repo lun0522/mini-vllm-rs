@@ -1135,6 +1135,34 @@ mod tests {
                 .collect()
         }
 
+        fn forward_batched_for_speculative_verification(
+            &mut self,
+            inputs: &[BatchedForwardInput],
+            _kv_cache: &mut dyn BatchedKvCache,
+        ) -> Result<Vec<Tensor>> {
+            inputs
+                .iter()
+                .map(|input| {
+                    let token_ids = input
+                        .input
+                        .to_vec2::<u32>()?
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                    self.forward_calls.lock().unwrap().push(ForwardCall {
+                        start_position: input.start_position,
+                        token_ids,
+                    });
+                    let query_len = input.input.dim(1)?;
+                    let mut logits = vec![0.0f32; query_len * 8];
+                    for position in 0..query_len {
+                        logits[position * 8 + self.next_token as usize] = 1.0;
+                    }
+                    Ok(Tensor::new(logits, &Device::Cpu)?.reshape((query_len, 8))?)
+                })
+                .collect()
+        }
+
         fn forward_for_speculative_verification(
             &mut self,
             input: &Tensor,

@@ -460,17 +460,7 @@ impl TransformerModelWeights {
         inputs: &[BatchedForwardInput],
         kv_cache: &mut dyn BatchedKvCache,
     ) -> Result<Vec<Tensor>> {
-        let _enter = self.span_model.enter();
-
-        // packed_input: [1, packed_q_len].
-        let (packed_input, contexts) = prepare_batched_forward(inputs)?;
-        // packed_hidden_states: [1, packed_q_len, embedding_len].
-        let mut packed_hidden_states = self.token_embeddings.forward(&packed_input)?;
-        for (layer_index, layer) in self.layers.iter().enumerate() {
-            packed_hidden_states =
-                layer.forward_batched(&packed_hidden_states, &contexts, layer_index, kv_cache)?;
-        }
-        let packed_hidden_states = self.output_norm.forward(&packed_hidden_states)?;
+        let (packed_hidden_states, contexts) = self.forward_batched_hidden(inputs, kv_cache)?;
         // packed_last_hidden_states: [request_count, embedding_len].
         let packed_last_hidden_states =
             select_batched_last_hidden_states(&packed_hidden_states, &contexts)?;
@@ -483,6 +473,27 @@ impl TransformerModelWeights {
                 // request_logits: [vocabulary_size].
                 packed_logits
                     .narrow(/* dim */ 0, request_index, /* len */ 1)?
+                    .squeeze(0)
+            })
+            .collect()
+    }
+
+    #[expect(dead_code, reason = "reserved for batched speculative decode")]
+    pub(super) fn forward_batched_for_speculative_verification(
+        &mut self,
+        inputs: &[BatchedForwardInput],
+        kv_cache: &mut dyn BatchedKvCache,
+    ) -> Result<Vec<Tensor>> {
+        let (packed_hidden_states, contexts) = self.forward_batched_hidden(inputs, kv_cache)?;
+        let _enter = self.span_output.enter();
+        // packed_logits: [1, packed_q_len, vocabulary_size].
+        let packed_logits = self.output_proj.forward(&packed_hidden_states)?;
+        contexts
+            .iter()
+            .map(|context| {
+                // request_logits: [q_len, vocabulary_size].
+                packed_logits
+                    .narrow(/* dim */ 1, context.q_start_index, context.q_len)?
                     .squeeze(0)
             })
             .collect()
@@ -516,6 +527,24 @@ impl TransformerModelWeights {
             layer_in = layer.forward(&layer_in, mask.as_ref(), context, layer_index, kv_cache)?;
         }
         self.output_norm.forward(&layer_in)
+    }
+
+    fn forward_batched_hidden(
+        &mut self,
+        inputs: &[BatchedForwardInput],
+        kv_cache: &mut dyn BatchedKvCache,
+    ) -> Result<(Tensor, Vec<BatchedForwardContext>)> {
+        let _enter = self.span_model.enter();
+        // packed_input: [1, packed_q_len].
+        let (packed_input, contexts) = prepare_batched_forward(inputs)?;
+        // packed_hidden_states: [1, packed_q_len, embedding_len].
+        let mut packed_hidden_states = self.token_embeddings.forward(&packed_input)?;
+        for (layer_index, layer) in self.layers.iter().enumerate() {
+            packed_hidden_states =
+                layer.forward_batched(&packed_hidden_states, &contexts, layer_index, kv_cache)?;
+        }
+        let packed_hidden_states = self.output_norm.forward(&packed_hidden_states)?;
+        Ok((packed_hidden_states, contexts))
     }
 }
 

@@ -54,6 +54,16 @@ impl ModelInstance {
             .forward_batched(inputs, &mut self.kv_cache_manager)
     }
 
+    #[expect(dead_code, reason = "reserved for batched speculative decode")]
+    pub(super) fn forward_batched_for_speculative_verification(
+        &mut self,
+        inputs: &[BatchedForwardInput],
+    ) -> Result<Vec<Tensor>> {
+        self.model
+            .model()
+            .forward_batched_for_speculative_verification(inputs, &mut self.kv_cache_manager)
+    }
+
     pub(super) fn model_metadata(&self) -> ModelMetadata {
         self.model.metadata()
     }
