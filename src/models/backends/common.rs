@@ -17,6 +17,11 @@ use candle_transformers::quantized_nn::RmsNorm;
 use candle_transformers::utils::repeat_kv;
 use std::collections::HashMap;
 
+const METAL_GEMV_MAX_ROWS: Option<usize> = match option_env!("MINI_VLLM_METAL_GEMV_MAX_ROWS") {
+    Some(value) => Some(const_str::parse!(value, u32) as usize),
+    None => None,
+};
+
 /// Caches causal attention masks by `(seq_len, kv_len)`, where
 /// `kv_len = index_pos + seq_len`.
 ///
@@ -76,11 +81,47 @@ impl QMatMul {
         let span = tracing::span!(tracing::Level::TRACE, "qmatmul");
         Ok(Self { inner, span })
     }
+
+    /// Uses separate GEMV operations for small Metal inputs because Candle's quantized GEMM
+    /// kernel performs poorly at very small row counts. Returns `None` when the compile-time
+    /// threshold is disabled, the input is not on Metal, or the regular GEMM path is preferable.
+    fn forward_metal_rows_with_gemv(&self, input: &Tensor) -> Result<Option<Tensor>> {
+        let Some(max_rows) = METAL_GEMV_MAX_ROWS else {
+            return Ok(None);
+        };
+        if !input.device().is_metal() {
+            return Ok(None);
+        }
+
+        // Candle selects its Metal GEMV kernel when the penultimate dimension is one.
+        // Split only the two input layouts used by the model backends, preserving rank so the
+        // concatenated result has exactly the same shape as a single quantized matmul.
+        let row_dim = match input.rank() {
+            2 => 0,
+            3 if input.dim(0)? == 1 => 1,
+            _ => return Ok(None),
+        };
+        let row_count = input.dim(row_dim)?;
+        if row_count <= 1 || row_count > max_rows {
+            return Ok(None);
+        }
+
+        let mut outputs = Vec::with_capacity(row_count);
+        for row_index in 0..row_count {
+            let row = input.narrow(row_dim, row_index, /* len */ 1)?;
+            outputs.push(self.inner.forward(&row)?);
+        }
+        let output_refs = outputs.iter().collect::<Vec<_>>();
+        Ok(Some(Tensor::cat(&output_refs, row_dim)?))
+    }
 }
 
 impl Module for QMatMul {
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
         let _enter = self.span.enter();
+        if let Some(output) = self.forward_metal_rows_with_gemv(input)? {
+            return Ok(output);
+        }
         self.inner.forward(input)
     }
 }

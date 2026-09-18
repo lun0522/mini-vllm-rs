@@ -31,9 +31,6 @@ Status: ✅ done · 🚧 in progress · ⬜ not started · ❌ out of scope
   - ✅ Per-request state with dynamic admission, scheduling, and cancellation.
   - ✅ Interleaved execution with token-budgeted chunked prefill.
   - ✅ Batched model forwards for prefill, decode, and speculative verification.
-- ⬜ Performance evaluation.
-  - ⬜ Measure latency, throughput, and KV-cache memory usage.
-  - ⬜ Compare baseline, continuously batched, and speculative execution.
 
 ## Design choices
 

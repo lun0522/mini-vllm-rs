@@ -1,4 +1,5 @@
 use crate::models::BatchedForwardInput;
+use crate::models::ModelRole;
 use crate::proto::model_runner::GenerateTextRequest;
 use anyhow::bail;
 use anyhow::ensure;
@@ -9,7 +10,6 @@ use candle_core::IndexOp;
 use candle_core::Tensor;
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::utils::apply_repeat_penalty;
-use std::cell::RefCell;
 use std::error::Error;
 use std::fmt;
 use std::time::Duration;
@@ -172,8 +172,8 @@ pub(super) struct RequestExecutionState {
     repeat_last_n: usize,
     repeat_penalty: f32,
     eos_tokens: Vec<u32>,
-    target_logits_processor: RefCell<LogitsProcessor>,
-    draft_logits_processor: RefCell<LogitsProcessor>,
+    target_logits_processor: LogitsProcessor,
+    draft_logits_processor: LogitsProcessor,
     prefill_initial_positions: PrefillStartPositions,
     prefill_current_positions: PrefillStartPositions,
     generation_phase: GenerationPhase,
@@ -218,8 +218,8 @@ impl RequestExecutionState {
                 .context("repeat_last_n does not fit in usize")?,
             repeat_penalty: request.repeat_penalty,
             eos_tokens: request.end_of_sequence_token_ids,
-            target_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
-            draft_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
+            target_logits_processor: LogitsProcessor::new(0, None, None),
+            draft_logits_processor: LogitsProcessor::new(0, None, None),
             prefill_initial_positions,
             prefill_current_positions: prefill_initial_positions,
             generation_phase,
@@ -647,13 +647,8 @@ impl RequestExecutionState {
                 .copied()
                 .or_else(|| self.tokens.last().copied())
                 .context("generation context is empty")?;
-            let next_token = self.sample_next_token(
-                draft,
-                &[input_token],
-                start_position,
-                &draft_tokens,
-                &mut self.draft_logits_processor.borrow_mut(),
-            )?;
+            let next_token =
+                self.sample_next_draft_token(draft, &[input_token], start_position, &draft_tokens)?;
             draft_tokens.push(next_token);
             if self.eos_tokens.contains(&next_token) {
                 break;
@@ -688,7 +683,7 @@ impl RequestExecutionState {
             let target_token = self.sample_logits(
                 &verification_logits.i(position)?,
                 &draft_tokens[..position],
-                &mut self.target_logits_processor.borrow_mut(),
+                ModelRole::Target,
             )?;
             if target_token != draft_token {
                 return Ok(DraftVerificationResult {
@@ -737,35 +732,31 @@ impl RequestExecutionState {
         }
     }
 
-    fn sample_next_token(
-        &self,
-        model: &mut ModelInstance,
+    fn sample_next_draft_token(
+        &mut self,
+        draft: &mut ModelInstance,
         input_tokens: &[u32],
         start_position: usize,
         appended_tokens: &[u32],
-        logits_processor: &mut LogitsProcessor,
     ) -> Result<u32> {
-        let input = model.create_input_tensor(input_tokens)?;
-        let logits = model.forward(self.request_id, &input, start_position)?;
+        let input = draft.create_input_tensor(input_tokens)?;
+        let logits = draft.forward(self.request_id, &input, start_position)?;
         let logits = logits.to_dtype(DType::F32)?;
-        self.sample_logits(&logits, appended_tokens, logits_processor)
+        self.sample_logits(&logits, appended_tokens, ModelRole::Draft)
     }
 
     fn sample_and_commit_target_token(&mut self, logits: &Tensor) -> Result<bool> {
         let logits = logits.to_dtype(DType::F32)?;
-        let next_token = self.sample_logits(
-            &logits,
-            /* appended_tokens */ &[],
-            &mut self.target_logits_processor.borrow_mut(),
-        )?;
+        let next_token =
+            self.sample_logits(&logits, /* appended_tokens */ &[], ModelRole::Target)?;
         Ok(self.commit_next_token(next_token))
     }
 
     fn sample_logits(
-        &self,
+        &mut self,
         logits: &Tensor,
         appended_tokens: &[u32],
-        logits_processor: &mut LogitsProcessor,
+        model_role: ModelRole,
     ) -> Result<u32> {
         // Collect the repetition window from committed and speculative tokens.
         let total_token_count = self.tokens.len() + appended_tokens.len();
@@ -779,6 +770,10 @@ impl RequestExecutionState {
 
         // Apply the repetition penalty before sampling the next token.
         let logits = apply_repeat_penalty(logits, self.repeat_penalty, &repeat_tokens)?;
+        let logits_processor = match model_role {
+            ModelRole::Target => &mut self.target_logits_processor,
+            ModelRole::Draft => &mut self.draft_logits_processor,
+        };
         logits_processor.sample(&logits).map_err(Into::into)
     }
 
@@ -1088,7 +1083,7 @@ impl RequestExecutionBatch {
     }
 
     fn sample_and_append_draft_proposals(
-        &self,
+        &mut self,
         proposals: &mut [BatchedDraftProposal],
         active_proposal_indices: &[usize],
         logits: Vec<Tensor>,
@@ -1101,13 +1096,10 @@ impl RequestExecutionBatch {
         );
         for (proposal_index, logits) in active_proposal_indices.iter().copied().zip(logits) {
             let proposal = &mut proposals[proposal_index];
-            let execution_state = &self.requests[proposal.request_index].execution_state;
+            let execution_state = &mut self.requests[proposal.request_index].execution_state;
             let logits = logits.to_dtype(DType::F32)?;
-            let next_token = execution_state.sample_logits(
-                &logits,
-                &proposal.token_ids,
-                &mut execution_state.draft_logits_processor.borrow_mut(),
-            )?;
+            let next_token =
+                execution_state.sample_logits(&logits, &proposal.token_ids, ModelRole::Draft)?;
             proposal.token_ids.push(next_token);
         }
         Ok(())
@@ -1444,8 +1436,8 @@ mod tests {
             repeat_last_n: 64,
             repeat_penalty: 1.0,
             eos_tokens,
-            target_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
-            draft_logits_processor: RefCell::new(LogitsProcessor::new(0, None, None)),
+            target_logits_processor: LogitsProcessor::new(0, None, None),
+            draft_logits_processor: LogitsProcessor::new(0, None, None),
             prefill_initial_positions: PrefillStartPositions {
                 target: 0,
                 draft: None,
