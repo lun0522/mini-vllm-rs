@@ -60,6 +60,7 @@ impl fmt::Display for SchedulerConfig {
 pub(crate) enum InferenceDevice {
     Cpu,
     Gpu,
+    Mixed,
 }
 
 impl InferenceDevice {
@@ -67,6 +68,7 @@ impl InferenceDevice {
         match self {
             Self::Cpu => "cpu",
             Self::Gpu => "gpu",
+            Self::Mixed => "mixed",
         }
     }
 }
@@ -76,6 +78,7 @@ impl fmt::Display for InferenceDevice {
         match self {
             Self::Cpu => formatter.write_str("CPU"),
             Self::Gpu => formatter.write_str("GPU"),
+            Self::Mixed => formatter.write_str("Mixed"),
         }
     }
 }
@@ -87,6 +90,7 @@ impl FromStr for InferenceDevice {
         match value {
             "cpu" => Ok(Self::Cpu),
             "gpu" => Ok(Self::Gpu),
+            "mixed" => Ok(Self::Mixed),
             unsupported => Err(format!("unsupported inference device: {unsupported}")),
         }
     }

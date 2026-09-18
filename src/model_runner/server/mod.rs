@@ -1,3 +1,4 @@
+use crate::model_runner::InferenceDevice;
 use crate::model_runner::SchedulerConfig;
 use crate::proto::model_runner::model_runner_command;
 use crate::proto::model_runner::model_runner_service_server::ModelRunnerService;
@@ -13,6 +14,9 @@ use anyhow::Context;
 use anyhow::Result;
 use log::info;
 use log::warn;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::thread::JoinHandle;
 use std::time::Instant;
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
@@ -34,10 +38,23 @@ mod text_generation;
 pub(crate) use cli::ModelRunnerProcessArgs;
 use inference_engine::InferenceEngine;
 use model_runner::ModelRunner;
+use model_runner::ModelRunnerMetadata;
 
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_MODEL_RUNNER";
 const INFERENCE_QUEUE_CAPACITY: usize = 32;
 const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
+
+struct InferenceBackend {
+    metadata: ModelRunnerMetadata,
+    thread: JoinHandle<()>,
+    request_sender: mpsc::Sender<InferenceRequest>,
+}
+
+struct InferenceBackends {
+    metadata: ModelRunnerMetadata,
+    threads: Vec<JoinHandle<()>>,
+    request_senders: Vec<mpsc::Sender<InferenceRequest>>,
+}
 
 pub(super) struct InferenceRequest {
     queued_at: Instant,
@@ -50,40 +67,23 @@ pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
 }
 
 async fn run_server(args: ModelRunnerProcessArgs) -> Result<()> {
+    let inference_devices = match args.inference_device {
+        InferenceDevice::Mixed => vec![InferenceDevice::Cpu, InferenceDevice::Gpu],
+        specific_device => vec![specific_device],
+    };
+    let inference_backends: InferenceBackends =
+        create_inference_backends(&args, &inference_devices)?;
+
     // Bind only after model initialization succeeds so the socket itself is a
     // readiness signal for the parent process.
-    let model_runner = ModelRunner::new(
-        &args.model_path,
-        args.draft_model_path.as_deref(),
-        args.draft_token_count,
-        args.inference_device,
-        args.kv_cache_type,
-        args.target_kv_cache_size_bytes,
-    )?;
-    let model_metadata = model_runner.model_metadata();
-    let token_capacity = model_runner.token_capacity();
     let listener = UnixListener::bind(&args.socket_path)
         .context("failed to bind the model runner Unix domain socket")?;
-    let (inference_sender, inference_receiver) = mpsc::channel(INFERENCE_QUEUE_CAPACITY);
-    let scheduler_config = SchedulerConfig {
-        max_batched_token_count: args.max_batched_token_count,
-        max_active_request_count: args.max_active_request_count,
-        scheduling_policy: args.scheduling_policy,
-    };
-    let inference_thread = std::thread::Builder::new()
-        .name("inference-worker".to_owned())
-        .spawn(move || {
-            InferenceEngine::new(model_runner, scheduler_config).run(inference_receiver);
-        })
-        .context("failed to start the model runner inference thread")?;
     let (shutdown, shutdown_receiver) = RpcShutdown::channel();
-    let service = ModelRunnerRpcService {
-        inference_sender,
-        model_metadata,
-        token_capacity,
+    let service = ModelRunnerRpcService::new(
+        inference_backends.metadata,
+        inference_backends.request_senders,
         shutdown,
-    };
-
+    );
     let server_result = tonic::transport::Server::builder()
         .add_service(ModelRunnerServiceServer::new(service))
         .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async {
@@ -91,17 +91,35 @@ async fn run_server(args: ModelRunnerProcessArgs) -> Result<()> {
         })
         .await
         .context("model runner RPC server failed");
-    inference_thread
-        .join()
-        .map_err(|_| anyhow::anyhow!("model runner inference thread panicked"))?;
+
+    for inference_thread in inference_backends.threads.into_iter() {
+        inference_thread
+            .join()
+            .map_err(|_| anyhow::anyhow!("model runner inference thread panicked"))?;
+    }
     server_result
 }
 
 struct ModelRunnerRpcService {
-    inference_sender: mpsc::Sender<InferenceRequest>,
-    model_metadata: GetModelMetadataResponse,
-    token_capacity: usize,
+    metadata: ModelRunnerMetadata,
+    inference_request_senders: Vec<mpsc::Sender<InferenceRequest>>,
+    next_sender_index: AtomicUsize,
     shutdown: RpcShutdown,
+}
+
+impl ModelRunnerRpcService {
+    pub fn new(
+        metadata: ModelRunnerMetadata,
+        inference_request_senders: Vec<mpsc::Sender<InferenceRequest>>,
+        shutdown: RpcShutdown,
+    ) -> Self {
+        Self {
+            metadata,
+            inference_request_senders,
+            next_sender_index: AtomicUsize::new(0),
+            shutdown,
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -112,7 +130,7 @@ impl ModelRunnerService for ModelRunnerRpcService {
         &self,
         _request: Request<GetModelMetadataRequest>,
     ) -> Result<Response<GetModelMetadataResponse>, Status> {
-        Ok(Response::new(self.model_metadata))
+        Ok(Response::new(self.metadata.model_metadata))
     }
 
     async fn generate_text(
@@ -120,12 +138,15 @@ impl ModelRunnerService for ModelRunnerRpcService {
         request: Request<GenerateTextRequest>,
     ) -> Result<Response<Self::GenerateTextStream>, Status> {
         let mut request = request.into_inner();
-        normalize_generate_text_request(&mut request, self.token_capacity)
+        normalize_generate_text_request(&mut request, self.metadata.token_capacity)
             .map_err(Status::invalid_argument)?;
         let request_id = request.request_id;
         let queued_at = Instant::now();
+        // TODO: Use a smarter way to choose inference backend.
+        let sender_index = self.next_sender_index.fetch_add(1, Ordering::Relaxed)
+            % self.inference_request_senders.len();
         let (event_sender, event_receiver) = mpsc::channel(GENERATION_EVENT_QUEUE_CAPACITY);
-        self.inference_sender
+        self.inference_request_senders[sender_index]
             .send(InferenceRequest {
                 queued_at,
                 generate_text: request,
@@ -150,6 +171,67 @@ impl ModelRunnerService for ModelRunnerRpcService {
         }
         Ok(Response::new(CommandResult {}))
     }
+}
+
+fn create_inference_backends(
+    args: &ModelRunnerProcessArgs,
+    inference_devices: &Vec<InferenceDevice>,
+) -> Result<InferenceBackends> {
+    let mut maybe_metadata: Option<ModelRunnerMetadata> = None;
+    let mut threads: Vec<JoinHandle<()>> = Vec::with_capacity(inference_devices.len());
+    let mut request_senders: Vec<mpsc::Sender<InferenceRequest>> =
+        Vec::with_capacity(inference_devices.len());
+    for (index, device) in inference_devices.into_iter().enumerate() {
+        let backend_id = index + 1;
+        let inference_backend: InferenceBackend =
+            create_inference_backend(backend_id, &args, *device)?;
+        if maybe_metadata.is_none() {
+            maybe_metadata = Some(inference_backend.metadata);
+        }
+        threads.push(inference_backend.thread);
+        request_senders.push(inference_backend.request_sender);
+    }
+    let metadata = maybe_metadata.expect("at least one model runner should have been created");
+    Ok(InferenceBackends {
+        metadata,
+        threads,
+        request_senders,
+    })
+}
+
+fn create_inference_backend(
+    backend_id: usize,
+    args: &ModelRunnerProcessArgs,
+    inference_device: InferenceDevice,
+) -> Result<InferenceBackend> {
+    let model_runner = ModelRunner::new(
+        &args.model_path,
+        args.draft_model_path.as_deref(),
+        args.draft_token_count,
+        inference_device,
+        args.kv_cache_type,
+        args.target_kv_cache_size_bytes,
+    )?;
+    let metadata = model_runner.metadata();
+    let (request_sender, request_receiver) = mpsc::channel(INFERENCE_QUEUE_CAPACITY);
+    let scheduler_config = SchedulerConfig {
+        max_batched_token_count: args.max_batched_token_count,
+        max_active_request_count: args.max_active_request_count,
+        scheduling_policy: args.scheduling_policy,
+    };
+    let thread = std::thread::Builder::new()
+        .name(format!("inference-worker-{backend_id}"))
+        .spawn(move || {
+            InferenceEngine::new(backend_id, model_runner, scheduler_config).run(request_receiver);
+        })
+        .context(format!(
+            "failed to start the model runner inference backend {backend_id}"
+        ))?;
+    Ok(InferenceBackend {
+        metadata,
+        thread,
+        request_sender,
+    })
 }
 
 fn normalize_generate_text_request(

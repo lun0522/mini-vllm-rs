@@ -5,6 +5,7 @@ use crate::models::ModelInfo;
 use crate::models::ModelRole;
 use crate::proto::model_runner::GenerateTextRequest;
 use crate::proto::model_runner::GetModelMetadataResponse;
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::Device;
@@ -14,6 +15,11 @@ use std::path::Path;
 use super::kv_cache::create_kv_cache;
 use super::model_instance::ModelInstance;
 use super::text_generation;
+
+pub(super) struct ModelRunnerMetadata {
+    pub model_metadata: GetModelMetadataResponse,
+    pub token_capacity: usize,
+}
 
 /// Owns the loaded models and executes requests on the inference thread.
 pub(super) struct ModelRunner {
@@ -69,17 +75,16 @@ impl ModelRunner {
         })
     }
 
-    pub(super) fn model_metadata(&self) -> GetModelMetadataResponse {
+    pub(super) fn metadata(&self) -> ModelRunnerMetadata {
         let target_model = self.target.model_metadata();
         let draft_model = self.draft.as_ref().map(ModelInstance::model_metadata);
-        GetModelMetadataResponse {
-            target_model: Some(target_model),
-            draft_model,
+        ModelRunnerMetadata {
+            model_metadata: GetModelMetadataResponse {
+                target_model: Some(target_model),
+                draft_model,
+            },
+            token_capacity: self.target.token_capacity(),
         }
-    }
-
-    pub(super) fn token_capacity(&self) -> usize {
-        self.target.token_capacity()
     }
 
     pub(super) fn supports_multiple_active_requests(&self) -> bool {
@@ -203,8 +208,15 @@ impl ModelRunner {
         match inference_device {
             InferenceDevice::Cpu => Ok(Device::Cpu),
             InferenceDevice::Gpu => {
-                Device::new_metal(0).context("failed to initialize the Metal device")
+                cfg_if::cfg_if! {
+                    if #[cfg(target_os = "macos")] {
+                        Device::new_metal(0).context("failed to initialize the Metal device")
+                    } else {
+                        Device::new_cuda(0).context("failed to initialize the CUDA device")
+                    }
+                }
             }
+            InferenceDevice::Mixed => bail!("expecting a specific device type"),
         }
     }
 }

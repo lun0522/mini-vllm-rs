@@ -85,15 +85,15 @@ pub(super) struct RequestExecutionResult {
     pub(super) result: Result<GenerationPhase>,
 }
 
-/// Owns request payloads, execution state, response channels, and lifecycle timing.
-pub(super) struct RequestManager {
-    request_states: HashMap<u64, RequestState>,
-}
-
 struct ScheduledExecutionMetadata {
     request_id: u64,
     context: RequestContext,
     metrics: RequestExecutionMetrics,
+}
+
+/// Owns request payloads, execution state, response channels, and lifecycle timing.
+pub(super) struct RequestManager {
+    request_states: HashMap<u64, RequestState>,
 }
 
 impl RequestManager {

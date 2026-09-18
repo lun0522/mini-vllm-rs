@@ -107,8 +107,8 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
     };
 
     let mut layers = Vec::with_capacity(block_count);
-    for layer_idx in 0..block_count {
-        let prefix = format!("blk.{layer_idx}");
+    for layer_index in 0..block_count {
+        let prefix = format!("blk.{layer_index}");
         let attn_wq = ct.tensor(reader, &format!("{prefix}.attn_q.weight"), device)?;
         let attn_wk = ct.tensor(reader, &format!("{prefix}.attn_k.weight"), device)?;
         let attn_wv = ct.tensor(reader, &format!("{prefix}.attn_v.weight"), device)?;

@@ -103,17 +103,10 @@ tokens from capacity for speculative slots in its
 ### Planned architectural changes
 
 - Make scheduler admission aware of available paged KV-cache capacity.
-- Batch scheduled prefill and decode work into model forward calls on one local
-  Metal worker.
 - Add routing across local CPU and Metal workers for heterogeneous-device
   experiments.
-- Add independent model replicas and per-model workers for data parallelism and
-  serving multiple small models.
-- Implement model kernels with NVIDIA's `cutile-rs`, including paged attention
-  that operates directly on cache pages without concatenating tensors, and
-  verify the backend on Linux with NVIDIA GPUs.
-- Experiment with lightweight speculative decoding algorithms such as n-gram
-  speculation.
+- Verify the backend on Linux with NVIDIA GPUs, and integrate with
+  candle-flash-attn for paged attention support.
 - Support multimodal models small enough for local execution.
 
 ## Run

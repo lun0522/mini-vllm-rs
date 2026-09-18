@@ -22,26 +22,32 @@ use super::InferenceRequest;
 
 /// Coordinates request storage, scheduling, model execution, and result delivery.
 pub(super) struct InferenceEngine {
+    backend_id: usize,
     model_runner: ModelRunner,
     request_manager: RequestManager,
     scheduler: Scheduler,
 }
 
 impl InferenceEngine {
-    pub(super) fn new(model_runner: ModelRunner, scheduler_config: SchedulerConfig) -> Self {
+    pub(super) fn new(
+        backend_id: usize,
+        model_runner: ModelRunner,
+        scheduler_config: SchedulerConfig,
+    ) -> Self {
         let scheduler_config = normalize_scheduler_config(&model_runner, scheduler_config);
         info!("Scheduler config: {scheduler_config}");
         Self {
+            backend_id,
             model_runner,
             request_manager: RequestManager::new(),
             scheduler: Scheduler::new(scheduler_config),
         }
     }
 
-    pub(super) fn run(mut self, mut inference_receiver: mpsc::Receiver<InferenceRequest>) {
+    pub(super) fn run(mut self, mut request_receiver: mpsc::Receiver<InferenceRequest>) {
         loop {
             if self.scheduler.is_vacant() {
-                let Some(request) = inference_receiver.blocking_recv() else {
+                let Some(request) = request_receiver.blocking_recv() else {
                     break;
                 };
                 if let Err(error) = self.enqueue_request(request) {
@@ -49,7 +55,7 @@ impl InferenceEngine {
                     continue;
                 }
             }
-            while let Ok(request) = inference_receiver.try_recv() {
+            while let Ok(request) = request_receiver.try_recv() {
                 if let Err(error) = self.enqueue_request(request) {
                     error!("Inference engine failed to enqueue a request: {error:#}");
                 }
@@ -88,8 +94,9 @@ impl InferenceEngine {
         self.scheduler
             .update_request_state(request_id, started_request.generation_phase)?;
         info!(
-            "Engine state: request_id={} status=started input_tokens={} generation_phase={} \
-             ignore_eos_tokens={} queue_us={}",
+            "Engine state (backend_id={}): request_id={} status=started input_tokens={} \
+             generation_phase={} ignore_eos_tokens={} queue_us={}",
+            self.backend_id,
             request_id,
             started_request.input_token_count,
             started_request.generation_phase,
@@ -182,16 +189,26 @@ impl InferenceEngine {
                 );
                 let draft_stats = result.stats.draft_stats.as_ref();
                 info!(
-                    "Engine state: request_id={} status=completed input_tokens={} output_tokens={} queue_us={} \
-                     prefill_us={} ttft_us={} decode_us={} target_cached_tokens={} \
-                     draft_cached_tokens={} draft_accepted={} draft_proposed={}",
+                    "Engine state (backend_id={}): request_id={} status=completed input_tokens={} \
+                     output_tokens={} queue_us={} prefill_us={} ttft_us={} decode_us={} \
+                     target_cached_tokens={} draft_cached_tokens={} draft_accepted={} \
+                     draft_proposed={}",
+                    self.backend_id,
                     request_id,
                     result.stats.input_token_count,
                     result.stats.output_token_count,
                     queue_duration.as_micros().separate_with_commas(),
-                    result.stats.prefill_duration.as_micros().separate_with_commas(),
+                    result
+                        .stats
+                        .prefill_duration
+                        .as_micros()
+                        .separate_with_commas(),
                     ttft_as_micros_string,
-                    result.stats.decode_duration.as_micros().separate_with_commas(),
+                    result
+                        .stats
+                        .decode_duration
+                        .as_micros()
+                        .separate_with_commas(),
                     result.stats.target_cached_token_count,
                     count_to_string(draft_stats.map(|stats| stats.cached_token_count)),
                     count_to_string(draft_stats.map(|stats| stats.accepted_token_count)),
@@ -202,8 +219,9 @@ impl InferenceEngine {
             Err(error) => {
                 let status = generation_error_status(error);
                 info!(
-                    "Engine state: request_id={} status={} input_tokens={} output_tokens={} queue_us={} \
-                     ttft_us={}",
+                    "Engine state (backend_id={}): request_id={} status={} input_tokens={} \
+                     output_tokens={} queue_us={} ttft_us={}",
+                    self.backend_id,
                     request_id,
                     status.code(),
                     request_outcome.context.input_token_count,
