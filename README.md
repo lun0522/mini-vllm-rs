@@ -135,10 +135,7 @@ Input preprocessing uses four request-handler worker threads by default. Use
 
 The scheduler can be configured with
 `--max-batched-token-count`, `--max-active-request-count`, and
-`--scheduling-policy`. Pass `--enable-continuous-batching` to execute scheduled
-requests together in batched model forwards. Without the flag, the same
-scheduler executes each selected request sequentially as a baseline without
-batching overhead.
+`--scheduling-policy`.
 
 Optionally, set the `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` environment
 variables for CPU inference to control the number of CPU worker threads.

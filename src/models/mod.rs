@@ -11,14 +11,6 @@ use std::fmt;
 pub(crate) trait CausalLanguageModel: Send {
     fn info(&self) -> &ModelInfo;
 
-    /// Returns next-token logits shaped `(vocabulary_size)`.
-    fn forward(
-        &mut self,
-        input: &Tensor,
-        context: &ForwardContext,
-        kv_cache: &mut dyn KvCache,
-    ) -> Result<Tensor>;
-
     /// Returns one next-token logits tensor per request, each shaped
     /// `(vocabulary_size)`, in input order.
     fn forward_batched(
@@ -46,22 +38,6 @@ pub(crate) trait CausalLanguageModel: Send {
         verification_inputs: &[BatchedForwardInput],
         kv_cache: &mut dyn BatchedKvCache,
     ) -> Result<BatchedForwardOutput>;
-
-    /// Returns logits for every input position, shaped
-    /// `(batch_size, sequence_length, vocabulary_size)`. Speculative decoding uses these logits
-    /// to verify multiple draft tokens with one target-model forward pass.
-    fn forward_for_speculative_verification(
-        &mut self,
-        input: &Tensor,
-        context: &ForwardContext,
-        kv_cache: &mut dyn KvCache,
-    ) -> Result<Tensor>;
-}
-
-/// Identifies the request and token position processed by one model forward pass.
-pub(crate) struct ForwardContext {
-    pub(crate) request_id: u64,
-    pub(crate) start_position: usize,
 }
 
 /// Provides one request's input and position to a batched model forward pass.
@@ -75,18 +51,6 @@ pub(crate) struct BatchedForwardInput {
 pub(crate) struct BatchedForwardOutput {
     pub(crate) generation_logits: Vec<Tensor>,
     pub(crate) verification_logits: Vec<Tensor>,
-}
-
-/// Provides request-specific key and value tensors to model layers.
-pub(crate) trait KvCache: Send {
-    /// Stores newly computed key/value tensors and returns the complete layer cache for attention.
-    fn append(
-        &mut self,
-        context: &ForwardContext,
-        layer_index: usize,
-        key: &Tensor,
-        value: &Tensor,
-    ) -> Result<CachedKeyValue>;
 }
 
 /// Provides request-specific key and value tensors during batched model execution.

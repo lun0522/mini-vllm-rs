@@ -1,7 +1,6 @@
 use crate::models::loaded_model::LoadedModel;
 use crate::models::BatchedForwardInput;
 use crate::models::BatchedForwardOutput;
-use crate::models::ForwardContext;
 use crate::proto::model_runner::ModelMetadata;
 use anyhow::Result;
 use candle_core::Tensor;
@@ -29,21 +28,6 @@ impl ModelInstance {
 
     pub(super) fn supports_multiple_active_requests(&self) -> bool {
         self.kv_cache_manager.supports_multiple_active_requests()
-    }
-
-    pub(super) fn forward(
-        &mut self,
-        request_id: u64,
-        input: &Tensor,
-        start_position: usize,
-    ) -> Result<Tensor> {
-        let context = ForwardContext {
-            request_id,
-            start_position,
-        };
-        self.model
-            .model()
-            .forward(input, &context, &mut self.kv_cache_manager)
     }
 
     pub(super) fn forward_batched(
@@ -79,23 +63,6 @@ impl ModelInstance {
 
     pub(super) fn create_input_tensor(&self, token_ids: &[u32]) -> candle_core::Result<Tensor> {
         Tensor::new(token_ids, self.model.device())?.unsqueeze(0)
-    }
-
-    pub(super) fn forward_for_speculative_verification(
-        &mut self,
-        request_id: u64,
-        input: &Tensor,
-        start_position: usize,
-    ) -> Result<Tensor> {
-        let context = ForwardContext {
-            request_id,
-            start_position,
-        };
-        self.model.model().forward_for_speculative_verification(
-            input,
-            &context,
-            &mut self.kv_cache_manager,
-        )
     }
 
     /// Restores reusable prefix pages and returns the prefill start position.

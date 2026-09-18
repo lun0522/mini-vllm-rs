@@ -32,7 +32,6 @@ pub(crate) struct ModelRunnerProcess {
 
 pub(crate) struct ModelRunnerProcessConfig {
     pub(crate) draft_token_count: usize,
-    pub(crate) enable_continuous_batching: bool,
     pub(crate) inference_device: InferenceDevice,
     pub(crate) kv_cache_type: KvCacheType,
     pub(crate) target_kv_cache_size_bytes: usize,
@@ -134,9 +133,6 @@ fn spawn(
         .arg(config.scheduler_config.max_active_request_count.to_string())
         .arg("--scheduling-policy")
         .arg(config.scheduler_config.scheduling_policy.to_string());
-    if config.enable_continuous_batching {
-        command.arg("--enable-continuous-batching");
-    }
     if let Some(draft_model_artifacts) = draft_model_artifacts {
         command
             .arg("--draft-model-path")

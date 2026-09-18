@@ -56,7 +56,6 @@ async fn run_server(args: ModelRunnerProcessArgs) -> Result<()> {
         &args.model_path,
         args.draft_model_path.as_deref(),
         args.draft_token_count,
-        args.enable_continuous_batching,
         args.inference_device,
         args.kv_cache_type,
         args.target_kv_cache_size_bytes,

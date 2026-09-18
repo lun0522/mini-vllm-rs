@@ -172,53 +172,6 @@ impl RequestManager {
         }
     }
 
-    /// Runs one model step, sends its output, and records request latency information.
-    pub(super) fn advance_execution(
-        &mut self,
-        request_id: u64,
-        run_one_step: impl FnOnce(&mut RequestExecutionState) -> Result<GenerationStep>,
-    ) -> Result<GenerationPhase> {
-        let request = self.remove_request(request_id)?;
-        let RequestState::Executing {
-            context,
-            mut execution_state,
-            mut metrics,
-        } = request
-        else {
-            self.request_states.insert(request_id, request);
-            bail!("inference request {request_id} is not executing");
-        };
-        if context.event_sender.is_closed() {
-            self.request_states
-                .insert(request_id, RequestState::Cancelled { context, metrics });
-            return Err(text_generation::GenerationCancelled.into());
-        }
-        let step = match run_one_step(&mut execution_state) {
-            Ok(step) => step,
-            Err(error) => {
-                self.request_states.insert(
-                    request_id,
-                    RequestState::FailedToExecute { context, metrics },
-                );
-                return Err(error);
-            }
-        };
-        if let Err(error) = send_output_tokens(&context, &mut metrics, step.output_token_ids) {
-            self.request_states
-                .insert(request_id, RequestState::Cancelled { context, metrics });
-            return Err(error);
-        }
-        self.request_states.insert(
-            request_id,
-            RequestState::Executing {
-                context,
-                execution_state,
-                metrics,
-            },
-        );
-        Ok(step.generation_phase)
-    }
-
     /// Advances all valid scheduled requests in one model execution.
     ///
     /// Results may not preserve `scheduled_requests` order because invalid or
@@ -515,56 +468,6 @@ mod tests {
     }
 
     #[test]
-    fn owns_request_execution_state_through_the_request_lifecycle() -> Result<()> {
-        let mut requests = RequestManager::new();
-        let (request, mut event_receiver) = request(7);
-        requests.add_request(request)?;
-        let started_request = requests.start_execution(7, |generate_text| {
-            RequestExecutionState::new(
-                generate_text,
-                4,
-                PrefillStartPositions {
-                    target: 0,
-                    draft: None,
-                },
-            )
-        })?;
-        assert_eq!(started_request.input_token_count, 1);
-        requests.advance_execution(7, |state| {
-            assert_eq!(state.request_id(), 7);
-            Ok(GenerationStep {
-                output_token_ids: vec![42],
-                generation_phase: GenerationPhase::Finished,
-            })
-        })?;
-        assert!(matches!(
-            event_receiver.blocking_recv(),
-            Some(Ok(GenerateTextEvent {
-                event: Some(generate_text_event::Event::TokenId(42))
-            }))
-        ));
-        let request = requests.finish_request(7, |state| {
-            assert_eq!(state.request_id(), 7);
-            Ok(CompletedGeneration {
-                cached_sequence_token_ids: vec![1, 42],
-                stats: text_generation::TextGenerationStats {
-                    input_token_count: 1,
-                    output_token_count: 1,
-                    target_cached_token_count: 0,
-                    draft_stats: None,
-                    prefill_duration: Duration::ZERO,
-                    decode_duration: Duration::ZERO,
-                },
-            })
-        })?;
-
-        assert!(request.result.is_ok());
-        assert_eq!(request.context.input_token_count, 1);
-        assert_eq!(request.metrics.output_token_count, 1);
-        Ok(())
-    }
-
-    #[test]
     fn rejects_duplicate_request_ids() -> Result<()> {
         let mut requests = RequestManager::new();
         let (original, _event_receiver) = request(7);
@@ -629,44 +532,6 @@ mod tests {
         assert_eq!(error.to_string(), "inference request 9 is not executing");
         assert_eq!(results[2].request_id, 7);
         assert!(matches!(&results[2].result, Ok(GenerationPhase::Finished)));
-        Ok(())
-    }
-
-    #[test]
-    fn treats_a_dropped_response_stream_as_cancellation() -> Result<()> {
-        let mut requests = RequestManager::new();
-        let (request, event_receiver) = request(7);
-        requests.add_request(request)?;
-        drop(event_receiver);
-
-        requests.start_execution(7, |generate_text| {
-            RequestExecutionState::new(
-                generate_text,
-                4,
-                PrefillStartPositions {
-                    target: 0,
-                    draft: None,
-                },
-            )
-        })?;
-        let error = match requests.advance_execution(7, |_| {
-            Ok(GenerationStep {
-                output_token_ids: vec![42],
-                generation_phase: GenerationPhase::Finished,
-            })
-        }) {
-            Ok(_) => panic!("token send should fail"),
-            Err(error) => error,
-        };
-
-        assert!(error
-            .downcast_ref::<text_generation::GenerationCancelled>()
-            .is_some());
-        let error = match requests.advance_execution(7, |_| panic!("cancelled request advanced")) {
-            Ok(_) => panic!("cancelled request should not advance again"),
-            Err(error) => error,
-        };
-        assert_eq!(error.to_string(), "inference request 7 is not executing");
         Ok(())
     }
 }

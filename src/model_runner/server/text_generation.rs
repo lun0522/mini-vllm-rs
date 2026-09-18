@@ -446,51 +446,6 @@ impl RequestExecutionState {
         })
     }
 
-    /// Advances one prefill phase or decode iteration and then yields back to the caller.
-    pub(super) fn run_one_step(
-        &mut self,
-        target: &mut ModelInstance,
-        draft: Option<&mut ModelInstance>,
-        token_budget: usize,
-    ) -> Result<GenerationStep> {
-        let Some(draft) = draft else {
-            return self.run_target_iteration(target, token_budget);
-        };
-
-        self.pending_output_token_ids.clear();
-        self.generation_phase = match self.generation_phase {
-            GenerationPhase::Prefill { .. } => {
-                self.run_speculative_prefill_chunk(target, draft, token_budget)?
-            }
-            GenerationPhase::Decode {
-                generated_token_count,
-            } => {
-                let started = Instant::now();
-                let phase = self.run_decode_iteration(target, draft, generated_token_count)?;
-                self.decode_duration += started.elapsed();
-                phase
-            }
-            GenerationPhase::Finished => GenerationPhase::Finished,
-        };
-        Ok(GenerationStep {
-            output_token_ids: std::mem::take(&mut self.pending_output_token_ids),
-            generation_phase: self.generation_phase,
-        })
-    }
-
-    fn run_target_iteration(
-        &mut self,
-        target: &mut ModelInstance,
-        token_budget: usize,
-    ) -> Result<GenerationStep> {
-        ensure!(token_budget > 0, "token budget must be greater than zero");
-        self.pending_output_token_ids.clear();
-        let (model_forward, prepared_phase) = self.prepare_target_forward(token_budget)?;
-        let input = target.create_input_tensor(&model_forward.input_token_ids)?;
-        let logits = target.forward(self.request_id, &input, model_forward.start_position)?;
-        self.complete_forward(prepared_phase, &logits)
-    }
-
     pub(super) fn into_completed_generation(self) -> Result<CompletedGeneration> {
         ensure!(
             matches!(self.generation_phase, GenerationPhase::Finished),
@@ -518,84 +473,6 @@ impl RequestExecutionState {
             cached_sequence_token_ids: self.tokens,
             stats,
         })
-    }
-
-    fn run_speculative_prefill_chunk(
-        &mut self,
-        target: &mut ModelInstance,
-        draft: &mut ModelInstance,
-        token_budget: usize,
-    ) -> Result<GenerationPhase> {
-        let prepared = self.prepare_speculative_prefill(token_budget)?;
-        if let Some(target_forward) = &prepared.target {
-            self.forward_prepared_input(target, target_forward)?;
-        }
-        if let Some(draft_forward) = &prepared.draft {
-            self.forward_prepared_input(draft, draft_forward)?;
-        }
-        Ok(self
-            .complete_speculative_prefill(prepared)?
-            .generation_phase)
-    }
-
-    fn forward_prepared_input(
-        &self,
-        model: &mut ModelInstance,
-        prepared: &PreparedModelForward,
-    ) -> Result<()> {
-        let input = model.create_input_tensor(&prepared.input_token_ids)?;
-        model.forward(self.request_id, &input, prepared.start_position)?;
-        Ok(())
-    }
-
-    fn run_decode_iteration(
-        &mut self,
-        target: &mut ModelInstance,
-        draft: &mut ModelInstance,
-        generated_token_count: usize,
-    ) -> Result<GenerationPhase> {
-        let DecodeIterationResult {
-            committed_token_count,
-            should_continue,
-        } = self.run_speculative_iteration(
-            target,
-            draft,
-            self.max_new_token_count - generated_token_count,
-        )?;
-        let generated_token_count = generated_token_count + committed_token_count;
-        Ok(self.determine_decode_phase(generated_token_count, should_continue))
-    }
-
-    fn run_speculative_iteration(
-        &mut self,
-        target: &mut ModelInstance,
-        draft: &mut ModelInstance,
-        remaining_max_token_count: usize,
-    ) -> Result<DecodeIterationResult> {
-        // Generate draft proposals autoregressively, starting with the pending input or output
-        // token that has not yet been written to either model's KV cache.
-        let original_cached_token_count = self.tokens.len() - 1;
-        let draft_tokens = self.generate_draft_tokens(
-            draft,
-            original_cached_token_count,
-            remaining_max_token_count,
-        )?;
-
-        // Run the target model once over the pending token and proposed prefix, producing one
-        // set of verification logits for every draft token.
-        let verification_logits = self.compute_draft_verification_logits(
-            target,
-            &draft_tokens,
-            original_cached_token_count,
-        )?;
-
-        self.complete_speculative_iteration(
-            target,
-            draft,
-            original_cached_token_count,
-            &draft_tokens,
-            &verification_logits,
-        )
     }
 
     fn complete_speculative_iteration(
@@ -629,48 +506,6 @@ impl RequestExecutionState {
             &draft_tokens[..accepted_token_count],
             maybe_replacement_token,
         ))
-    }
-
-    fn generate_draft_tokens(
-        &mut self,
-        draft: &mut ModelInstance,
-        original_cached_token_count: usize,
-        remaining_max_token_count: usize,
-    ) -> Result<Vec<u32>> {
-        // Limit the proposal batch to the request's remaining output budget.
-        let draft_token_count = self.draft_token_count.min(remaining_max_token_count);
-        let mut draft_tokens = Vec::with_capacity(draft_token_count);
-        for _ in 0..draft_token_count {
-            let start_position = original_cached_token_count + draft_tokens.len();
-            let input_token = draft_tokens
-                .last()
-                .copied()
-                .or_else(|| self.tokens.last().copied())
-                .context("generation context is empty")?;
-            let next_token =
-                self.sample_next_draft_token(draft, &[input_token], start_position, &draft_tokens)?;
-            draft_tokens.push(next_token);
-            if self.eos_tokens.contains(&next_token) {
-                break;
-            }
-        }
-        Ok(draft_tokens)
-    }
-
-    fn compute_draft_verification_logits(
-        &self,
-        target: &mut ModelInstance,
-        draft_tokens: &[u32],
-        start_position: usize,
-    ) -> Result<Tensor> {
-        let mut verification_tokens = Vec::with_capacity(draft_tokens.len());
-        verification_tokens.push(*self.tokens.last().context("generation context is empty")?);
-        verification_tokens.extend_from_slice(&draft_tokens[..draft_tokens.len() - 1]);
-        let input = target.create_input_tensor(&verification_tokens)?;
-        Ok(target
-            .forward_for_speculative_verification(self.request_id, &input, start_position)?
-            .squeeze(0)?
-            .to_dtype(DType::F32)?)
     }
 
     fn verify_draft_tokens(
@@ -730,19 +565,6 @@ impl RequestExecutionState {
             committed_token_count,
             should_continue: true,
         }
-    }
-
-    fn sample_next_draft_token(
-        &mut self,
-        draft: &mut ModelInstance,
-        input_tokens: &[u32],
-        start_position: usize,
-        appended_tokens: &[u32],
-    ) -> Result<u32> {
-        let input = draft.create_input_tensor(input_tokens)?;
-        let logits = draft.forward(self.request_id, &input, start_position)?;
-        let logits = logits.to_dtype(DType::F32)?;
-        self.sample_logits(&logits, appended_tokens, ModelRole::Draft)
     }
 
     fn sample_and_commit_target_token(&mut self, logits: &Tensor) -> Result<bool> {
@@ -1299,8 +1121,6 @@ mod tests {
     use crate::models::BatchedForwardOutput;
     use crate::models::BatchedKvCache;
     use crate::models::CausalLanguageModel;
-    use crate::models::ForwardContext;
-    use crate::models::KvCache;
     use crate::models::ModelInfo;
     use crate::models::ModelRole;
     use candle_core::Device;
@@ -1322,22 +1142,6 @@ mod tests {
     impl CausalLanguageModel for TestModel {
         fn info(&self) -> &ModelInfo {
             &self.info
-        }
-
-        fn forward(
-            &mut self,
-            input: &Tensor,
-            context: &ForwardContext,
-            _kv_cache: &mut dyn KvCache,
-        ) -> Result<Tensor> {
-            let token_ids = input.to_vec2::<u32>()?.into_iter().flatten().collect();
-            self.forward_calls.lock().unwrap().push(ForwardCall {
-                start_position: context.start_position,
-                token_ids,
-            });
-            let mut logits = vec![0.0f32; 8];
-            logits[self.next_token as usize] = 1.0;
-            Ok(Tensor::new(logits.as_slice(), &Device::Cpu)?)
         }
 
         fn forward_batched_with_speculative_verification(
@@ -1389,15 +1193,6 @@ mod tests {
                 generation_logits,
                 verification_logits,
             })
-        }
-
-        fn forward_for_speculative_verification(
-            &mut self,
-            input: &Tensor,
-            context: &ForwardContext,
-            kv_cache: &mut dyn KvCache,
-        ) -> Result<Tensor> {
-            Ok(self.forward(input, context, kv_cache)?.reshape((1, 1, 8))?)
         }
     }
 
@@ -1504,34 +1299,6 @@ mod tests {
                 remaining_token_count: 4
             }
         ));
-        Ok(())
-    }
-
-    #[test]
-    fn runs_a_partial_target_prefill_chunk() -> Result<()> {
-        let mut execution_state = create_test_execution_state(vec![1, 2, 3, 4], vec![]);
-        execution_state.prefill_current_positions.target = 0;
-        execution_state.generation_phase = GenerationPhase::Prefill {
-            remaining_token_count: 4,
-        };
-        let (mut target, forward_calls) = create_test_model(5)?;
-
-        let step = execution_state.run_one_step(&mut target, None, 2)?;
-
-        assert!(matches!(
-            step.generation_phase,
-            GenerationPhase::Prefill {
-                remaining_token_count: 2
-            }
-        ));
-        assert_eq!(execution_state.prefill_current_positions.target, 2);
-        assert_eq!(
-            *forward_calls.lock().unwrap(),
-            vec![ForwardCall {
-                start_position: 0,
-                token_ids: vec![1, 2],
-            }]
-        );
         Ok(())
     }
 
@@ -1764,129 +1531,6 @@ mod tests {
                 },
             ]
         );
-        Ok(())
-    }
-
-    #[test]
-    fn final_target_prefill_chunk_generates_the_first_output_token() -> Result<()> {
-        let mut execution_state = create_test_execution_state(vec![1, 2, 3, 4], vec![]);
-        execution_state.prefill_current_positions.target = 2;
-        execution_state.generation_phase = GenerationPhase::Prefill {
-            remaining_token_count: 2,
-        };
-        let (mut target, forward_calls) = create_test_model(5)?;
-
-        let step = execution_state.run_one_step(&mut target, None, 8)?;
-
-        assert!(matches!(
-            step.generation_phase,
-            GenerationPhase::Decode {
-                generated_token_count: 1
-            }
-        ));
-        assert_eq!(execution_state.prefill_current_positions.target, 4);
-        assert_eq!(execution_state.tokens, vec![1, 2, 3, 4, 5]);
-        assert_eq!(step.output_token_ids, vec![5]);
-        assert_eq!(
-            *forward_calls.lock().unwrap(),
-            vec![ForwardCall {
-                start_position: 2,
-                token_ids: vec![3, 4],
-            }]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn speculative_prefill_advances_the_lagging_model_then_both_models() -> Result<()> {
-        let mut execution_state = create_test_execution_state(vec![1, 2, 3, 4, 5, 6], vec![]);
-        execution_state.prefill_current_positions = PrefillStartPositions {
-            target: 3,
-            draft: Some(1),
-        };
-        let (mut target, target_calls) = create_test_model(6)?;
-        let (mut draft, draft_calls) = create_test_model(6)?;
-
-        let phase = execution_state.run_speculative_prefill_chunk(&mut target, &mut draft, 2)?;
-
-        assert!(matches!(
-            phase,
-            GenerationPhase::Prefill {
-                remaining_token_count: 2
-            }
-        ));
-        assert_eq!(execution_state.prefill_current_positions.target, 3);
-        assert_eq!(execution_state.prefill_current_positions.draft, Some(3));
-        assert!(target_calls.lock().unwrap().is_empty());
-        assert_eq!(
-            *draft_calls.lock().unwrap(),
-            vec![ForwardCall {
-                start_position: 1,
-                token_ids: vec![2, 3],
-            }]
-        );
-
-        let phase = execution_state.run_speculative_prefill_chunk(&mut target, &mut draft, 8)?;
-
-        assert!(matches!(
-            phase,
-            GenerationPhase::Decode {
-                generated_token_count: 0
-            }
-        ));
-        assert_eq!(execution_state.prefill_current_positions.target, 5);
-        assert_eq!(execution_state.prefill_current_positions.draft, Some(5));
-        assert_eq!(
-            *target_calls.lock().unwrap(),
-            vec![ForwardCall {
-                start_position: 3,
-                token_ids: vec![4, 5],
-            }]
-        );
-        assert_eq!(
-            *draft_calls.lock().unwrap(),
-            vec![
-                ForwardCall {
-                    start_position: 1,
-                    token_ids: vec![2, 3],
-                },
-                ForwardCall {
-                    start_position: 3,
-                    token_ids: vec![4, 5],
-                },
-            ]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn speculative_prefill_advances_the_target_when_the_draft_is_ahead() -> Result<()> {
-        let mut execution_state = create_test_execution_state(vec![1, 2, 3, 4, 5, 6], vec![]);
-        execution_state.prefill_current_positions = PrefillStartPositions {
-            target: 1,
-            draft: Some(3),
-        };
-        let (mut target, target_calls) = create_test_model(6)?;
-        let (mut draft, draft_calls) = create_test_model(6)?;
-
-        let phase = execution_state.run_speculative_prefill_chunk(&mut target, &mut draft, 2)?;
-
-        assert!(matches!(
-            phase,
-            GenerationPhase::Prefill {
-                remaining_token_count: 2
-            }
-        ));
-        assert_eq!(execution_state.prefill_current_positions.target, 3);
-        assert_eq!(execution_state.prefill_current_positions.draft, Some(3));
-        assert_eq!(
-            *target_calls.lock().unwrap(),
-            vec![ForwardCall {
-                start_position: 1,
-                token_ids: vec![2, 3],
-            }]
-        );
-        assert!(draft_calls.lock().unwrap().is_empty());
         Ok(())
     }
 

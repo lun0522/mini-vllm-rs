@@ -27,8 +27,6 @@ use crate::models::BatchedForwardInput;
 use crate::models::BatchedForwardOutput;
 use crate::models::BatchedKvCache;
 use crate::models::CausalLanguageModel;
-use crate::models::ForwardContext;
-use crate::models::KvCache;
 use crate::models::ModelInfo;
 use anyhow::Result;
 use candle::quantized::gguf_file;
@@ -61,15 +59,6 @@ impl CausalLanguageModel for LlamaBackend {
         &self.model_info
     }
 
-    fn forward(
-        &mut self,
-        input: &Tensor,
-        context: &ForwardContext,
-        kv_cache: &mut dyn KvCache,
-    ) -> Result<Tensor> {
-        Ok(self.model.forward(input, context, kv_cache)?)
-    }
-
     fn forward_batched_with_speculative_verification(
         &mut self,
         generation_inputs: &[BatchedForwardInput],
@@ -81,17 +70,6 @@ impl CausalLanguageModel for LlamaBackend {
             verification_inputs,
             kv_cache,
         )?)
-    }
-
-    fn forward_for_speculative_verification(
-        &mut self,
-        input: &Tensor,
-        context: &ForwardContext,
-        kv_cache: &mut dyn KvCache,
-    ) -> Result<Tensor> {
-        Ok(self
-            .model
-            .forward_for_speculative_verification(input, context, kv_cache)?)
     }
 }
 

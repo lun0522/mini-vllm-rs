@@ -3,8 +3,6 @@ use super::paged_cache::RequestPagedCacheState;
 use super::KvCacheBackend;
 use crate::models::BatchedKvCache;
 use crate::models::CachedKeyValue;
-use crate::models::ForwardContext;
-use crate::models::KvCache;
 use anyhow::bail;
 use anyhow::ensure;
 use anyhow::Context;
@@ -132,40 +130,6 @@ impl KvCacheManager {
             }
             _ => bail!("KV cache backend and request state do not match"),
         }
-    }
-}
-
-impl KvCache for KvCacheManager {
-    fn append(
-        &mut self,
-        context: &ForwardContext,
-        layer_index: usize,
-        key: &Tensor,
-        value: &Tensor,
-    ) -> Result<CachedKeyValue> {
-        self.with_request_state(
-            context.request_id,
-            /* handle_contiguous */
-            |cache, request_state| {
-                cache.append(
-                    request_state,
-                    layer_index,
-                    context.start_position,
-                    key,
-                    value,
-                )
-            },
-            /* handle_paged */
-            |cache, request_state| {
-                cache.append(
-                    request_state,
-                    layer_index,
-                    context.start_position,
-                    key,
-                    value,
-                )
-            },
-        )
     }
 }
 

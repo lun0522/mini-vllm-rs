@@ -20,7 +20,6 @@ pub(super) struct ModelRunner {
     target: ModelInstance,
     draft: Option<ModelInstance>,
     draft_token_count: usize,
-    enable_continuous_batching: bool,
 }
 
 impl ModelRunner {
@@ -28,7 +27,6 @@ impl ModelRunner {
         model_path: &Path,
         draft_model_path: Option<&Path>,
         draft_token_count: usize,
-        enable_continuous_batching: bool,
         inference_device: InferenceDevice,
         kv_cache_type: KvCacheType,
         target_kv_cache_size_bytes: usize,
@@ -68,7 +66,6 @@ impl ModelRunner {
             target: ModelInstance::new(loaded_model, target_kv_cache),
             draft,
             draft_token_count,
-            enable_continuous_batching,
         })
     }
 
@@ -87,10 +84,6 @@ impl ModelRunner {
 
     pub(super) fn supports_multiple_active_requests(&self) -> bool {
         self.target.supports_multiple_active_requests()
-    }
-
-    pub(super) fn is_continuous_batching_enabled(&self) -> bool {
-        self.enable_continuous_batching
     }
 
     pub(super) fn start_request(
@@ -133,14 +126,6 @@ impl ModelRunner {
                 Err(error)
             }
         }
-    }
-
-    pub(super) fn run_one_step(
-        &mut self,
-        execution_state: &mut text_generation::RequestExecutionState,
-        token_budget: usize,
-    ) -> Result<text_generation::GenerationStep> {
-        execution_state.run_one_step(&mut self.target, self.draft.as_mut(), token_budget)
     }
 
     pub(super) fn run_batched_steps(

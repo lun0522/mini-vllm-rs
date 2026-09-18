@@ -26,7 +26,6 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
         draft_model_artifacts.as_ref(),
         ModelRunnerProcessConfig {
             draft_token_count: args.draft_token_count,
-            enable_continuous_batching: args.enable_continuous_batching,
             inference_device: args.inference_device,
             kv_cache_type: args.kv_cache_type,
             target_kv_cache_size_bytes: args.target_kv_cache_size_bytes,

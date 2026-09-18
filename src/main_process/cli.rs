@@ -41,9 +41,6 @@ pub(crate) struct MainProcessArgs {
     /// maximum number of tokens processed in one model batch
     #[argh(option, default = "DEFAULT_MAX_BATCHED_TOKEN_COUNT")]
     pub(crate) max_batched_token_count: usize,
-    /// enable continuous batching in the model runner
-    #[argh(switch)]
-    pub(crate) enable_continuous_batching: bool,
     /// maximum number of requests that may hold active inference state
     #[argh(option, default = "DEFAULT_MAX_ACTIVE_REQUEST_COUNT")]
     pub(crate) max_active_request_count: usize,
@@ -87,11 +84,6 @@ impl fmt::Display for MainProcessArgs {
             formatter,
             "Maximum batched token count: {}",
             self.max_batched_token_count.separate_with_commas()
-        )?;
-        writeln!(
-            formatter,
-            "Continuous batching: {}",
-            self.enable_continuous_batching
         )?;
         writeln!(
             formatter,
@@ -217,14 +209,6 @@ mod tests {
             .expect("CPU arguments should parse");
 
         assert_eq!(args.inference_device, InferenceDevice::Cpu);
-    }
-
-    #[test]
-    fn enables_continuous_batching() {
-        let args = MainProcessArgs::from_args(&["mini-vllm-rs"], &["--enable-continuous-batching"])
-            .expect("continuous-batching arguments should parse");
-
-        assert!(args.enable_continuous_batching);
     }
 
     #[test]

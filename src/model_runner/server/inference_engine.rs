@@ -15,8 +15,8 @@ use super::model_runner::ModelRunner;
 use super::request_manager::RequestExecutionResult;
 use super::request_manager::RequestManager;
 use super::request_manager::RequestOutcome;
-use super::scheduler::ScheduledRequest;
 use super::scheduler::Scheduler;
+use super::scheduler::SchedulingDecision;
 use super::text_generation;
 use super::InferenceRequest;
 
@@ -75,14 +75,7 @@ impl InferenceEngine {
                 self.finalize_request_abort(request_id, error)?;
             }
         }
-        let decision = self.scheduler.create_scheduling_decision();
-        if self.model_runner.is_continuous_batching_enabled() {
-            self.process_scheduled_batch(decision.requests)?;
-        } else {
-            for scheduled_request in decision.requests {
-                self.process_scheduled_request(scheduled_request)?;
-            }
-        }
+        self.process_scheduling_decision(self.scheduler.create_scheduling_decision())?;
         Ok(())
     }
 
@@ -109,11 +102,14 @@ impl InferenceEngine {
         Ok(())
     }
 
-    fn process_scheduled_batch(&mut self, scheduled_requests: Vec<ScheduledRequest>) -> Result<()> {
+    fn process_scheduling_decision(
+        &mut self,
+        scheduling_decision: SchedulingDecision,
+    ) -> Result<()> {
         let model_runner = &mut self.model_runner;
         let results = self
             .request_manager
-            .advance_executions(&scheduled_requests, |execution_batch| {
+            .advance_executions(&scheduling_decision.requests, |execution_batch| {
                 model_runner.run_batched_steps(execution_batch)
             });
         for RequestExecutionResult { request_id, result } in results {
@@ -126,25 +122,6 @@ impl InferenceEngine {
                 Err(_) => self.scheduler.remove_active_request(request_id)?,
             }
         }
-        Ok(())
-    }
-
-    fn process_scheduled_request(&mut self, scheduled_request: ScheduledRequest) -> Result<()> {
-        let request_id = scheduled_request.request_id;
-        let result = {
-            let model_runner = &mut self.model_runner;
-            self.request_manager
-                .advance_execution(request_id, |execution_state| {
-                    model_runner.run_one_step(execution_state, scheduled_request.token_budget)
-                })
-        };
-        match result {
-            Ok(phase) => self.complete_execution_step(request_id, phase)?,
-            Err(error) => {
-                let error = self.abort_model_execution(request_id, error);
-                self.finalize_request_abort(request_id, error)?;
-            }
-        };
         Ok(())
     }
 
