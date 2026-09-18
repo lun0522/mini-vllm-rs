@@ -17,9 +17,10 @@ use candle_transformers::quantized_nn::RmsNorm;
 use candle_transformers::utils::repeat_kv;
 use std::collections::HashMap;
 
-const METAL_GEMV_MAX_ROWS: Option<usize> = match option_env!("MINI_VLLM_METAL_GEMV_MAX_ROWS") {
-    Some(value) => Some(const_str::parse!(value, u32) as usize),
-    None => None,
+const DEFAULT_METAL_GEMV_MAX_ROWS: usize = 4;
+const METAL_GEMV_MAX_ROWS: usize = match option_env!("MINI_VLLM_METAL_GEMV_MAX_ROWS") {
+    Some(value) => const_str::parse!(value, u32) as usize,
+    None => DEFAULT_METAL_GEMV_MAX_ROWS,
 };
 
 /// Caches causal attention masks by `(seq_len, kv_len)`, where
@@ -86,9 +87,6 @@ impl QMatMul {
     /// kernel performs poorly at very small row counts. Returns `None` when the compile-time
     /// threshold is disabled, the input is not on Metal, or the regular GEMM path is preferable.
     fn forward_metal_rows_with_gemv(&self, input: &Tensor) -> Result<Option<Tensor>> {
-        let Some(max_rows) = METAL_GEMV_MAX_ROWS else {
-            return Ok(None);
-        };
         if !input.device().is_metal() {
             return Ok(None);
         }
@@ -102,7 +100,7 @@ impl QMatMul {
             _ => return Ok(None),
         };
         let row_count = input.dim(row_dim)?;
-        if row_count <= 1 || row_count > max_rows {
+        if row_count <= 1 || row_count > METAL_GEMV_MAX_ROWS {
             return Ok(None);
         }
 
