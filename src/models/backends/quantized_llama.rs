@@ -23,10 +23,10 @@ use super::common::RotaryEmbeddingType;
 use super::common::SwiGluMlp;
 use super::common::TransformerBlock;
 use super::common::TransformerModelWeights;
-use crate::models::BatchedForwardInput;
-use crate::models::BatchedForwardOutput;
-use crate::models::BatchedKvCache;
 use crate::models::CausalLanguageModel;
+use crate::models::ForwardInput;
+use crate::models::ForwardOutput;
+use crate::models::KvCache;
 use crate::models::ModelInfo;
 use anyhow::Result;
 use candle::quantized::gguf_file;
@@ -59,17 +59,15 @@ impl CausalLanguageModel for LlamaBackend {
         &self.model_info
     }
 
-    fn forward_batched_with_speculative_verification(
+    fn forward_with_speculative_verification(
         &mut self,
-        generation_inputs: &[BatchedForwardInput],
-        verification_inputs: &[BatchedForwardInput],
-        kv_cache: &mut dyn BatchedKvCache,
-    ) -> Result<BatchedForwardOutput> {
-        Ok(self.model.forward_batched_with_speculative_verification(
-            generation_inputs,
-            verification_inputs,
-            kv_cache,
-        )?)
+        generation_inputs: &[ForwardInput],
+        verification_inputs: &[ForwardInput],
+        kv_cache: &mut dyn KvCache,
+    ) -> Result<ForwardOutput> {
+        Ok(self
+            .model
+            .forward(generation_inputs, verification_inputs, kv_cache)?)
     }
 }
 

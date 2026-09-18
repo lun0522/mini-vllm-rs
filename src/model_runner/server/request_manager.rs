@@ -180,7 +180,7 @@ impl RequestManager {
     pub(super) fn advance_executions(
         &mut self,
         scheduled_requests: &[ScheduledRequest],
-        run_batched_steps: impl FnOnce(
+        run_steps: impl FnOnce(
             &mut text_generation::RequestExecutionBatch,
         ) -> Result<Vec<GenerationStep>>,
     ) -> Vec<RequestExecutionResult> {
@@ -191,7 +191,7 @@ impl RequestManager {
             return results;
         }
 
-        match run_batched_steps(&mut execution_batch) {
+        match run_steps(&mut execution_batch) {
             Ok(generation_steps) if generation_steps.len() == execution_batch.len() => {
                 self.apply_generation_steps(
                     execution_metadata,

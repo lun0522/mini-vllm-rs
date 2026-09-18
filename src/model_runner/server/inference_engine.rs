@@ -110,7 +110,7 @@ impl InferenceEngine {
         let results = self
             .request_manager
             .advance_executions(&scheduling_decision.requests, |execution_batch| {
-                model_runner.run_batched_steps(execution_batch)
+                model_runner.run_steps(execution_batch)
             });
         for RequestExecutionResult { request_id, result } in results {
             match result {

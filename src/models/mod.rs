@@ -13,13 +13,13 @@ pub(crate) trait CausalLanguageModel: Send {
 
     /// Returns one next-token logits tensor per request, each shaped
     /// `(vocabulary_size)`, in input order.
-    fn forward_batched(
+    fn forward(
         &mut self,
-        inputs: &[BatchedForwardInput],
-        kv_cache: &mut dyn BatchedKvCache,
+        inputs: &[ForwardInput],
+        kv_cache: &mut dyn KvCache,
     ) -> Result<Vec<Tensor>> {
         Ok(self
-            .forward_batched_with_speculative_verification(
+            .forward_with_speculative_verification(
                 inputs,
                 /* verification_inputs */ &[],
                 kv_cache,
@@ -32,29 +32,29 @@ pub(crate) trait CausalLanguageModel: Send {
     /// Generation outputs contain one `(vocabulary_size)` tensor per `generation_inputs` entry.
     /// Verification outputs contain one `(sequence_length, vocabulary_size)` tensor per
     /// `verification_inputs` entry. Both output groups preserve their respective input order.
-    fn forward_batched_with_speculative_verification(
+    fn forward_with_speculative_verification(
         &mut self,
-        generation_inputs: &[BatchedForwardInput],
-        verification_inputs: &[BatchedForwardInput],
-        kv_cache: &mut dyn BatchedKvCache,
-    ) -> Result<BatchedForwardOutput>;
+        generation_inputs: &[ForwardInput],
+        verification_inputs: &[ForwardInput],
+        kv_cache: &mut dyn KvCache,
+    ) -> Result<ForwardOutput>;
 }
 
 /// Provides one request's input and position to a batched model forward pass.
-pub(crate) struct BatchedForwardInput {
+pub(crate) struct ForwardInput {
     pub(crate) request_id: u64,
     pub(crate) input: Tensor,
     pub(crate) start_position: usize,
 }
 
 /// Separates outputs with different shapes from one combined batched model pass.
-pub(crate) struct BatchedForwardOutput {
+pub(crate) struct ForwardOutput {
     pub(crate) generation_logits: Vec<Tensor>,
     pub(crate) verification_logits: Vec<Tensor>,
 }
 
 /// Provides request-specific key and value tensors during batched model execution.
-pub(crate) trait BatchedKvCache: Send {
+pub(crate) trait KvCache: Send {
     /// Stores newly computed key/value tensors and returns the complete layer cache for attention.
     fn append(
         &mut self,

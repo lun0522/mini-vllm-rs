@@ -1,6 +1,6 @@
 use crate::models::loaded_model::LoadedModel;
-use crate::models::BatchedForwardInput;
-use crate::models::BatchedForwardOutput;
+use crate::models::ForwardInput;
+use crate::models::ForwardOutput;
 use crate::proto::model_runner::ModelMetadata;
 use anyhow::Result;
 use candle_core::Tensor;
@@ -30,27 +30,22 @@ impl ModelInstance {
         self.kv_cache_manager.supports_multiple_active_requests()
     }
 
-    pub(super) fn forward_batched(
-        &mut self,
-        inputs: &[BatchedForwardInput],
-    ) -> Result<Vec<Tensor>> {
+    pub(super) fn forward(&mut self, inputs: &[ForwardInput]) -> Result<Vec<Tensor>> {
         self.model
             .model()
-            .forward_batched(inputs, &mut self.kv_cache_manager)
+            .forward(inputs, &mut self.kv_cache_manager)
     }
 
-    pub(super) fn forward_batched_with_speculative_verification(
+    pub(super) fn forward_with_speculative_verification(
         &mut self,
-        generation_inputs: &[BatchedForwardInput],
-        verification_inputs: &[BatchedForwardInput],
-    ) -> Result<BatchedForwardOutput> {
-        self.model
-            .model()
-            .forward_batched_with_speculative_verification(
-                generation_inputs,
-                verification_inputs,
-                &mut self.kv_cache_manager,
-            )
+        generation_inputs: &[ForwardInput],
+        verification_inputs: &[ForwardInput],
+    ) -> Result<ForwardOutput> {
+        self.model.model().forward_with_speculative_verification(
+            generation_inputs,
+            verification_inputs,
+            &mut self.kv_cache_manager,
+        )
     }
 
     pub(super) fn model_metadata(&self) -> ModelMetadata {

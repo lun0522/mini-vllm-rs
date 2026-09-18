@@ -1,7 +1,7 @@
-use crate::models::BatchedForwardInput;
-use crate::models::BatchedForwardOutput;
-use crate::models::BatchedKvCache;
 use crate::models::CachedKeyValue;
+use crate::models::ForwardInput;
+use crate::models::ForwardOutput;
+use crate::models::KvCache;
 use crate::models::ModelInfo;
 use candle_core::quantized::QTensor;
 use candle_core::DType;
@@ -90,7 +90,7 @@ impl Module for SwiGluMlp {
     }
 }
 
-pub(super) struct BatchedForwardContext {
+pub(super) struct ForwardContext {
     pub(super) request_id: u64,
     pub(super) start_pos: usize,
     pub(super) cached_kv_len: usize,
@@ -129,16 +129,16 @@ pub(super) struct TransformerBlock {
 
 impl TransformerBlock {
     /// Runs one complete transformer block over packed requests.
-    pub(super) fn forward_batched(
+    pub(super) fn forward(
         &self,
         x: &Tensor,
-        contexts: &[BatchedForwardContext],
+        contexts: &[ForwardContext],
         layer_index: usize,
-        cache: &mut dyn BatchedKvCache,
+        cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
         let residual = x;
         let x = self.attn_norm.forward(x)?;
-        let x = self.forward_batched_attention(&x, contexts, layer_index, cache)?;
+        let x = self.forward_attention(&x, contexts, layer_index, cache)?;
         let x = (x + residual)?;
         self.forward_mlp(&x)
     }
@@ -151,12 +151,12 @@ impl TransformerBlock {
     /// `packed_` values contain data from every request, while `request_` values
     /// contain one request's slice. `full` K/V values include both the cached
     /// prefix and the current query tokens.
-    pub(super) fn forward_batched_attention(
+    pub(super) fn forward_attention(
         &self,
         packed_x: &Tensor,
-        contexts: &[BatchedForwardContext],
+        contexts: &[ForwardContext],
         layer_index: usize,
-        cache: &mut dyn BatchedKvCache,
+        cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
         let _enter = self.span_attn.enter();
 
@@ -318,23 +318,33 @@ impl TransformerModelWeights {
         }
     }
 
-    pub(super) fn forward_batched_with_speculative_verification(
+    pub(super) fn forward(
         &mut self,
-        generation_inputs: &[BatchedForwardInput],
-        verification_inputs: &[BatchedForwardInput],
-        kv_cache: &mut dyn BatchedKvCache,
-    ) -> Result<BatchedForwardOutput> {
+        generation_inputs: &[ForwardInput],
+        verification_inputs: &[ForwardInput],
+        kv_cache: &mut dyn KvCache,
+    ) -> Result<ForwardOutput> {
+        let _enter_model = self.span_model.enter();
+
         let combined_inputs = generation_inputs
             .iter()
             .chain(verification_inputs)
-            .map(|input| BatchedForwardInput {
+            .map(|input| ForwardInput {
                 request_id: input.request_id,
                 input: input.input.clone(),
                 start_position: input.start_position,
             })
             .collect::<Vec<_>>();
-        let (packed_hidden_states, contexts) =
-            self.forward_batched_hidden(&combined_inputs, kv_cache)?;
+
+        // packed_input: [1, packed_q_len].
+        let (packed_input, contexts) = prepare_forward(&combined_inputs)?;
+        // packed_hidden_states: [1, packed_q_len, embedding_len].
+        let mut packed_hidden_states = self.token_embeddings.forward(&packed_input)?;
+        for (layer_index, layer) in self.layers.iter().enumerate() {
+            packed_hidden_states =
+                layer.forward(&packed_hidden_states, &contexts, layer_index, kv_cache)?;
+        }
+        let packed_hidden_states = self.output_norm.forward(&packed_hidden_states)?;
 
         let (generation_contexts, verification_contexts) =
             contexts.split_at(generation_inputs.len());
@@ -344,33 +354,15 @@ impl TransformerModelWeights {
             verification_contexts,
         )?;
 
-        let _enter = self.span_output.enter();
+        let _enter_output = self.span_output.enter();
         // packed_logits:
         // [generation_request_count + verification_token_count, vocabulary_size].
         let packed_logits = self.output_proj.forward(&packed_output_hidden_states)?;
-        create_batched_forward_output(
+        create_forward_output(
             &packed_logits,
             generation_inputs.len(),
             verification_contexts,
         )
-    }
-
-    fn forward_batched_hidden(
-        &mut self,
-        inputs: &[BatchedForwardInput],
-        kv_cache: &mut dyn BatchedKvCache,
-    ) -> Result<(Tensor, Vec<BatchedForwardContext>)> {
-        let _enter = self.span_model.enter();
-        // packed_input: [1, packed_q_len].
-        let (packed_input, contexts) = prepare_batched_forward(inputs)?;
-        // packed_hidden_states: [1, packed_q_len, embedding_len].
-        let mut packed_hidden_states = self.token_embeddings.forward(&packed_input)?;
-        for (layer_index, layer) in self.layers.iter().enumerate() {
-            packed_hidden_states =
-                layer.forward_batched(&packed_hidden_states, &contexts, layer_index, kv_cache)?;
-        }
-        let packed_hidden_states = self.output_norm.forward(&packed_hidden_states)?;
-        Ok((packed_hidden_states, contexts))
     }
 }
 
@@ -408,26 +400,24 @@ fn apply_projection(input: &Tensor, proj: &QMatMul, bias: Option<&Tensor>) -> Re
     }
 }
 
-fn validate_batched_forward_inputs(inputs: &[BatchedForwardInput]) -> Result<()> {
+fn validate_forward_inputs(inputs: &[ForwardInput]) -> Result<()> {
     if inputs.is_empty() {
-        candle_core::bail!("batched forward requires at least one request")
+        candle_core::bail!("forward requires at least one request")
     }
     for input in inputs {
         let (batch_size, q_len) = input.input.dims2()?;
         if batch_size != 1 {
-            candle_core::bail!("each batched forward input must have batch size 1")
+            candle_core::bail!("each forward input must have batch size 1")
         }
         if q_len == 0 {
-            candle_core::bail!("each batched forward input must contain at least one token")
+            candle_core::bail!("each forward input must contain at least one token")
         }
     }
     Ok(())
 }
 
-fn prepare_batched_forward(
-    inputs: &[BatchedForwardInput],
-) -> Result<(Tensor, Vec<BatchedForwardContext>)> {
-    validate_batched_forward_inputs(inputs)?;
+fn prepare_forward(inputs: &[ForwardInput]) -> Result<(Tensor, Vec<ForwardContext>)> {
+    validate_forward_inputs(inputs)?;
 
     // Each input: [1, q_len].
     let mut input_tensors = Vec::with_capacity(inputs.len());
@@ -436,7 +426,7 @@ fn prepare_batched_forward(
     for input in inputs {
         let (_, q_len) = input.input.dims2()?;
         input_tensors.push(&input.input);
-        contexts.push(BatchedForwardContext {
+        contexts.push(ForwardContext {
             request_id: input.request_id,
             start_pos: input.start_position,
             cached_kv_len: input.start_position,
@@ -453,8 +443,8 @@ fn prepare_batched_forward(
 
 fn pack_output_hidden_states(
     packed_hidden_states: &Tensor,
-    generation_contexts: &[BatchedForwardContext],
-    verification_contexts: &[BatchedForwardContext],
+    generation_contexts: &[ForwardContext],
+    verification_contexts: &[ForwardContext],
 ) -> Result<Tensor> {
     let mut output_hidden_states = if generation_contexts.is_empty() {
         Vec::with_capacity(verification_contexts.len())
@@ -482,7 +472,7 @@ fn pack_output_hidden_states(
 
 fn pack_generation_output_hidden_states(
     packed_hidden_states: &Tensor,
-    contexts: &[BatchedForwardContext],
+    contexts: &[ForwardContext],
 ) -> Result<Tensor> {
     let mut request_last_hidden_states = Vec::with_capacity(contexts.len());
     for context in contexts {
@@ -498,11 +488,11 @@ fn pack_generation_output_hidden_states(
     Tensor::cat(&request_last_hidden_states, /* dim */ 1)?.squeeze(0)
 }
 
-fn create_batched_forward_output(
+fn create_forward_output(
     packed_logits: &Tensor,
     generation_request_count: usize,
-    verification_contexts: &[BatchedForwardContext],
-) -> Result<BatchedForwardOutput> {
+    verification_contexts: &[ForwardContext],
+) -> Result<ForwardOutput> {
     let generation_logits = (0..generation_request_count)
         .map(|request_index| {
             packed_logits
@@ -520,7 +510,7 @@ fn create_batched_forward_output(
             Ok(logits)
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(BatchedForwardOutput {
+    Ok(ForwardOutput {
         generation_logits,
         verification_logits,
     })

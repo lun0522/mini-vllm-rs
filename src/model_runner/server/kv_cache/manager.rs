@@ -1,8 +1,8 @@
 use super::contiguous_cache::RequestContiguousCacheState;
 use super::paged_cache::RequestPagedCacheState;
 use super::KvCacheBackend;
-use crate::models::BatchedKvCache;
 use crate::models::CachedKeyValue;
+use crate::models::KvCache;
 use anyhow::bail;
 use anyhow::ensure;
 use anyhow::Context;
@@ -133,7 +133,7 @@ impl KvCacheManager {
     }
 }
 
-impl BatchedKvCache for KvCacheManager {
+impl KvCache for KvCacheManager {
     fn append(
         &mut self,
         request_id: u64,
@@ -233,13 +233,13 @@ mod tests {
         manager.start_request(2)?;
 
         let request_1_prefix = cache_tensor(10, 2)?;
-        BatchedKvCache::append(&mut manager, 1, 0, 0, &request_1_prefix, &request_1_prefix)?;
+        KvCache::append(&mut manager, 1, 0, 0, &request_1_prefix, &request_1_prefix)?;
         let request_2_prefix = cache_tensor(20, 1)?;
         let request_2_cache =
-            BatchedKvCache::append(&mut manager, 2, 0, 0, &request_2_prefix, &request_2_prefix)?;
+            KvCache::append(&mut manager, 2, 0, 0, &request_2_prefix, &request_2_prefix)?;
         let request_1_suffix = cache_tensor(12, 1)?;
         let request_1_cache =
-            BatchedKvCache::append(&mut manager, 1, 0, 2, &request_1_suffix, &request_1_suffix)?;
+            KvCache::append(&mut manager, 1, 0, 2, &request_1_suffix, &request_1_suffix)?;
 
         assert_eq!(
             request_1_cache.key.flatten_all()?.to_vec1::<u32>()?,

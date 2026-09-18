@@ -128,11 +128,11 @@ impl ModelRunner {
         }
     }
 
-    pub(super) fn run_batched_steps(
+    pub(super) fn run_steps(
         &mut self,
         execution_batch: &mut text_generation::RequestExecutionBatch,
     ) -> Result<Vec<text_generation::GenerationStep>> {
-        execution_batch.run_batched_steps(&mut self.target, self.draft.as_mut())
+        execution_batch.run_steps(&mut self.target, self.draft.as_mut())
     }
 
     pub(super) fn finish_request(

@@ -1,4 +1,4 @@
-use crate::models::BatchedForwardInput;
+use crate::models::ForwardInput;
 use crate::models::ModelRole;
 use crate::proto::model_runner::GenerateTextRequest;
 use anyhow::bail;
@@ -100,26 +100,26 @@ enum PreparedForward {
     SpeculativeDecode(PreparedSpeculativeDecode),
 }
 
-struct BatchedModelInputs {
+struct ModelInputs {
     target_request_indices: Vec<usize>,
-    target_inputs: Vec<BatchedForwardInput>,
-    draft_inputs: Vec<BatchedForwardInput>,
-    draft_proposals: Vec<BatchedDraftProposal>,
+    target_inputs: Vec<ForwardInput>,
+    draft_inputs: Vec<ForwardInput>,
+    draft_proposals: Vec<DraftProposal>,
 }
 
-struct BatchedDraftProposal {
+struct DraftProposal {
     request_index: usize,
     original_cached_token_count: usize,
     maximum_token_count: usize,
     token_ids: Vec<u32>,
 }
 
-struct BatchedTargetVerificationInput {
+struct TargetVerificationInput {
     request_index: usize,
-    input: BatchedForwardInput,
+    input: ForwardInput,
 }
 
-struct BatchedTargetLogits {
+struct TargetLogits {
     generation: Vec<Option<Tensor>>,
     verification: Vec<Option<Tensor>>,
 }
@@ -239,7 +239,7 @@ impl RequestExecutionState {
         ensure!(token_budget > 0, "token budget must be greater than zero");
         self.pending_output_token_ids.clear();
         if !use_speculative_decoding {
-            let (model_forward, phase) = self.prepare_target_forward(token_budget)?;
+            let (model_forward, phase) = self.prepare_target_only_forward(token_budget)?;
             return Ok(PreparedForward::Target {
                 model_forward,
                 phase,
@@ -256,13 +256,13 @@ impl RequestExecutionState {
                 self.prepare_speculative_decode(generated_token_count),
             )),
             GenerationPhase::Finished => {
-                bail!("cannot prepare a finished request for batched execution")
+                bail!("cannot prepare a finished request (speculative decoding)")
             }
         }
     }
 
     /// Selects the next input chunk and records how its logits must advance this request.
-    fn prepare_target_forward(
+    fn prepare_target_only_forward(
         &mut self,
         token_budget: usize,
     ) -> Result<(PreparedModelForward, PreparedForwardPhase)> {
@@ -296,7 +296,7 @@ impl RequestExecutionState {
                 )
             }
             GenerationPhase::Finished => {
-                bail!("cannot prepare a finished request for batched execution")
+                bail!("cannot prepare a finished request (target-only)")
             }
         };
         Ok((
@@ -419,7 +419,7 @@ impl RequestExecutionState {
         })
     }
 
-    fn complete_batched_speculative_decode(
+    fn complete_speculative_decode(
         &mut self,
         prepared: PreparedSpeculativeDecode,
         draft_tokens: &[u32],
@@ -623,14 +623,14 @@ impl RequestExecutionState {
     }
 }
 
-struct BatchedRequestExecution {
+struct RequestExecution {
     execution_state: Box<RequestExecutionState>,
     token_budget: usize,
 }
 
 /// Owns the request states selected for one batched model execution.
 pub(super) struct RequestExecutionBatch {
-    requests: Vec<BatchedRequestExecution>,
+    requests: Vec<RequestExecution>,
 }
 
 impl RequestExecutionBatch {
@@ -645,7 +645,7 @@ impl RequestExecutionBatch {
         execution_state: Box<RequestExecutionState>,
         token_budget: usize,
     ) {
-        self.requests.push(BatchedRequestExecution {
+        self.requests.push(RequestExecution {
             execution_state,
             token_budget,
         });
@@ -665,21 +665,18 @@ impl RequestExecutionBatch {
             .map(|request| request.execution_state)
     }
 
-    pub(super) fn run_batched_steps(
+    pub(super) fn run_steps(
         &mut self,
         target: &mut ModelInstance,
         draft: Option<&mut ModelInstance>,
     ) -> Result<Vec<GenerationStep>> {
         match draft {
-            Some(draft) => self.run_batched_speculative_decoding_steps(target, draft),
-            None => self.run_batched_target_steps(target),
+            Some(draft) => self.run_speculative_decoding_steps(target, draft),
+            None => self.run_target_only_steps(target),
         }
     }
 
-    fn run_batched_target_steps(
-        &mut self,
-        target: &mut ModelInstance,
-    ) -> Result<Vec<GenerationStep>> {
+    fn run_target_only_steps(&mut self, target: &mut ModelInstance) -> Result<Vec<GenerationStep>> {
         let prepared_forwards = self
             .requests
             .iter_mut()
@@ -690,18 +687,18 @@ impl RequestExecutionBatch {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        let BatchedModelInputs {
+        let ModelInputs {
             target_request_indices,
             target_inputs,
             draft_inputs: _,
             draft_proposals: _,
-        } = self.create_initial_batched_model_inputs(&prepared_forwards, target, None)?;
+        } = self.create_initial_model_inputs(&prepared_forwards, target, None)?;
 
         let mut target_logits = vec![None; self.requests.len()];
-        let logits = target.forward_batched(&target_inputs)?;
+        let logits = target.forward(&target_inputs)?;
         ensure!(
             logits.len() == target_inputs.len(),
-            "batched target model forward returned {} outputs for {} requests",
+            "target model forward returned {} outputs for {} requests",
             logits.len(),
             target_inputs.len()
         );
@@ -725,7 +722,7 @@ impl RequestExecutionBatch {
             .collect()
     }
 
-    fn run_batched_speculative_decoding_steps(
+    fn run_speculative_decoding_steps(
         &mut self,
         target: &mut ModelInstance,
         draft: &mut ModelInstance,
@@ -742,24 +739,24 @@ impl RequestExecutionBatch {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        let BatchedModelInputs {
+        let ModelInputs {
             target_request_indices,
             target_inputs: generation_inputs,
             draft_inputs,
             mut draft_proposals,
-        } = self.create_initial_batched_model_inputs(&prepared_forwards, target, Some(draft))?;
+        } = self.create_initial_model_inputs(&prepared_forwards, target, Some(draft))?;
 
         // 2. Run all draft-prefill work, then generate every request's remaining proposals.
         if !draft_inputs.is_empty() {
-            let logits = draft.forward_batched(&draft_inputs)?;
+            let logits = draft.forward(&draft_inputs)?;
             ensure!(
                 logits.len() == draft_inputs.len(),
-                "batched draft model forward returned {} outputs for {} requests",
+                "draft model forward returned {} outputs for {} requests",
                 logits.len(),
                 draft_inputs.len()
             );
         }
-        self.generate_batched_draft_proposals(draft, &mut draft_proposals)?;
+        self.generate_draft_proposals(draft, &mut draft_proposals)?;
 
         // 3. Build target-verification inputs from the completed draft proposals.
         let verification_inputs =
@@ -767,13 +764,13 @@ impl RequestExecutionBatch {
 
         // 4. Run one combined target-model pass containing ordinary prefill, ordinary decode,
         // speculative target prefill, and speculative verification.
-        let target_logits = self.run_combined_batched_target_forward(
+        let target_logits = self.run_combined_target_forward(
             target,
             target_request_indices,
             generation_inputs,
             verification_inputs,
         )?;
-        self.complete_batched_speculative_steps(
+        self.complete_speculative_steps(
             prepared_forwards,
             draft_proposals,
             target_logits,
@@ -782,12 +779,12 @@ impl RequestExecutionBatch {
         )
     }
 
-    fn create_initial_batched_model_inputs(
+    fn create_initial_model_inputs(
         &self,
         prepared_forwards: &[PreparedForward],
         target: &ModelInstance,
         draft: Option<&ModelInstance>,
-    ) -> Result<BatchedModelInputs> {
+    ) -> Result<ModelInputs> {
         let mut target_request_indices = Vec::new();
         let mut target_inputs = Vec::new();
         let mut draft_inputs = Vec::new();
@@ -799,7 +796,7 @@ impl RequestExecutionBatch {
             match prepared_forward {
                 PreparedForward::Target { model_forward, .. } => {
                     target_request_indices.push(request_index);
-                    target_inputs.push(BatchedForwardInput {
+                    target_inputs.push(ForwardInput {
                         request_id,
                         input: target.create_input_tensor(&model_forward.input_token_ids)?,
                         start_position: model_forward.start_position,
@@ -808,7 +805,7 @@ impl RequestExecutionBatch {
                 PreparedForward::SpeculativePrefill(prepared) => {
                     if let Some(target_forward) = &prepared.target {
                         target_request_indices.push(request_index);
-                        target_inputs.push(BatchedForwardInput {
+                        target_inputs.push(ForwardInput {
                             request_id,
                             input: target.create_input_tensor(&target_forward.input_token_ids)?,
                             start_position: target_forward.start_position,
@@ -816,7 +813,7 @@ impl RequestExecutionBatch {
                     }
                     if let Some(draft_forward) = &prepared.draft {
                         let draft = draft.context("draft model is missing")?;
-                        draft_inputs.push(BatchedForwardInput {
+                        draft_inputs.push(ForwardInput {
                             request_id,
                             input: draft.create_input_tensor(&draft_forward.input_token_ids)?,
                             start_position: draft_forward.start_position,
@@ -824,7 +821,7 @@ impl RequestExecutionBatch {
                     }
                 }
                 PreparedForward::SpeculativeDecode(prepared) => {
-                    draft_proposals.push(BatchedDraftProposal {
+                    draft_proposals.push(DraftProposal {
                         request_index,
                         original_cached_token_count: prepared.original_cached_token_count,
                         maximum_token_count: prepared.maximum_draft_token_count,
@@ -833,7 +830,7 @@ impl RequestExecutionBatch {
                 }
             }
         }
-        Ok(BatchedModelInputs {
+        Ok(ModelInputs {
             target_request_indices,
             target_inputs,
             draft_inputs,
@@ -841,10 +838,10 @@ impl RequestExecutionBatch {
         })
     }
 
-    fn generate_batched_draft_proposals(
+    fn generate_draft_proposals(
         &mut self,
         draft: &mut ModelInstance,
-        proposals: &mut [BatchedDraftProposal],
+        proposals: &mut [DraftProposal],
     ) -> Result<()> {
         loop {
             let proposal_indices = self.extract_active_draft_proposal_indices(proposals);
@@ -853,15 +850,12 @@ impl RequestExecutionBatch {
             }
             let proposal_inputs =
                 self.create_draft_proposal_inputs(draft, proposals, &proposal_indices)?;
-            let logits = draft.forward_batched(&proposal_inputs)?;
+            let logits = draft.forward(&proposal_inputs)?;
             self.sample_and_append_draft_proposals(proposals, &proposal_indices, logits)?;
         }
     }
 
-    fn extract_active_draft_proposal_indices(
-        &self,
-        proposals: &[BatchedDraftProposal],
-    ) -> Vec<usize> {
+    fn extract_active_draft_proposal_indices(&self, proposals: &[DraftProposal]) -> Vec<usize> {
         let mut active_proposal_indices = Vec::new();
         for (proposal_index, proposal) in proposals.iter().enumerate() {
             let reached_token_limit = proposal.token_ids.len() >= proposal.maximum_token_count;
@@ -881,9 +875,9 @@ impl RequestExecutionBatch {
     fn create_draft_proposal_inputs(
         &self,
         draft: &ModelInstance,
-        proposals: &[BatchedDraftProposal],
+        proposals: &[DraftProposal],
         active_proposal_indices: &[usize],
-    ) -> Result<Vec<BatchedForwardInput>> {
+    ) -> Result<Vec<ForwardInput>> {
         active_proposal_indices
             .iter()
             .map(|&proposal_index| {
@@ -895,7 +889,7 @@ impl RequestExecutionBatch {
                     .copied()
                     .or_else(|| execution_state.tokens.last().copied())
                     .context("generation context is empty")?;
-                Ok(BatchedForwardInput {
+                Ok(ForwardInput {
                     request_id: execution_state.request_id,
                     input: draft.create_input_tensor(&[input_token_id])?,
                     start_position: proposal.original_cached_token_count + proposal.token_ids.len(),
@@ -906,13 +900,13 @@ impl RequestExecutionBatch {
 
     fn sample_and_append_draft_proposals(
         &mut self,
-        proposals: &mut [BatchedDraftProposal],
+        proposals: &mut [DraftProposal],
         active_proposal_indices: &[usize],
         logits: Vec<Tensor>,
     ) -> Result<()> {
         ensure!(
             logits.len() == active_proposal_indices.len(),
-            "batched draft model forward returned {} outputs for {} requests",
+            "draft model forward returned {} outputs for {} requests",
             logits.len(),
             active_proposal_indices.len()
         );
@@ -930,8 +924,8 @@ impl RequestExecutionBatch {
     fn create_target_verification_inputs(
         &self,
         target: &ModelInstance,
-        proposals: &[BatchedDraftProposal],
-    ) -> Result<Vec<BatchedTargetVerificationInput>> {
+        proposals: &[DraftProposal],
+    ) -> Result<Vec<TargetVerificationInput>> {
         let mut verification_inputs = Vec::with_capacity(proposals.len());
         for proposal in proposals {
             ensure!(
@@ -949,9 +943,9 @@ impl RequestExecutionBatch {
                     .context("generation context is empty")?,
             );
             input_token_ids.extend_from_slice(&proposal.token_ids[..proposal.token_ids.len() - 1]);
-            verification_inputs.push(BatchedTargetVerificationInput {
+            verification_inputs.push(TargetVerificationInput {
                 request_index: proposal.request_index,
-                input: BatchedForwardInput {
+                input: ForwardInput {
                     request_id: execution_state.request_id,
                     input: target.create_input_tensor(&input_token_ids)?,
                     start_position: proposal.original_cached_token_count,
@@ -961,13 +955,13 @@ impl RequestExecutionBatch {
         Ok(verification_inputs)
     }
 
-    fn run_combined_batched_target_forward(
+    fn run_combined_target_forward(
         &self,
         target: &mut ModelInstance,
         generation_request_indices: Vec<usize>,
-        generation_inputs: Vec<BatchedForwardInput>,
-        verification_inputs: Vec<BatchedTargetVerificationInput>,
-    ) -> Result<BatchedTargetLogits> {
+        generation_inputs: Vec<ForwardInput>,
+        verification_inputs: Vec<TargetVerificationInput>,
+    ) -> Result<TargetLogits> {
         let mut generation = vec![None; self.requests.len()];
         let mut verification = vec![None; self.requests.len()];
         let verification_request_indices = verification_inputs
@@ -980,19 +974,17 @@ impl RequestExecutionBatch {
             .collect::<Vec<_>>();
 
         if !generation_inputs.is_empty() || !verification_inputs.is_empty() {
-            let output = target.forward_batched_with_speculative_verification(
-                &generation_inputs,
-                &verification_inputs,
-            )?;
+            let output = target
+                .forward_with_speculative_verification(&generation_inputs, &verification_inputs)?;
             ensure!(
                 output.generation_logits.len() == generation_inputs.len(),
-                "batched target model forward returned {} outputs for {} requests",
+                "target model forward returned {} outputs for {} requests",
                 output.generation_logits.len(),
                 generation_inputs.len()
             );
             ensure!(
                 output.verification_logits.len() == verification_inputs.len(),
-                "batched target verification returned {} outputs for {} requests",
+                "target verification returned {} outputs for {} requests",
                 output.verification_logits.len(),
                 verification_inputs.len()
             );
@@ -1010,17 +1002,17 @@ impl RequestExecutionBatch {
             }
         }
 
-        Ok(BatchedTargetLogits {
+        Ok(TargetLogits {
             generation,
             verification,
         })
     }
 
-    fn complete_batched_speculative_steps(
+    fn complete_speculative_steps(
         &mut self,
         prepared_forwards: Vec<PreparedForward>,
-        draft_proposals: Vec<BatchedDraftProposal>,
-        mut target_logits: BatchedTargetLogits,
+        draft_proposals: Vec<DraftProposal>,
+        mut target_logits: TargetLogits,
         target: &mut ModelInstance,
         draft: &mut ModelInstance,
     ) -> Result<Vec<GenerationStep>> {
@@ -1046,7 +1038,7 @@ impl RequestExecutionBatch {
                     .execution_state
                     .complete_speculative_prefill(prepared),
                 PreparedForward::SpeculativeDecode(prepared) => {
-                    request.execution_state.complete_batched_speculative_decode(
+                    request.execution_state.complete_speculative_decode(
                         prepared,
                         &draft_tokens[request_index]
                             .take()
@@ -1117,10 +1109,10 @@ mod tests {
     use crate::model_runner::server::kv_cache::create_kv_cache;
     use crate::model_runner::KvCacheType;
     use crate::models::loaded_model::LoadedModel;
-    use crate::models::BatchedForwardInput;
-    use crate::models::BatchedForwardOutput;
-    use crate::models::BatchedKvCache;
     use crate::models::CausalLanguageModel;
+    use crate::models::ForwardInput;
+    use crate::models::ForwardOutput;
+    use crate::models::KvCache;
     use crate::models::ModelInfo;
     use crate::models::ModelRole;
     use candle_core::Device;
@@ -1144,12 +1136,12 @@ mod tests {
             &self.info
         }
 
-        fn forward_batched_with_speculative_verification(
+        fn forward_with_speculative_verification(
             &mut self,
-            generation_inputs: &[BatchedForwardInput],
-            verification_inputs: &[BatchedForwardInput],
-            _kv_cache: &mut dyn BatchedKvCache,
-        ) -> Result<BatchedForwardOutput> {
+            generation_inputs: &[ForwardInput],
+            verification_inputs: &[ForwardInput],
+            _kv_cache: &mut dyn KvCache,
+        ) -> Result<ForwardOutput> {
             let generation_logits = generation_inputs
                 .iter()
                 .map(|input| {
@@ -1189,7 +1181,7 @@ mod tests {
                     Ok(Tensor::new(logits, &Device::Cpu)?.reshape((query_len, 8))?)
                 })
                 .collect::<Result<Vec<_>>>()?;
-            Ok(BatchedForwardOutput {
+            Ok(ForwardOutput {
                 generation_logits,
                 verification_logits,
             })
@@ -1309,7 +1301,7 @@ mod tests {
             remaining_token_count: 4,
         };
 
-        let (model_forward, prepared_phase) = execution_state.prepare_target_forward(2)?;
+        let (model_forward, prepared_phase) = execution_state.prepare_target_only_forward(2)?;
         assert_eq!(model_forward.start_position, 0);
         assert_eq!(model_forward.input_token_ids, [1, 2]);
 
@@ -1334,7 +1326,7 @@ mod tests {
             remaining_token_count: 2,
         };
 
-        let (model_forward, prepared_phase) = execution_state.prepare_target_forward(8)?;
+        let (model_forward, prepared_phase) = execution_state.prepare_target_only_forward(8)?;
         assert_eq!(model_forward.start_position, 2);
         assert_eq!(model_forward.input_token_ids, [3, 4]);
 
@@ -1357,7 +1349,7 @@ mod tests {
     fn prepares_and_completes_a_decode_iteration() -> Result<()> {
         let mut execution_state = create_test_execution_state(vec![1, 2, 3, 4], vec![]);
 
-        let (model_forward, prepared_phase) = execution_state.prepare_target_forward(1)?;
+        let (model_forward, prepared_phase) = execution_state.prepare_target_only_forward(1)?;
         assert_eq!(model_forward.start_position, 3);
         assert_eq!(model_forward.input_token_ids, [4]);
 
@@ -1392,7 +1384,7 @@ mod tests {
         batch.push(Box::new(first), 2);
         batch.push(Box::new(second), 3);
 
-        let steps = batch.run_batched_steps(&mut target, None)?;
+        let steps = batch.run_steps(&mut target, None)?;
         let mut execution_states = batch.into_execution_states();
         let first = execution_states
             .next()
@@ -1447,7 +1439,7 @@ mod tests {
         batch.push(Box::new(first), 2);
         batch.push(Box::new(second), 2);
 
-        let steps = batch.run_batched_steps(&mut target, Some(&mut draft))?;
+        let steps = batch.run_steps(&mut target, Some(&mut draft))?;
         let mut execution_states = batch.into_execution_states();
         let first = execution_states
             .next()
@@ -1490,20 +1482,20 @@ mod tests {
     }
 
     #[test]
-    fn generates_batched_draft_proposals_and_target_verification_inputs() -> Result<()> {
+    fn generates_draft_proposals_and_target_verification_inputs() -> Result<()> {
         let execution_state = create_test_execution_state(vec![1, 2], vec![]);
         let (mut draft, draft_forward_calls) = create_test_model(6)?;
         let (target, _) = create_test_model(6)?;
         let mut batch = RequestExecutionBatch::with_capacity(1);
         batch.push(Box::new(execution_state), 1);
-        let mut proposals = vec![BatchedDraftProposal {
+        let mut proposals = vec![DraftProposal {
             request_index: 0,
             original_cached_token_count: 1,
             maximum_token_count: 3,
             token_ids: Vec::new(),
         }];
 
-        batch.generate_batched_draft_proposals(&mut draft, &mut proposals)?;
+        batch.generate_draft_proposals(&mut draft, &mut proposals)?;
         let verification_inputs = batch.create_target_verification_inputs(&target, &proposals)?;
 
         assert_eq!(proposals[0].token_ids, [6, 6, 6]);
