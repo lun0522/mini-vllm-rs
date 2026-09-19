@@ -5,6 +5,8 @@ use anyhow::Result;
 use candle_core::Device;
 use candle_core::Tensor;
 
+/// Token axis in one request's rank-4 [/* batch */ 1, num_kv_heads, token_count, head_dim] cache
+/// tensor, commonly used on the tensor returned from `get_page_from_pool`.
 pub(super) const TOKEN_DIMENSION: usize = 2;
 
 /// Validates an append and returns the number of newly supplied tokens on the sequence axis.
@@ -50,6 +52,8 @@ pub(super) fn validate_truncation<T: LayerCache>(
     Ok(())
 }
 
+/// Allocates a cache pool of shape:
+/// [per_pool_page_count, /* batch */ 1, num_kv_heads, per_page_token_count, head_dim].
 pub(super) fn allocate_pool(
     model_info: &ModelInfo,
     device: &Device,
@@ -69,6 +73,8 @@ pub(super) fn allocate_pool(
     )?)
 }
 
+/// Strips out the page dimension and returns a tensor of shape:
+/// [/* batch */ 1, num_kv_heads, per_page_token_count, head_dim].
 pub(super) fn get_page_from_pool(pool: &Tensor, page_id: usize) -> Result<Tensor> {
     Ok(pool
         .narrow(/* dim */ 0, /* start */ page_id, /* len */ 1)?

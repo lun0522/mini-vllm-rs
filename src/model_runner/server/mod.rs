@@ -175,16 +175,15 @@ impl ModelRunnerService for ModelRunnerRpcService {
 
 fn create_inference_backends(
     args: &ModelRunnerProcessArgs,
-    inference_devices: &Vec<InferenceDevice>,
+    inference_devices: &[InferenceDevice],
 ) -> Result<InferenceBackends> {
-    let mut maybe_metadata: Option<ModelRunnerMetadata> = None;
-    let mut threads: Vec<JoinHandle<()>> = Vec::with_capacity(inference_devices.len());
-    let mut request_senders: Vec<mpsc::Sender<InferenceRequest>> =
-        Vec::with_capacity(inference_devices.len());
-    for (index, device) in inference_devices.into_iter().enumerate() {
+    let mut maybe_metadata = None;
+    let mut threads = Vec::with_capacity(inference_devices.len());
+    let mut request_senders = Vec::with_capacity(inference_devices.len());
+    for (index, device) in inference_devices.iter().enumerate() {
         let backend_id = index + 1;
         let inference_backend: InferenceBackend =
-            create_inference_backend(backend_id, &args, *device)?;
+            create_inference_backend(backend_id, args, *device)?;
         if maybe_metadata.is_none() {
             maybe_metadata = Some(inference_backend.metadata);
         }

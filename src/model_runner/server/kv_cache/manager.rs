@@ -3,6 +3,7 @@ use super::paged_cache::RequestPagedCacheState;
 use super::KvCacheBackend;
 use crate::models::ContiguousCacheTensors;
 use crate::models::KvCache;
+use crate::models::PagedCacheLayout;
 use anyhow::bail;
 use anyhow::ensure;
 use anyhow::Context;
@@ -166,6 +167,21 @@ impl KvCache for KvCacheManager {
             |cache, request_state| cache.get_contiguous_cache_tensors(request_state, layer_index),
             /* handle_paged */
             |cache, request_state| cache.get_contiguous_cache_tensors(request_state, layer_index),
+        )
+    }
+
+    fn get_paged_cache_layout(
+        &mut self,
+        request_id: u64,
+        layer_index: usize,
+    ) -> Result<Option<PagedCacheLayout>> {
+        self.with_request_state(
+            request_id,
+            /* handle_contiguous */ |_, _| Ok(None),
+            /* handle_paged */
+            |cache, request_state| {
+                Some(cache.get_paged_cache_layout(request_state, layer_index)).transpose()
+            },
         )
     }
 }

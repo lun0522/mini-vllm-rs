@@ -16,7 +16,7 @@ Status: ✅ done · 🚧 in progress · ⬜ not started · ❌ out of scope
 - ✅ Paged KV-cache management.
   - ✅ Preallocated, engine-owned KV caches passed into model forward calls.
   - ✅ Fixed-size KV-cache pages with per-layer allocation and block tables.
-  - ❌ Attention over paged caches without rebuilding contiguous tensors.
+  - 🚧 Attention over paged caches without rebuilding contiguous tensors.
 - ✅ Speculative decoding.
   - ✅ Draft-model loading with tokenizer compatibility and vocabulary coverage
     validation.

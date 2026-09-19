@@ -54,6 +54,15 @@ pub(crate) struct ForwardOutput {
 }
 
 /// Provides request-specific key and value tensors during model execution.
+///
+/// Key and value tensors passed to or returned by this interface have shape
+/// [1, num_kv_heads, token_count, head_dim]. The leading dimension is the model attention batch
+/// axis. It is always 1 because requests share a model pass by being packed along the token axis,
+/// while cache storage and attention are handled one request at a time. Keeping the singleton batch
+/// axis preserves the model's rank-4 K/V layout.
+///
+/// Paged-cache pools have an additional leading physical-page axis and are shaped
+/// [page_count, /* batch */ 1, num_kv_heads, per_page_token_count, head_dim].
 pub(crate) trait KvCache: Send {
     fn append_new_key_value(
         &mut self,
@@ -66,14 +75,28 @@ pub(crate) trait KvCache: Send {
 
     fn get_contiguous_cache_tensors(
         &mut self,
-        _request_id: u64,
-        _layer_index: usize,
+        request_id: u64,
+        layer_index: usize,
     ) -> Result<ContiguousCacheTensors>;
+
+    fn get_paged_cache_layout(
+        &mut self,
+        request_id: u64,
+        layer_index: usize,
+    ) -> Result<Option<PagedCacheLayout>>;
 }
 
 pub(crate) struct ContiguousCacheTensors {
     pub(crate) key: Tensor,
     pub(crate) value: Tensor,
+}
+
+pub(crate) struct PagedCacheLayout {
+    pub(crate) key_pool: Tensor,
+    pub(crate) value_pool: Tensor,
+    pub(crate) page_ids: Vec<usize>,
+    pub(crate) per_page_token_count: usize,
+    pub(crate) cached_token_count: usize,
 }
 
 pub(crate) struct ModelInfo {

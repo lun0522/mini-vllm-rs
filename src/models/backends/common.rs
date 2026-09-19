@@ -3,6 +3,7 @@ use crate::models::ForwardInput;
 use crate::models::ForwardOutput;
 use crate::models::KvCache;
 use crate::models::ModelInfo;
+use crate::models::PagedCacheLayout;
 use candle_core::quantized::QTensor;
 use candle_core::DType;
 use candle_core::Device;
@@ -13,7 +14,13 @@ use candle_nn::Module;
 use candle_transformers::quantized_nn::RmsNorm;
 use candle_transformers::utils::repeat_kv;
 
+const DEFAULT_ENABLE_CPU_PAGED_ATTENTION: bool = false;
 const DEFAULT_METAL_GEMV_MAX_ROWS: usize = 4;
+
+const ENABLE_CPU_PAGED_ATTENTION: bool = match option_env!("MINI_VLLM_ENABLE_CPU_PAGED_ATTENTION") {
+    Some(value) => const_str::parse!(value, bool),
+    None => DEFAULT_ENABLE_CPU_PAGED_ATTENTION,
+};
 const METAL_GEMV_MAX_ROWS: usize = match option_env!("MINI_VLLM_METAL_GEMV_MAX_ROWS") {
     Some(value) => const_str::parse!(value, u32) as usize,
     None => DEFAULT_METAL_GEMV_MAX_ROWS,
@@ -179,78 +186,39 @@ impl TransformerBlock {
 
         let mut request_attention_outputs = Vec::with_capacity(contexts.len());
         for context in contexts {
+            let ForwardContext {
+                request_id,
+                start_pos,
+                cached_kv_len,
+                q_start_index,
+                q_len,
+            } = *context;
+
             // Narrowing packed Q/K preserves packed strides, so materialize each
             // request slice before passing it to Candle's contiguous-only RoPE kernels.
             // request_q: [1, num_q_heads, q_len, head_dim].
             // request_k, request_v: [1, num_kv_heads, q_len, head_dim].
             let request_q = packed_q
-                .narrow(/* dim */ 2, context.q_start_index, context.q_len)?
+                .narrow(/* dim */ 2, q_start_index, q_len)?
                 .contiguous()?;
             let request_k = packed_k
-                .narrow(/* dim */ 2, context.q_start_index, context.q_len)?
+                .narrow(/* dim */ 2, q_start_index, q_len)?
                 .contiguous()?;
-            let request_v =
-                packed_v.narrow(/* dim */ 2, context.q_start_index, context.q_len)?;
-            let request_q = self.apply_rotary_embedding(&request_q, context.start_pos)?;
-            let request_k = self.apply_rotary_embedding(&request_k, context.start_pos)?;
+            let request_v = packed_v.narrow(/* dim */ 2, q_start_index, q_len)?;
+            let request_q = self.forward_rope(&request_q, start_pos)?;
+            let request_k = self.forward_rope(&request_k, start_pos)?;
 
             cache
                 .append_new_key_value(
-                    context.request_id,
+                    request_id,
                     layer_index,
-                    context.cached_kv_len,
+                    cached_kv_len,
                     &request_k,
                     &request_v,
                 )
                 .map_err(candle_core::Error::wrap)?;
-            let ContiguousCacheTensors {
-                key: request_full_cached_k,
-                value: request_full_cached_v,
-            } = cache
-                .get_contiguous_cache_tensors(context.request_id, layer_index)
-                .map_err(candle_core::Error::wrap)?;
-            let (_, _, request_full_cached_kv_len, _) = request_full_cached_k.dims4()?;
-            let expected_full_cached_kv_len = context.cached_kv_len + context.q_len;
-            if request_full_cached_kv_len != expected_full_cached_kv_len {
-                candle_core::bail!("KV cache returned an inconsistent sequence length")
-            }
-
             // request_y: [1, num_q_heads, q_len, head_dim].
-            let request_y = if request_q.device().is_metal() && context.q_len == 1 {
-                // Metal SDPA handles GQA or MQA without explicitly repeating K and V.
-                candle_nn::ops::sdpa(
-                    &request_q,
-                    &request_full_cached_k,
-                    &request_full_cached_v,
-                    None,
-                    false,
-                    1. / (self.head_dim as f32).sqrt(),
-                    1.,
-                )?
-            } else {
-                // Expand grouped-query or multi-query heads to match request_q:
-                // request_full_cached_k, request_full_cached_v:
-                // [1, num_q_heads, request_full_cached_kv_len, head_dim].
-                let repetition_count = self.num_q_heads / self.num_kv_heads;
-                let request_full_cached_k = repeat_kv(request_full_cached_k, repetition_count)?;
-                let request_full_cached_v = repeat_kv(request_full_cached_v, repetition_count)?;
-
-                // request_attn_scores:
-                // [1, num_q_heads, q_len, request_full_cached_kv_len].
-                let request_attn_scores = (request_q.matmul(&request_full_cached_k.t()?)?
-                    / (self.head_dim as f64).sqrt())?;
-                // request_mask: [q_len, request_full_cached_kv_len].
-                let request_mask = candle_transformers::utils::build_causal_mask(
-                    context.q_len,
-                    context.cached_kv_len,
-                    packed_x.device(),
-                )?
-                .broadcast_as(request_attn_scores.shape())?;
-                let request_attn_scores =
-                    masked_fill(&request_attn_scores, &request_mask, &self.neg_inf)?;
-                let request_attn_weights = candle_nn::ops::softmax_last_dim(&request_attn_scores)?;
-                request_attn_weights.matmul(&request_full_cached_v.contiguous()?)?
-            };
+            let request_y = self.forward_self_attention(context, layer_index, cache, &request_q)?;
             request_attention_outputs.push(request_y);
         }
 
@@ -272,7 +240,7 @@ impl TransformerBlock {
         x + residual
     }
 
-    fn apply_rotary_embedding(&self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
+    fn forward_rope(&self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
         let context = &self.rope_context;
         let _enter = context.span_rope.enter();
         let (_, _, query_len, _) = x.dims4()?;
@@ -282,6 +250,159 @@ impl TransformerBlock {
             RotaryEmbeddingType::Neox => candle_nn::rotary_emb::rope(x, &cos, &sin),
             RotaryEmbeddingType::Interleaved => candle_nn::rotary_emb::rope_i(x, &cos, &sin),
         }
+    }
+
+    fn forward_self_attention(
+        &self,
+        context: &ForwardContext,
+        layer_index: usize,
+        cache: &mut dyn KvCache,
+        request_q: &Tensor,
+    ) -> Result<Tensor> {
+        if let Some(request_y) =
+            self.forward_cpu_paged_attention(context, layer_index, cache, request_q)?
+        {
+            return Ok(request_y);
+        }
+
+        let ForwardContext {
+            request_id,
+            start_pos: _,
+            cached_kv_len,
+            q_start_index: _,
+            q_len,
+        } = *context;
+
+        // request_full_cached_k, request_full_cached_v:
+        // [1, num_kv_heads, request_full_cached_kv_len, head_dim]
+        let ContiguousCacheTensors {
+            key: request_full_cached_k,
+            value: request_full_cached_v,
+        } = cache
+            .get_contiguous_cache_tensors(request_id, layer_index)
+            .map_err(candle_core::Error::wrap)?;
+        let (_, _, request_full_cached_kv_len, _) = request_full_cached_k.dims4()?;
+        let expected_full_cached_kv_len = cached_kv_len + q_len;
+        if request_full_cached_kv_len != expected_full_cached_kv_len {
+            candle_core::bail!("KV cache returned an inconsistent sequence length")
+        }
+
+        // Metal SDPA handles GQA or MQA without explicitly repeating K and V.
+        if request_q.device().is_metal() && q_len == 1 {
+            return candle_nn::ops::sdpa(
+                request_q,
+                &request_full_cached_k,
+                &request_full_cached_v,
+                None,
+                false,
+                1. / (self.head_dim as f32).sqrt(),
+                1.,
+            );
+        }
+
+        // Expand grouped-query or multi-query heads to match request_q.
+        // request_repeated_k, request_repeated_v:
+        // [1, num_q_heads, kv_len, head_dim].
+        let repetition_count = self.num_q_heads / self.num_kv_heads;
+        let request_repeated_k = repeat_kv(request_full_cached_k, repetition_count)?;
+        let request_repeated_v = repeat_kv(request_full_cached_v, repetition_count)?;
+        // request_attn_scores: [1, num_q_heads, q_len, kv_len].
+        let request_attn_scores =
+            (request_q.matmul(&request_repeated_k.t()?)? / (self.head_dim as f64).sqrt())?;
+        // request_mask: [q_len, kv_len].
+        let request_mask = candle_transformers::utils::build_causal_mask(
+            q_len,
+            cached_kv_len,
+            request_q.device(),
+        )?
+        .broadcast_as(request_attn_scores.shape())?;
+        let request_attn_scores = masked_fill(&request_attn_scores, &request_mask, &self.neg_inf)?;
+        let request_attn_weights = candle_nn::ops::softmax_last_dim(&request_attn_scores)?;
+        request_attn_weights.matmul(&request_repeated_v.contiguous()?)
+    }
+
+    fn forward_cpu_paged_attention(
+        &self,
+        context: &ForwardContext,
+        layer_index: usize,
+        cache: &mut dyn KvCache,
+        request_q: &Tensor,
+    ) -> Result<Option<Tensor>> {
+        if !request_q.device().is_cpu() || !ENABLE_CPU_PAGED_ATTENTION {
+            return Ok(None);
+        }
+
+        let ForwardContext {
+            request_id,
+            start_pos: _,
+            cached_kv_len,
+            q_start_index: _,
+            q_len,
+        } = *context;
+
+        let Some(PagedCacheLayout {
+            key_pool,
+            value_pool,
+            page_ids,
+            per_page_token_count,
+            cached_token_count,
+        }) = cache
+            .get_paged_cache_layout(request_id, layer_index)
+            .map_err(candle_core::Error::wrap)?
+        else {
+            return Ok(None);
+        };
+
+        let expected_cached_token_count = cached_kv_len + q_len;
+        if cached_token_count != expected_cached_token_count {
+            candle_core::bail!("KV cache returned an inconsistent sequence length")
+        }
+
+        let repetition_count = self.num_q_heads / self.num_kv_heads;
+        let mut remaining_token_count = cached_token_count;
+        let mut request_attn_score_slices = Vec::new();
+        let mut request_repeated_v_slices = Vec::new();
+        for page_id in page_ids {
+            let slice_token_count = per_page_token_count.min(remaining_token_count);
+            // request_k_slice, request_v_slice: [1, num_kv_heads, kv_slice_len, head_dim].
+            let request_k_slice = get_page_slice_from_pool(&key_pool, page_id, slice_token_count)?;
+            let request_v_slice =
+                get_page_slice_from_pool(&value_pool, page_id, slice_token_count)?;
+            remaining_token_count -= slice_token_count;
+
+            // Expand grouped-query or multi-query heads to match request_q.
+            // request_repeated_k_slice, request_repeated_v_slice:
+            // [1, num_q_heads, kv_slice_len, head_dim].
+            let request_repeated_k_slice = repeat_kv(request_k_slice, repetition_count)?;
+            let request_repeated_v_slice = repeat_kv(request_v_slice, repetition_count)?;
+            // request_attn_score_slice: request_q: [1, num_q_heads, q_len, kv_slice_len].
+            let request_attn_score_slice = request_q.matmul(&request_repeated_k_slice.t()?)?;
+
+            request_attn_score_slices.push(request_attn_score_slice);
+            request_repeated_v_slices.push(request_repeated_v_slice);
+        }
+        if remaining_token_count != 0 {
+            candle_core::bail!("paged KV cache contains fewer pages than its sequence length")
+        }
+
+        // request_attn_scores: [1, num_q_heads, q_len, kv_len].
+        let request_attn_scores = (Tensor::cat(&request_attn_score_slices, /* dim */ 3)?
+            / (self.head_dim as f64).sqrt())?;
+        // request_mask: [q_len, request_full_cached_kv_len].
+        let request_mask = candle_transformers::utils::build_causal_mask(
+            q_len,
+            cached_kv_len,
+            request_q.device(),
+        )?
+        .broadcast_as(request_attn_scores.shape())?;
+        let request_attn_scores = masked_fill(&request_attn_scores, &request_mask, &self.neg_inf)?;
+        let request_attn_weights = candle_nn::ops::softmax_last_dim(&request_attn_scores)?;
+
+        // request_repeated_v: [1, num_q_heads, kv_len, head_dim].
+        let request_repeated_v =
+            Tensor::cat(&request_repeated_v_slices, /* dim */ 2)?.contiguous()?;
+        let request_y = request_attn_weights.matmul(&request_repeated_v)?;
+        Ok(Some(request_y))
     }
 }
 
@@ -522,4 +643,17 @@ fn create_forward_output(
 fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: &Tensor) -> Result<Tensor> {
     let shape = mask.shape();
     mask.where_cond(&on_true.broadcast_as(shape.dims())?, on_false)
+}
+
+/// returns a tensor of shape [/* batch */ 1, num_kv_heads, slice_token_count, head_dim].
+fn get_page_slice_from_pool(
+    pool: &Tensor,
+    page_id: usize,
+    slice_token_count: usize,
+) -> Result<Tensor> {
+    // According to the dimension contract of the KvCache trait, a cache pool is a tensor of shape:
+    // [page_count, /* batch */ 1, num_kv_heads, per_page_token_count, head_dim]
+    pool.narrow(/* dim */ 0, /* start */ page_id, /* len */ 1)?
+        .narrow(/* dim */ 3, /* start */ 0, slice_token_count)?
+        .squeeze(0)
 }

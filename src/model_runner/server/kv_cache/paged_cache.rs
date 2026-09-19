@@ -9,6 +9,7 @@ use super::utils::TOKEN_DIMENSION;
 use crate::models::ContiguousCacheTensors;
 use crate::models::ModelInfo;
 use crate::models::ModelRole;
+use crate::models::PagedCacheLayout;
 use anyhow::bail;
 use anyhow::ensure;
 use anyhow::Context;
@@ -156,6 +157,24 @@ impl PagedKvCache {
                 &self.physical_page_pool.value_pool,
                 layer_block_table,
             )?,
+        })
+    }
+
+    pub(super) fn get_paged_cache_layout(
+        &self,
+        request_state: &RequestPagedCacheState,
+        layer_index: usize,
+    ) -> Result<PagedCacheLayout> {
+        let layer_block_table = request_state
+            .active_block_tables
+            .layer_block_table(layer_index)
+            .context(format!("invalid KV-cache layer {layer_index}"))?;
+        Ok(PagedCacheLayout {
+            key_pool: self.physical_page_pool.key_pool.clone(),
+            value_pool: self.physical_page_pool.value_pool.clone(),
+            page_ids: layer_block_table.page_ids.iter().map(|&id| id.0).collect(),
+            per_page_token_count: self.physical_page_pool.per_page_token_count,
+            cached_token_count: layer_block_table.cached_token_count,
         })
     }
 
