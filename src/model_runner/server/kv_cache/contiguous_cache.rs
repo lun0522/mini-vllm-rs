@@ -1,14 +1,14 @@
 use super::utils::allocate_pool;
-use super::utils::pool_page;
+use super::utils::get_page_from_pool;
 use super::utils::validate_cache_append;
 use super::utils::validate_truncation;
 use super::utils::TOKEN_DIMENSION;
 use super::LayerCache;
-use crate::models::CachedKeyValue;
+use crate::models::ContiguousCacheTensors;
 use crate::models::ModelInfo;
 use crate::models::ModelRole;
-use anyhow::bail;
 use anyhow::ensure;
+use anyhow::Context;
 use anyhow::Result;
 use candle_core::Device;
 use candle_core::Tensor;
@@ -94,18 +94,6 @@ impl ContiguousKvCache {
         Ok(cache)
     }
 
-    pub(super) fn truncate(
-        &mut self,
-        request_state: &mut RequestContiguousCacheState,
-        target_token_count: usize,
-    ) -> Result<()> {
-        validate_truncation(&request_state.layer_caches, target_token_count)?;
-        for layer_cache in &mut request_state.layer_caches {
-            layer_cache.token_count = target_token_count;
-        }
-        Ok(())
-    }
-
     pub(super) fn token_capacity(&self) -> usize {
         self.per_layer_token_capacity
     }
@@ -114,17 +102,18 @@ impl ContiguousKvCache {
         self.key_pool.dims()[0]
     }
 
-    pub(super) fn append(
+    pub(super) fn append_new_key_value(
         &mut self,
         request_state: &mut RequestContiguousCacheState,
         layer_index: usize,
         start_position: usize,
         key: &Tensor,
         value: &Tensor,
-    ) -> Result<CachedKeyValue> {
-        let Some(layer_cache) = request_state.layer_caches.get(layer_index) else {
-            bail!("invalid KV-cache layer {layer_index}");
-        };
+    ) -> Result<()> {
+        let layer_cache = request_state
+            .layer_caches
+            .get_mut(layer_index)
+            .context(format!("invalid KV-cache layer {layer_index}"))?;
         let current_token_count = layer_cache.token_count;
         let appending_token_count =
             validate_cache_append(current_token_count, layer_index, start_position, key, value)?;
@@ -136,16 +125,50 @@ impl ContiguousKvCache {
             self.per_layer_token_capacity
         );
 
-        let key_layer = pool_page(&self.key_pool, layer_index)?;
-        let value_layer = pool_page(&self.value_pool, layer_index)?;
-        key_layer.slice_set(&key.contiguous()?, TOKEN_DIMENSION, current_token_count)?;
-        value_layer.slice_set(&value.contiguous()?, TOKEN_DIMENSION, current_token_count)?;
-        let cached_token_count = current_token_count + appending_token_count;
-        request_state.layer_caches[layer_index].token_count = cached_token_count;
-        Ok(CachedKeyValue {
-            key: key_layer.narrow(TOKEN_DIMENSION, 0, cached_token_count)?,
-            value: value_layer.narrow(TOKEN_DIMENSION, 0, cached_token_count)?,
+        let key_layer = get_page_from_pool(&self.key_pool, layer_index)?;
+        let value_layer = get_page_from_pool(&self.value_pool, layer_index)?;
+        key_layer.slice_set(
+            &key.contiguous()?,
+            TOKEN_DIMENSION,
+            /* offset */ current_token_count,
+        )?;
+        value_layer.slice_set(
+            &value.contiguous()?,
+            TOKEN_DIMENSION,
+            /* offset */ current_token_count,
+        )?;
+        layer_cache.token_count += appending_token_count;
+        Ok(())
+    }
+
+    pub(super) fn get_contiguous_cache_tensors(
+        &self,
+        request_state: &RequestContiguousCacheState,
+        layer_index: usize,
+    ) -> Result<ContiguousCacheTensors> {
+        let layer_cache = request_state
+            .layer_caches
+            .get(layer_index)
+            .context(format!("invalid KV-cache layer {layer_index}"))?;
+        let cached_token_count = layer_cache.cached_token_count();
+        let key_layer = get_page_from_pool(&self.key_pool, layer_index)?;
+        let value_layer = get_page_from_pool(&self.value_pool, layer_index)?;
+        Ok(ContiguousCacheTensors {
+            key: key_layer.narrow(TOKEN_DIMENSION, /* start */ 0, cached_token_count)?,
+            value: value_layer.narrow(TOKEN_DIMENSION, /* start */ 0, cached_token_count)?,
         })
+    }
+
+    pub(super) fn truncate(
+        &mut self,
+        request_state: &mut RequestContiguousCacheState,
+        target_token_count: usize,
+    ) -> Result<()> {
+        validate_truncation(&request_state.layer_caches, target_token_count)?;
+        for layer_cache in &mut request_state.layer_caches {
+            layer_cache.token_count = target_token_count;
+        }
+        Ok(())
     }
 }
 
@@ -193,14 +216,16 @@ mod tests {
             start_position: usize,
             key: &Tensor,
             value: &Tensor,
-        ) -> Result<CachedKeyValue> {
-            self.cache.append(
+        ) -> Result<ContiguousCacheTensors> {
+            self.cache.append_new_key_value(
                 &mut self.request_state,
                 layer_index,
                 start_position,
                 key,
                 value,
-            )
+            )?;
+            self.cache
+                .get_contiguous_cache_tensors(&self.request_state, layer_index)
         }
 
         fn truncate(&mut self, target_token_count: usize) -> Result<()> {

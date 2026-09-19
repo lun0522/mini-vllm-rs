@@ -69,6 +69,8 @@ pub(super) fn allocate_pool(
     )?)
 }
 
-pub(super) fn pool_page(pool: &Tensor, page_id: usize) -> Result<Tensor> {
-    Ok(pool.narrow(0, page_id, 1)?.squeeze(0)?)
+pub(super) fn get_page_from_pool(pool: &Tensor, page_id: usize) -> Result<Tensor> {
+    Ok(pool
+        .narrow(/* dim */ 0, /* start */ page_id, /* len */ 1)?
+        .squeeze(0)?)
 }

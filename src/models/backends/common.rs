@@ -1,4 +1,4 @@
-use crate::models::CachedKeyValue;
+use crate::models::ContiguousCacheTensors;
 use crate::models::ForwardInput;
 use crate::models::ForwardOutput;
 use crate::models::KvCache;
@@ -194,17 +194,20 @@ impl TransformerBlock {
             let request_q = self.apply_rotary_embedding(&request_q, context.start_pos)?;
             let request_k = self.apply_rotary_embedding(&request_k, context.start_pos)?;
 
-            let CachedKeyValue {
-                key: request_full_cached_k,
-                value: request_full_cached_v,
-            } = cache
-                .append(
+            cache
+                .append_new_key_value(
                     context.request_id,
                     layer_index,
                     context.cached_kv_len,
                     &request_k,
                     &request_v,
                 )
+                .map_err(candle_core::Error::wrap)?;
+            let ContiguousCacheTensors {
+                key: request_full_cached_k,
+                value: request_full_cached_v,
+            } = cache
+                .get_contiguous_cache_tensors(context.request_id, layer_index)
                 .map_err(candle_core::Error::wrap)?;
             let (_, _, request_full_cached_kv_len, _) = request_full_cached_k.dims4()?;
             let expected_full_cached_kv_len = context.cached_kv_len + context.q_len;
@@ -273,8 +276,8 @@ impl TransformerBlock {
         let context = &self.rope_context;
         let _enter = context.span_rope.enter();
         let (_, _, query_len, _) = x.dims4()?;
-        let cos = context.cos.narrow(0, index_pos, query_len)?;
-        let sin = context.sin.narrow(0, index_pos, query_len)?;
+        let cos = context.cos.narrow(/* dim */ 0, index_pos, query_len)?;
+        let sin = context.sin.narrow(/* dim */ 0, index_pos, query_len)?;
         match context.rope_type {
             RotaryEmbeddingType::Neox => candle_nn::rotary_emb::rope(x, &cos, &sin),
             RotaryEmbeddingType::Interleaved => candle_nn::rotary_emb::rope_i(x, &cos, &sin),

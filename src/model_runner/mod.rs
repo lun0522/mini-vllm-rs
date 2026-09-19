@@ -168,9 +168,11 @@ mod tests {
     fn parses_inference_devices() {
         assert_eq!("cpu".parse(), Ok(InferenceDevice::Cpu));
         assert_eq!("gpu".parse(), Ok(InferenceDevice::Gpu));
-        assert!("mixed".parse::<InferenceDevice>().is_err());
+        assert_eq!("mixed".parse(), Ok(InferenceDevice::Mixed));
+        assert!("tpu".parse::<InferenceDevice>().is_err());
         assert_eq!(InferenceDevice::Cpu.to_string(), "CPU");
         assert_eq!(InferenceDevice::Gpu.to_string(), "GPU");
+        assert_eq!(InferenceDevice::Mixed.to_string(), "Mixed");
     }
 
     #[test]

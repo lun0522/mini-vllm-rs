@@ -3,10 +3,10 @@ use super::active_block_tables::LayerBlockTable;
 use super::physical_page_pool::PhysicalPagePool;
 use super::prefix_index::PrefixBlockCursor;
 use super::prefix_index::PrefixBlockIndex;
-use super::utils::pool_page;
+use super::utils::get_page_from_pool;
 use super::utils::validate_cache_append;
 use super::utils::TOKEN_DIMENSION;
-use crate::models::CachedKeyValue;
+use crate::models::ContiguousCacheTensors;
 use crate::models::ModelInfo;
 use crate::models::ModelRole;
 use anyhow::bail;
@@ -107,14 +107,14 @@ impl PagedKvCache {
         Ok(matched_token_count)
     }
 
-    pub(super) fn append(
+    pub(super) fn append_new_key_value(
         &mut self,
         request_state: &mut RequestPagedCacheState,
         layer_index: usize,
         start_position: usize,
         key: &Tensor,
         value: &Tensor,
-    ) -> Result<CachedKeyValue> {
+    ) -> Result<()> {
         let Some(layer_block_table) = request_state
             .active_block_tables
             .layer_block_table(layer_index)
@@ -135,8 +135,28 @@ impl PagedKvCache {
             key,
             value,
             appending_token_count,
-        )?;
-        self.reconstruct_full_cache(request_state, layer_index)
+        )
+    }
+
+    pub(super) fn get_contiguous_cache_tensors(
+        &self,
+        request_state: &RequestPagedCacheState,
+        layer_index: usize,
+    ) -> Result<ContiguousCacheTensors> {
+        let layer_block_table = request_state
+            .active_block_tables
+            .layer_block_table(layer_index)
+            .context(format!("invalid KV-cache layer {layer_index}"))?;
+        Ok(ContiguousCacheTensors {
+            key: self.reconstruct_contiguous_tensor(
+                &self.physical_page_pool.key_pool,
+                layer_block_table,
+            )?,
+            value: self.reconstruct_contiguous_tensor(
+                &self.physical_page_pool.value_pool,
+                layer_block_table,
+            )?,
+        })
     }
 
     pub(super) fn truncate(
@@ -259,27 +279,6 @@ impl PagedKvCache {
             .validate_append_capacity(current_token_count, appending_token_count)
     }
 
-    fn reconstruct_full_cache(
-        &self,
-        request_state: &RequestPagedCacheState,
-        layer_index: usize,
-    ) -> Result<CachedKeyValue> {
-        let layer_block_table = request_state
-            .active_block_tables
-            .layer_block_table(layer_index)
-            .context("KV-cache layer is missing from the active block tables")?;
-        Ok(CachedKeyValue {
-            key: self.reconstruct_contiguous_tensor(
-                &self.physical_page_pool.key_pool,
-                layer_block_table,
-            )?,
-            value: self.reconstruct_contiguous_tensor(
-                &self.physical_page_pool.value_pool,
-                layer_block_table,
-            )?,
-        })
-    }
-
     /// Reads pages in logical block-table order and returns one contiguous attention tensor.
     ///
     /// Every page except the last is full. The last page is narrowed to its valid token count before
@@ -296,9 +295,9 @@ impl PagedKvCache {
                 .physical_page_pool
                 .per_page_token_count
                 .min(remaining_token_count);
-            page_slices.push(pool_page(pool, page_id.0)?.narrow(
+            page_slices.push(get_page_from_pool(pool, page_id.0)?.narrow(
                 TOKEN_DIMENSION,
-                0,
+                /* start */ 0,
                 slice_token_count,
             )?);
             remaining_token_count -= slice_token_count;
@@ -337,14 +336,16 @@ mod tests {
             start_position: usize,
             key: &Tensor,
             value: &Tensor,
-        ) -> Result<CachedKeyValue> {
-            self.cache.append(
+        ) -> Result<ContiguousCacheTensors> {
+            self.cache.append_new_key_value(
                 &mut self.request_state,
                 layer_index,
                 start_position,
                 key,
                 value,
-            )
+            )?;
+            self.cache
+                .get_contiguous_cache_tensors(&self.request_state, layer_index)
         }
 
         fn restore_cached_prefix(&mut self, token_ids: &[u32]) -> Result<usize> {

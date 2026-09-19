@@ -40,7 +40,7 @@ pub(crate) trait CausalLanguageModel: Send {
     ) -> Result<ForwardOutput>;
 }
 
-/// Provides one request's input and position to a batched model forward pass.
+/// Provides one request's input and position to a model forward pass.
 pub(crate) struct ForwardInput {
     pub(crate) request_id: u64,
     pub(crate) input: Tensor,
@@ -53,20 +53,25 @@ pub(crate) struct ForwardOutput {
     pub(crate) verification_logits: Vec<Tensor>,
 }
 
-/// Provides request-specific key and value tensors during batched model execution.
+/// Provides request-specific key and value tensors during model execution.
 pub(crate) trait KvCache: Send {
-    /// Stores newly computed key/value tensors and returns the complete layer cache for attention.
-    fn append(
+    fn append_new_key_value(
         &mut self,
         request_id: u64,
         layer_index: usize,
         start_position: usize,
         key: &Tensor,
         value: &Tensor,
-    ) -> Result<CachedKeyValue>;
+    ) -> Result<()>;
+
+    fn get_contiguous_cache_tensors(
+        &mut self,
+        _request_id: u64,
+        _layer_index: usize,
+    ) -> Result<ContiguousCacheTensors>;
 }
 
-pub(crate) struct CachedKeyValue {
+pub(crate) struct ContiguousCacheTensors {
     pub(crate) key: Tensor,
     pub(crate) value: Tensor,
 }

@@ -1,7 +1,7 @@
 use super::contiguous_cache::RequestContiguousCacheState;
 use super::paged_cache::RequestPagedCacheState;
 use super::KvCacheBackend;
-use crate::models::CachedKeyValue;
+use crate::models::ContiguousCacheTensors;
 use crate::models::KvCache;
 use anyhow::bail;
 use anyhow::ensure;
@@ -134,24 +134,38 @@ impl KvCacheManager {
 }
 
 impl KvCache for KvCacheManager {
-    fn append(
+    fn append_new_key_value(
         &mut self,
         request_id: u64,
         layer_index: usize,
         start_position: usize,
         key: &Tensor,
         value: &Tensor,
-    ) -> Result<CachedKeyValue> {
+    ) -> Result<()> {
         self.with_request_state(
             request_id,
             /* handle_contiguous */
             |cache, request_state| {
-                cache.append(request_state, layer_index, start_position, key, value)
+                cache.append_new_key_value(request_state, layer_index, start_position, key, value)
             },
             /* handle_paged */
             |cache, request_state| {
-                cache.append(request_state, layer_index, start_position, key, value)
+                cache.append_new_key_value(request_state, layer_index, start_position, key, value)
             },
+        )
+    }
+
+    fn get_contiguous_cache_tensors(
+        &mut self,
+        request_id: u64,
+        layer_index: usize,
+    ) -> Result<ContiguousCacheTensors> {
+        self.with_request_state(
+            request_id,
+            /* handle_contiguous */
+            |cache, request_state| cache.get_contiguous_cache_tensors(request_state, layer_index),
+            /* handle_paged */
+            |cache, request_state| cache.get_contiguous_cache_tensors(request_state, layer_index),
         )
     }
 }
@@ -233,13 +247,13 @@ mod tests {
         manager.start_request(2)?;
 
         let request_1_prefix = cache_tensor(10, 2)?;
-        KvCache::append(&mut manager, 1, 0, 0, &request_1_prefix, &request_1_prefix)?;
+        KvCache::append_new_key_value(&mut manager, 1, 0, 0, &request_1_prefix, &request_1_prefix)?;
         let request_2_prefix = cache_tensor(20, 1)?;
-        let request_2_cache =
-            KvCache::append(&mut manager, 2, 0, 0, &request_2_prefix, &request_2_prefix)?;
+        KvCache::append_new_key_value(&mut manager, 2, 0, 0, &request_2_prefix, &request_2_prefix)?;
+        let request_2_cache = KvCache::get_contiguous_cache_tensors(&mut manager, 2, 0)?;
         let request_1_suffix = cache_tensor(12, 1)?;
-        let request_1_cache =
-            KvCache::append(&mut manager, 1, 0, 2, &request_1_suffix, &request_1_suffix)?;
+        KvCache::append_new_key_value(&mut manager, 1, 0, 2, &request_1_suffix, &request_1_suffix)?;
+        let request_1_cache = KvCache::get_contiguous_cache_tensors(&mut manager, 1, 0)?;
 
         assert_eq!(
             request_1_cache.key.flatten_all()?.to_vec1::<u32>()?,

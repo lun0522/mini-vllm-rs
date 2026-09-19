@@ -1,5 +1,5 @@
 use super::utils::allocate_pool;
-use super::utils::pool_page;
+use super::utils::get_page_from_pool;
 use super::utils::TOKEN_DIMENSION;
 use crate::models::ModelInfo;
 use anyhow::bail;
@@ -201,8 +201,8 @@ impl PhysicalPagePool {
         );
         let key_slice = key.narrow(TOKEN_DIMENSION, input_offset, token_count)?;
         let value_slice = value.narrow(TOKEN_DIMENSION, input_offset, token_count)?;
-        let key_page = pool_page(&self.key_pool, page_id.0)?;
-        let value_page = pool_page(&self.value_pool, page_id.0)?;
+        let key_page = get_page_from_pool(&self.key_pool, page_id.0)?;
+        let value_page = get_page_from_pool(&self.value_pool, page_id.0)?;
         key_page.slice_set(&key_slice.contiguous()?, TOKEN_DIMENSION, page_offset)?;
         value_page.slice_set(&value_slice.contiguous()?, TOKEN_DIMENSION, page_offset)?;
         Ok(())
