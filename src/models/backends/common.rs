@@ -300,25 +300,17 @@ impl TransformerBlock {
             );
         }
 
-        // Expand grouped-query or multi-query heads to match request_q.
-        // request_repeated_k, request_repeated_v:
-        // [1, num_q_heads, kv_len, head_dim].
-        let repetition_count = self.num_q_heads / self.num_kv_heads;
-        let request_repeated_k = repeat_kv(request_full_cached_k, repetition_count)?;
-        let request_repeated_v = repeat_kv(request_full_cached_v, repetition_count)?;
-        // request_attn_scores: [1, num_q_heads, q_len, kv_len].
-        let request_attn_scores =
-            (request_q.matmul(&request_repeated_k.t()?)? / (self.head_dim as f64).sqrt())?;
-        // request_mask: [q_len, kv_len].
-        let request_mask = candle_transformers::utils::build_causal_mask(
-            q_len,
+        forward_contiguous_attention(
+            request_q,
+            request_full_cached_k,
+            request_full_cached_v,
+            self.num_q_heads,
+            self.num_kv_heads,
+            self.head_dim,
             cached_kv_len,
-            request_q.device(),
-        )?
-        .broadcast_as(request_attn_scores.shape())?;
-        let request_attn_scores = masked_fill(&request_attn_scores, &request_mask, &self.neg_inf)?;
-        let request_attn_weights = candle_nn::ops::softmax_last_dim(&request_attn_scores)?;
-        request_attn_weights.matmul(&request_repeated_v.contiguous()?)
+            q_len,
+            &self.neg_inf,
+        )
     }
 
     fn forward_cpu_paged_attention(
@@ -358,51 +350,20 @@ impl TransformerBlock {
             candle_core::bail!("KV cache returned an inconsistent sequence length")
         }
 
-        let repetition_count = self.num_q_heads / self.num_kv_heads;
-        let mut remaining_token_count = cached_token_count;
-        let mut request_attn_score_slices = Vec::new();
-        let mut request_repeated_v_slices = Vec::new();
-        for page_id in page_ids {
-            let slice_token_count = per_page_token_count.min(remaining_token_count);
-            // request_k_slice, request_v_slice: [1, num_kv_heads, kv_slice_len, head_dim].
-            let request_k_slice = get_page_slice_from_pool(&key_pool, page_id, slice_token_count)?;
-            let request_v_slice =
-                get_page_slice_from_pool(&value_pool, page_id, slice_token_count)?;
-            remaining_token_count -= slice_token_count;
-
-            // Expand grouped-query or multi-query heads to match request_q.
-            // request_repeated_k_slice, request_repeated_v_slice:
-            // [1, num_q_heads, kv_slice_len, head_dim].
-            let request_repeated_k_slice = repeat_kv(request_k_slice, repetition_count)?;
-            let request_repeated_v_slice = repeat_kv(request_v_slice, repetition_count)?;
-            // request_attn_score_slice: request_q: [1, num_q_heads, q_len, kv_slice_len].
-            let request_attn_score_slice = request_q.matmul(&request_repeated_k_slice.t()?)?;
-
-            request_attn_score_slices.push(request_attn_score_slice);
-            request_repeated_v_slices.push(request_repeated_v_slice);
-        }
-        if remaining_token_count != 0 {
-            candle_core::bail!("paged KV cache contains fewer pages than its sequence length")
-        }
-
-        // request_attn_scores: [1, num_q_heads, q_len, kv_len].
-        let request_attn_scores = (Tensor::cat(&request_attn_score_slices, /* dim */ 3)?
-            / (self.head_dim as f64).sqrt())?;
-        // request_mask: [q_len, request_full_cached_kv_len].
-        let request_mask = candle_transformers::utils::build_causal_mask(
-            q_len,
+        Ok(Some(forward_paged_attention(
+            request_q,
+            &key_pool,
+            &value_pool,
+            &page_ids,
+            per_page_token_count,
+            cached_token_count,
+            self.num_q_heads,
+            self.num_kv_heads,
+            self.head_dim,
             cached_kv_len,
-            request_q.device(),
-        )?
-        .broadcast_as(request_attn_scores.shape())?;
-        let request_attn_scores = masked_fill(&request_attn_scores, &request_mask, &self.neg_inf)?;
-        let request_attn_weights = candle_nn::ops::softmax_last_dim(&request_attn_scores)?;
-
-        // request_repeated_v: [1, num_q_heads, kv_len, head_dim].
-        let request_repeated_v =
-            Tensor::cat(&request_repeated_v_slices, /* dim */ 2)?.contiguous()?;
-        let request_y = request_attn_weights.matmul(&request_repeated_v)?;
-        Ok(Some(request_y))
+            q_len,
+            &self.neg_inf,
+        )?))
     }
 }
 
@@ -640,9 +601,102 @@ fn create_forward_output(
     })
 }
 
-fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: &Tensor) -> Result<Tensor> {
-    let shape = mask.shape();
-    mask.where_cond(&on_true.broadcast_as(shape.dims())?, on_false)
+#[allow(clippy::too_many_arguments)]
+fn forward_contiguous_attention(
+    request_q: &Tensor,
+    request_full_cached_k: Tensor,
+    request_full_cached_v: Tensor,
+    num_q_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    cached_kv_len: usize,
+    q_len: usize,
+    neg_inf: &Tensor,
+) -> Result<Tensor> {
+    // Expand grouped-query or multi-query heads to match request_q.
+    // request_repeated_k, request_repeated_v: [1, num_q_heads, kv_len, head_dim].
+    let repetition_count = num_q_heads / num_kv_heads;
+    let request_repeated_k = repeat_kv(request_full_cached_k, repetition_count)?;
+    let request_repeated_v = repeat_kv(request_full_cached_v, repetition_count)?;
+    // request_attn_scores: [1, num_q_heads, q_len, kv_len].
+    let request_attn_scores =
+        (request_q.matmul(&request_repeated_k.t()?)? / (head_dim as f64).sqrt())?;
+    let request_attn_scores =
+        apply_causal_attention_mask(request_attn_scores, q_len, cached_kv_len, neg_inf)?;
+    let request_attn_weights = candle_nn::ops::softmax_last_dim(&request_attn_scores)?;
+    request_attn_weights.matmul(&request_repeated_v.contiguous()?)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forward_paged_attention(
+    request_q: &Tensor,
+    key_pool: &Tensor,
+    value_pool: &Tensor,
+    page_ids: &[usize],
+    per_page_token_count: usize,
+    cached_token_count: usize,
+    num_q_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    cached_kv_len: usize,
+    q_len: usize,
+    neg_inf: &Tensor,
+) -> Result<Tensor> {
+    let repetition_count = num_q_heads / num_kv_heads;
+    let mut remaining_token_count = cached_token_count;
+    let mut request_attn_score_slices = Vec::new();
+    let mut request_repeated_v_slices = Vec::new();
+    for page_id in page_ids {
+        let slice_token_count = per_page_token_count.min(remaining_token_count);
+        // request_k_slice, request_v_slice: [1, num_kv_heads, kv_slice_len, head_dim].
+        let request_k_slice = get_page_slice_from_pool(key_pool, *page_id, slice_token_count)?;
+        let request_v_slice = get_page_slice_from_pool(value_pool, *page_id, slice_token_count)?;
+        remaining_token_count -= slice_token_count;
+
+        // Expand grouped-query or multi-query heads to match request_q.
+        // request_repeated_k_slice, request_repeated_v_slice:
+        // [1, num_q_heads, kv_slice_len, head_dim].
+        let request_repeated_k_slice = repeat_kv(request_k_slice, repetition_count)?;
+        let request_repeated_v_slice = repeat_kv(request_v_slice, repetition_count)?;
+        // request_attn_score_slice: [1, num_q_heads, q_len, kv_slice_len].
+        let request_attn_score_slice = request_q.matmul(&request_repeated_k_slice.t()?)?;
+
+        request_attn_score_slices.push(request_attn_score_slice);
+        request_repeated_v_slices.push(request_repeated_v_slice);
+    }
+    if remaining_token_count != 0 {
+        candle_core::bail!("paged KV cache contains fewer pages than its sequence length")
+    }
+
+    // request_attn_scores: [1, num_q_heads, q_len, kv_len].
+    let request_attn_scores =
+        (Tensor::cat(&request_attn_score_slices, /* dim */ 3)? / (head_dim as f64).sqrt())?;
+    let request_attn_scores =
+        apply_causal_attention_mask(request_attn_scores, q_len, cached_kv_len, neg_inf)?;
+    let request_attn_weights = candle_nn::ops::softmax_last_dim(&request_attn_scores)?;
+
+    // request_repeated_v: [1, num_q_heads, kv_len, head_dim].
+    let request_repeated_v = Tensor::cat(&request_repeated_v_slices, /* dim */ 2)?.contiguous()?;
+    request_attn_weights.matmul(&request_repeated_v)
+}
+
+fn apply_causal_attention_mask(
+    request_attn_scores: Tensor,
+    q_len: usize,
+    cached_kv_len: usize,
+    neg_inf: &Tensor,
+) -> Result<Tensor> {
+    // request_mask: [q_len, cached_kv_len + q_len].
+    let request_mask = candle_transformers::utils::build_causal_mask(
+        q_len,
+        cached_kv_len,
+        request_attn_scores.device(),
+    )?
+    .broadcast_as(request_attn_scores.shape())?;
+    request_mask.where_cond(
+        &neg_inf.broadcast_as(request_mask.shape().dims())?,
+        &request_attn_scores,
+    )
 }
 
 /// returns a tensor of shape [/* batch */ 1, num_kv_heads, slice_token_count, head_dim].
@@ -656,4 +710,131 @@ fn get_page_slice_from_pool(
     pool.narrow(/* dim */ 0, /* start */ page_id, /* len */ 1)?
         .narrow(/* dim */ 3, /* start */ 0, slice_token_count)?
         .squeeze(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TOLERANCE: f32 = 1e-5;
+
+    fn tensor4(
+        values: &[f32],
+        dim_0: usize,
+        dim_1: usize,
+        dim_2: usize,
+        dim_3: usize,
+    ) -> Result<Tensor> {
+        Tensor::from_vec(values.to_vec(), (dim_0, dim_1, dim_2, dim_3), &Device::Cpu)
+    }
+
+    fn neg_inf() -> Result<Tensor> {
+        Tensor::new(f32::NEG_INFINITY, &Device::Cpu)
+    }
+
+    fn assert_close(actual: &Tensor, expected: &[f32]) -> Result<()> {
+        let actual = actual.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(actual.len(), expected.len());
+        for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (actual - expected).abs() <= TOLERANCE,
+                "value {index} differs: expected {expected}, got {actual}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn contiguous_attention_computes_multi_head_attention() -> Result<()> {
+        let q = tensor4(&[0., 0.], 1, 2, 1, 1)?;
+        let k = tensor4(&[1., 2., 3., 4.], 1, 2, 2, 1)?;
+        let v = tensor4(&[2., 4., 10., 14.], 1, 2, 2, 1)?;
+
+        let output = forward_contiguous_attention(&q, k, v, 2, 2, 1, 1, 1, &neg_inf()?)?;
+
+        assert_close(&output, &[3., 12.])
+    }
+
+    #[test]
+    fn contiguous_attention_repeats_kv_heads_for_grouped_query_attention() -> Result<()> {
+        let q = tensor4(&[0., 0., 0., 0.], 1, 4, 1, 1)?;
+        let k = tensor4(&[1., 2.], 1, 1, 2, 1)?;
+        let v = tensor4(&[2., 6.], 1, 1, 2, 1)?;
+
+        let output = forward_contiguous_attention(&q, k, v, 4, 1, 1, 1, 1, &neg_inf()?)?;
+
+        assert_close(&output, &[4., 4., 4., 4.])
+    }
+
+    #[test]
+    fn contiguous_attention_applies_a_causal_prefill_mask() -> Result<()> {
+        let q = tensor4(&[0., 0., 0.], 1, 1, 3, 1)?;
+        let k = tensor4(&[1., 2., 3.], 1, 1, 3, 1)?;
+        let v = tensor4(&[1., 3., 5.], 1, 1, 3, 1)?;
+
+        let output = forward_contiguous_attention(&q, k, v, 1, 1, 1, 0, 3, &neg_inf()?)?;
+
+        assert_close(&output, &[1., 2., 3.])
+    }
+
+    #[test]
+    fn contiguous_attention_decode_attends_to_the_cached_prefix() -> Result<()> {
+        let q = tensor4(&[0.], 1, 1, 1, 1)?;
+        let k = tensor4(&[1., 2., 3., 4.], 1, 1, 4, 1)?;
+        let v = tensor4(&[1., 3., 5., 7.], 1, 1, 4, 1)?;
+
+        let output = forward_contiguous_attention(&q, k, v, 1, 1, 1, 3, 1, &neg_inf()?)?;
+
+        assert_close(&output, &[4.])
+    }
+
+    #[test]
+    fn paged_attention_matches_contiguous_attention_across_partial_pages() -> Result<()> {
+        let q = tensor4(&[0.2, -0.1, 0.4, 0.3, -0.2, 0.5, 0.1, -0.4], 1, 2, 2, 2)?;
+        let k_values = [0.1, 0.2, 0.3, -0.1, -0.2, 0.4, 0.5, 0.6, -0.3, 0.2];
+        let v_values = [1., 2., 3., 4., 5., 6., 7., 8., 9., 10.];
+        let contiguous_k = tensor4(&k_values, 1, 1, 5, 2)?;
+        let contiguous_v = tensor4(&v_values, 1, 1, 5, 2)?;
+
+        // Logical page order is physical page 2 followed by physical page 0. The final page has
+        // two valid tokens; its third slot and all of physical page 1 must not affect attention.
+        let key_pool = Tensor::from_vec(
+            vec![
+                0.5_f32, 0.6, -0.3, 0.2, 99., 99., // physical page 0
+                88., 88., 88., 88., 88., 88., // physical page 1
+                0.1, 0.2, 0.3, -0.1, -0.2, 0.4, // physical page 2
+            ],
+            (3, 1, 1, 3, 2),
+            &Device::Cpu,
+        )?;
+        let value_pool = Tensor::from_vec(
+            vec![
+                7_f32, 8., 9., 10., 99., 99., // physical page 0
+                88., 88., 88., 88., 88., 88., // physical page 1
+                1., 2., 3., 4., 5., 6., // physical page 2
+            ],
+            (3, 1, 1, 3, 2),
+            &Device::Cpu,
+        )?;
+        let neg_inf = neg_inf()?;
+
+        let contiguous =
+            forward_contiguous_attention(&q, contiguous_k, contiguous_v, 2, 1, 2, 3, 2, &neg_inf)?;
+        let paged = forward_paged_attention(
+            &q,
+            &key_pool,
+            &value_pool,
+            &[2, 0],
+            3,
+            5,
+            2,
+            1,
+            2,
+            3,
+            2,
+            &neg_inf,
+        )?;
+
+        assert_close(&paged, &contiguous.flatten_all()?.to_vec1::<f32>()?)
+    }
 }
