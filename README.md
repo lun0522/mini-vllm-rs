@@ -139,6 +139,31 @@ performance-core logical CPUs, so the efficiency cores are not used by
 default. Adjust both values for the machine's CPU; using more threads does not
 necessarily improve throughput for every model or workload.
 
+The following compile-time environment variables control experimental CPU
+attention implementations:
+
+- `MINI_VLLM_ENABLE_CPU_PAGED_ATTENTION` computes query-key scores directly
+  from KV-cache pages instead of first rebuilding a complete contiguous K
+  tensor. It defaults to `false` because contiguous attention performs better
+  in the current benchmark.
+- `MINI_VLLM_ENABLE_CPU_GROUPED_QUERY_MATMUL` groups query heads that share a
+  KV head, avoiding the reference implementation's explicit K and V head
+  replication. It defaults to `true`.
+- `MINI_VLLM_ENABLE_CPU_PAGEWISE_VALUE_MATMUL` multiplies normalized attention
+  weights by each V page separately and sums the results instead of
+  concatenating the V pages. It only affects CPU paged attention and defaults
+  to `false` because concatenated V performs better in the current benchmark.
+
+Set these variables when invoking Cargo because their values are compiled into
+the binary. For example, disable paged attention and grouped-query matmul to
+run the reference CPU implementations:
+
+```shell
+MINI_VLLM_ENABLE_CPU_PAGED_ATTENTION=false \
+MINI_VLLM_ENABLE_CPU_GROUPED_QUERY_MATMUL=false \
+cargo run --release -- --inference-device cpu --kv-cache-type paged:16
+```
+
 Run the "Qwen2.5 7B Instruct Q4_K_M" target model with the "Qwen2.5 0.5B
 Instruct Q4_K_M" draft model for speculative decoding (both use the same
 tokenizer so their token IDs remain compatible):

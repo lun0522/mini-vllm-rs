@@ -14,8 +14,9 @@ use candle_nn::Module;
 use candle_transformers::quantized_nn::RmsNorm;
 use candle_transformers::utils::repeat_kv;
 
-const DEFAULT_ENABLE_CPU_GROUPED_QUERY_MATMUL: bool = false;
+const DEFAULT_ENABLE_CPU_GROUPED_QUERY_MATMUL: bool = true;
 const DEFAULT_ENABLE_CPU_PAGED_ATTENTION: bool = false;
+const DEFAULT_ENABLE_CPU_PAGEWISE_VALUE_MATMUL: bool = false;
 const DEFAULT_METAL_GEMV_MAX_ROWS: usize = 4;
 
 const ENABLE_CPU_GROUPED_QUERY_MATMUL: bool =
@@ -28,6 +29,12 @@ const ENABLE_CPU_PAGED_ATTENTION: bool = match option_env!("MINI_VLLM_ENABLE_CPU
     Some(value) => const_str::parse!(value, bool),
     None => DEFAULT_ENABLE_CPU_PAGED_ATTENTION,
 };
+
+const ENABLE_CPU_PAGEWISE_VALUE_MATMUL: bool =
+    match option_env!("MINI_VLLM_ENABLE_CPU_PAGEWISE_VALUE_MATMUL") {
+        Some(value) => const_str::parse!(value, bool),
+        None => DEFAULT_ENABLE_CPU_PAGEWISE_VALUE_MATMUL,
+    };
 
 const METAL_GEMV_MAX_ROWS: usize = match option_env!("MINI_VLLM_METAL_GEMV_MAX_ROWS") {
     Some(value) => const_str::parse!(value, u32) as usize,
@@ -372,6 +379,7 @@ impl TransformerBlock {
             paged_cache_layout,
             dimensions,
             ENABLE_CPU_GROUPED_QUERY_MATMUL,
+            ENABLE_CPU_PAGEWISE_VALUE_MATMUL,
             &self.neg_inf,
         )?))
     }
@@ -616,7 +624,7 @@ fn forward_contiguous_attention(
     request_full_k: Tensor,
     request_full_v: Tensor,
     dimensions: AttentionDimensions,
-    group_query_heads: bool,
+    enable_group_query_heads: bool,
     neg_inf: &Tensor,
 ) -> Result<Tensor> {
     let request_kv_len = request_full_k.dim(2)?;
@@ -626,7 +634,7 @@ fn forward_contiguous_attention(
         request_full_k,
         dimensions,
         request_kv_len,
-        group_query_heads,
+        enable_group_query_heads,
     )? / (dimensions.head_dim as f64).sqrt())?;
     let request_attn_scores = apply_causal_attention_mask(
         request_attn_scores,
@@ -640,7 +648,7 @@ fn forward_contiguous_attention(
         request_full_v,
         dimensions,
         request_kv_len,
-        group_query_heads,
+        enable_group_query_heads,
     )
 }
 
@@ -648,7 +656,8 @@ fn forward_paged_attention(
     request_q: &Tensor,
     paged_cache_layout: PagedCacheLayout,
     dimensions: AttentionDimensions,
-    group_query_heads: bool,
+    enable_group_query_heads: bool,
+    enable_pagewise_value_matmul: bool,
     neg_inf: &Tensor,
 ) -> Result<Tensor> {
     let PagedCacheLayout {
@@ -675,7 +684,7 @@ fn forward_paged_attention(
             request_k_slice,
             dimensions,
             slice_token_count,
-            group_query_heads,
+            enable_group_query_heads,
         )?;
         request_attn_score_slices.push(request_attn_score_slice);
         request_v_slices.push(request_v_slice);
@@ -698,22 +707,31 @@ fn forward_paged_attention(
     )?;
     let request_attn_weights = candle_nn::ops::softmax_last_dim(&request_attn_scores)?;
 
-    // request_full_v: [1, num_kv_heads, kv_len, head_dim].
-    let request_full_v = Tensor::cat(&request_v_slices, /* dim */ 2)?.contiguous()?;
-    matmul_attention_value(
-        request_attn_weights,
-        request_full_v,
-        dimensions,
-        cached_token_count,
-        group_query_heads,
-    )
+    if enable_pagewise_value_matmul {
+        matmul_paged_attention_value(
+            request_attn_weights,
+            request_v_slices,
+            dimensions,
+            enable_group_query_heads,
+        )
+    } else {
+        // request_full_v: [1, num_kv_heads, kv_len, head_dim].
+        let request_full_v = Tensor::cat(&request_v_slices, /* dim */ 2)?.contiguous()?;
+        matmul_attention_value(
+            request_attn_weights,
+            request_full_v,
+            dimensions,
+            cached_token_count,
+            enable_group_query_heads,
+        )
+    }
 }
 
-/// Multiplies Q `[1, q_heads, q_len, head_dim]` by transposed K
-/// `[1, kv_heads, head_dim, kv_len]`, returning `[1, q_heads, q_len, kv_len]` scores.
+/// Multiplies Q of shape [1, q_heads, q_len, head_dim] by transposed K of shape
+/// [1, kv_heads, head_dim, kv_len], returning [1, q_heads, q_len, kv_len] shaped scores.
 ///
 /// - The reference path repeats each K head to match `q_heads`.
-/// - The grouped path reshapes Q to `[kv_heads, repetitions * q_len, head_dim]`, treating query
+/// - The grouped path reshapes Q to [kv_heads, repetitions * q_len, head_dim], treating query
 ///   heads that share a KV head as additional matrix rows. One batched matmul can then use each K
 ///   head without copying it before reshaping the result back to the query-head layout. This relies
 ///   on each KV head's query heads being consecutive in contiguous storage, which the projection
@@ -723,30 +741,34 @@ fn matmul_query_key(
     request_k: Tensor,
     dimensions: AttentionDimensions,
     kv_len: usize,
-    group_query_heads: bool,
+    enable_group_query_heads: bool,
 ) -> Result<Tensor> {
     let repetition_count = dimensions.repetition_count();
-    if !group_query_heads || repetition_count == 1 {
+    if !enable_group_query_heads || repetition_count == 1 {
+        // request_repeated_k: [1, num_q_heads, kv_len, head_dim].
         let request_repeated_k = repeat_kv(request_k, repetition_count)?;
         return request_q.matmul(&request_repeated_k.t()?);
     }
 
+    // grouped_q: [num_kv_heads, repetition_count * q_len, head_dim].
     let grouped_q = request_q.squeeze(0)?.reshape((
         dimensions.num_kv_heads,
         repetition_count * dimensions.q_len,
         dimensions.head_dim,
     ))?;
+    // grouped_k: [num_kv_heads, head_dim, kv_len].
     let grouped_k = request_k.squeeze(0)?.transpose(1, 2)?;
-    grouped_q
-        .matmul(&grouped_k)?
-        .reshape((1, dimensions.num_q_heads, dimensions.q_len, kv_len))
+    // grouped_attn_scores: [num_kv_heads, repetition_count * q_len, kv_len].
+    let grouped_attn_scores = grouped_q.matmul(&grouped_k)?;
+    // request_attn_scores: [1, num_q_heads, q_len, kv_len].
+    grouped_attn_scores.reshape((1, dimensions.num_q_heads, dimensions.q_len, kv_len))
 }
 
-/// Multiplies attention weights `[1, q_heads, q_len, kv_len]` by V
-/// `[1, kv_heads, kv_len, head_dim]`, returning `[1, q_heads, q_len, head_dim]`.
+/// Multiplies attention weights of shape [1, q_heads, q_len, kv_len] by V of shape
+/// [1, kv_heads, kv_len, head_dim], returning [1, q_heads, q_len, head_dim].
 ///
 /// - The reference path repeats each V head to match `q_heads`.
-/// - The grouped path reshapes the weights to `[kv_heads, repetitions * q_len, kv_len]`, so all
+/// - The grouped path reshapes the weights to [kv_heads, repetitions * q_len, kv_len], so all
 ///   query heads sharing a KV head consume that V head as separate matrix rows before the output is
 ///   reshaped back to the query-head layout. This relies on each KV head's query heads being
 ///   consecutive in contiguous storage, which the attention tensor layout in this project
@@ -756,26 +778,72 @@ fn matmul_attention_value(
     request_v: Tensor,
     dimensions: AttentionDimensions,
     kv_len: usize,
-    group_query_heads: bool,
+    enable_group_query_heads: bool,
 ) -> Result<Tensor> {
     let repetition_count = dimensions.repetition_count();
-    if !group_query_heads || repetition_count == 1 {
+    if !enable_group_query_heads || repetition_count == 1 {
+        // request_repeated_v: [1, num_q_heads, kv_len, head_dim].
         let request_repeated_v = repeat_kv(request_v, repetition_count)?;
         return request_attn_weights.matmul(&request_repeated_v.contiguous()?);
     }
 
+    // grouped_weights: [num_kv_heads, repetition_count * q_len, kv_len].
     let grouped_weights = request_attn_weights.reshape((
         dimensions.num_kv_heads,
         repetition_count * dimensions.q_len,
         kv_len,
     ))?;
+    // grouped_v: [num_kv_heads, kv_len, head_dim].
     let grouped_v = request_v.squeeze(0)?;
-    grouped_weights.matmul(&grouped_v)?.reshape((
+    // grouped_y: [num_kv_heads, repetition_count * q_len, head_dim].
+    let grouped_y = grouped_weights.matmul(&grouped_v)?;
+    // request_y: [1, num_q_heads, q_len, head_dim].
+    grouped_y.reshape((
         1,
         dimensions.num_q_heads,
         dimensions.q_len,
         dimensions.head_dim,
     ))
+}
+
+/// Multiplies normalized attention weights of shape [1, q_heads, q_len, kv_len] by V pages of shape
+/// [1, kv_heads, page_token_count, head_dim], returning [1, q_heads, q_len, head_dim].
+///
+/// Each page consumes the matching slice of the full attention weights. The page outputs all have
+/// the final attention-output shape, so summing them is equivalent to multiplying by concatenated
+/// V while avoiding materializing that full tensor.
+fn matmul_paged_attention_value(
+    request_attn_weights: Tensor,
+    request_v_slices: Vec<Tensor>,
+    dimensions: AttentionDimensions,
+    enable_group_query_heads: bool,
+) -> Result<Tensor> {
+    // request_y: [1, num_q_heads, q_len, head_dim].
+    let mut request_y: Option<Tensor> = None;
+    let mut weight_start = 0;
+    for request_v_slice in request_v_slices {
+        // request_v_slice: [1, num_kv_heads, slice_token_count, head_dim].
+        let slice_token_count = request_v_slice.dim(2)?;
+        // request_attn_weight_slice: [1, num_q_heads, q_len, slice_token_count].
+        let request_attn_weight_slice =
+            request_attn_weights.narrow(/* dim */ 3, weight_start, slice_token_count)?;
+        // request_page_y: [1, num_q_heads, q_len, head_dim].
+        let request_page_y = matmul_attention_value(
+            request_attn_weight_slice,
+            request_v_slice.contiguous()?,
+            dimensions,
+            slice_token_count,
+            enable_group_query_heads,
+        )?;
+        request_y = Some(match request_y {
+            Some(request_y) => (request_y + request_page_y)?,
+            None => request_page_y,
+        });
+        weight_start += slice_token_count;
+    }
+    request_y.ok_or_else(|| {
+        candle_core::Error::Msg("paged KV cache contains no value pages".to_string())
+    })
 }
 
 fn apply_causal_attention_mask(
@@ -985,23 +1053,20 @@ mod tests {
             false,
             &neg_inf,
         )?;
-        let paged_repeated = forward_paged_attention(
-            &q,
-            paged_cache_layout(),
-            attention_dimensions(2, 1, 2, 3, 2),
-            false,
-            &neg_inf,
-        )?;
-        let paged_grouped = forward_paged_attention(
-            &q,
-            paged_cache_layout(),
-            attention_dimensions(2, 1, 2, 3, 2),
-            true,
-            &neg_inf,
-        )?;
-
         let contiguous = contiguous.flatten_all()?.to_vec1::<f32>()?;
-        assert_close(&paged_repeated, &contiguous)?;
-        assert_close(&paged_grouped, &contiguous)
+        for enable_group_query_heads in [false, true] {
+            for enable_pagewise_value_matmul in [false, true] {
+                let paged = forward_paged_attention(
+                    &q,
+                    paged_cache_layout(),
+                    attention_dimensions(2, 1, 2, 3, 2),
+                    enable_group_query_heads,
+                    enable_pagewise_value_matmul,
+                    &neg_inf,
+                )?;
+                assert_close(&paged, &contiguous)?;
+            }
+        }
+        Ok(())
     }
 }
