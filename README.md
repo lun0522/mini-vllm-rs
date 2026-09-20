@@ -109,6 +109,14 @@ tokens from capacity for speculative slots in its
   candle-flash-attn for paged attention support.
 - Support multimodal models small enough for local execution.
 
+## Benchmarks
+
+- [Metal GEMV threshold](benchmarks/metal_gemv_threshold.md): Measures the
+  initial continuous-batching implementation and the effect of the Metal GEMV
+  threshold.
+- [CPU paged attention](benchmarks/cpu_paged_attention.md): Compares contiguous
+  and paged CPU attention using repeated KV, grouped Q, and page-wise V matmul.
+
 ## Run
 
 Run the server on GPU using Metal:

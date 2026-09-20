@@ -1,9 +1,11 @@
+# Metal GEMV Threshold
+
 Following the implementation of continuous batching support, we collected
 initial benchmark results. The test workload consists of **2 concurrent
 requests** (with prompt lengths of **128** and **121** tokens, respectively),
 generating **512 output tokens** per request.
 
-**Notes on Scope:**
+**Scope:**
 
 1. These runs are designed to verify correctness and detect early performance
    regressions after introducing the batched code path, rather than serve as a
