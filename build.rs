@@ -1,4 +1,5 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rerun-if-env-changed=MINI_VLLM_ENABLE_CPU_GROUPED_QUERY_MATMUL");
     println!("cargo:rerun-if-env-changed=MINI_VLLM_ENABLE_CPU_PAGED_ATTENTION");
     println!("cargo:rerun-if-env-changed=MINI_VLLM_METAL_GEMV_MAX_ROWS");
     println!("cargo:rerun-if-changed=proto/model_runner.proto");
