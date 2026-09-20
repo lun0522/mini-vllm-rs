@@ -11,6 +11,27 @@ CPU inference is not the main target of this project. We therefore focus on
 simple optimizations rather than trying to build an optimal CPU paged-attention
 kernel.
 
+**Reproducibility:**
+
+- Hardware: Apple M2 with an 8-core CPU, 10-core GPU, and 16 GB of unified
+  memory.
+- Operating system: macOS 26.6.2.
+- Model: Qwen2.5 0.5B Instruct Q4_K_M, using a paged KV cache with 16 tokens per
+  page.
+- Revisions:
+  [`mini-vllm-rs` `2bc67ec`](https://github.com/lun0522/mini-vllm-rs/commit/2bc67ec7d7043fb2256e7e9eb61b263f864eb05b)
+  and
+  [`mini-vllm-eval` `9b72cb3`](https://github.com/lun0522/mini-vllm-eval/commit/9b72cb3df02f05955a4c288a752cd9d8639c93be).
+- Command, run from the `mini-vllm-eval` repository:
+
+  ```shell
+  python3 main.py --benchmark cpu_paged_attention
+  ```
+
+- Each configuration was measured once. `CANDLE_NUM_THREADS` and
+  `RAYON_NUM_THREADS` were unset; the benchmark harness set only the
+  configuration-specific CPU attention variables.
+
 ### Implementations
 
 Candle does not support paged attention on CPU. Our baseline uses paged KV-cache

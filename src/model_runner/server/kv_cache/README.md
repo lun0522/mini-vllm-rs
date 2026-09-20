@@ -5,44 +5,56 @@ model. The manager owns the common `KvCacheBackend`, maps request IDs to their
 cache states, and directly provides request-aware cache access during model
 forward calls.
 
-`KvCacheBackend` selects either contiguous or paged storage. Both keep mutable
-sequence progress in request-specific state. The contiguous backend has one
-preallocated key/value storage region, so it permits only one active request;
-the paged backend can map multiple request states to different physical pages
-and is the backend intended for continuous batching.
+## Cache backends
 
-`RequestContiguousCacheState` tracks one request's cached token count for every
-model layer. `ContiguousKvCache` owns only the shared tensor storage and its
-capacity.
+`KvCacheBackend` selects contiguous or paged storage. Both keep mutable sequence
+progress in request-specific state.
 
-Paged caching separates shared cache state from the state of the request being
-processed:
+### Contiguous cache
 
-- `PhysicalPagePool` owns the key/value tensor storage, page ownership states,
-  and free physical page IDs.
-- `PrefixBlockIndex`, when enabled, maps reusable token blocks to per-layer
-  physical-page bundles. It owns no tensors and changes no page states.
-- `RequestPagedCacheState` owns one request's `ActiveBlockTables` and prefix
-  cursor. Each `LayerBlockTable` maps that request's logical token order to
-  physical page IDs; it never accesses tensors or manages page states.
+The contiguous backend has one preallocated key/value storage region and
+permits only one active request. `RequestContiguousCacheState` tracks that
+request's cached token count for every model layer, while `ContiguousKvCache`
+owns the shared tensor storage and its capacity.
 
-`PagedKvCache` owns the shared physical pool and prefix index. Its operations
-receive a `RequestPagedCacheState` and coordinate that request's virtual
-mappings with the shared state.
+### Paged cache
+
+The paged backend maps multiple request states to different physical pages and
+is intended for continuous batching.
+
+The `paged` CLI mode enables page-backed storage, while `paged-prefix` also
+retains completed blocks for reuse by later requests. Page-backed storage works
+on CPU and GPU backends. Attention can consume the page layout directly only on
+CPU for now, when `MINI_VLLM_ENABLE_CPU_PAGED_ATTENTION` is enabled; other paths
+materialize contiguous key/value tensors from the pages before attention.
+
+Paged caching separates shared state from each active request:
+
+| Component | Responsibility |
+| --- | --- |
+| `PhysicalPagePool` | Owns key/value tensor storage, page ownership states, and free physical page IDs. |
+| `PrefixBlockIndex` | When enabled, maps reusable token blocks to per-layer page bundles without owning tensors or changing page states. |
+| `RequestPagedCacheState` | Owns one request's active block tables and prefix cursor. |
+| `LayerBlockTable` | Maps one request layer's logical token order to physical page IDs without accessing tensors or managing page states. |
+
+`PagedKvCache` owns the shared physical pool and prefix index. Concurrent
+requests have independent `RequestPagedCacheState` values, and cache operations
+coordinate each request's virtual mappings with the shared state.
+
+## Source layout
 
 The production files follow the same boundary:
 
-- `physical_page_pool.rs` implements tensor storage, allocation, ownership
-  counting, and physical page reads and writes.
-- `contiguous_cache.rs` separates the single contiguous tensor region from its
-  current request's per-layer progress.
-- `manager.rs` maps request IDs to cache states and implements the model-facing
-  cache interface over the shared backend.
-- `active_block_tables.rs` implements the current sequence's virtual block
-  tables without accessing tensors.
-- `prefix_index.rs` implements reusable-prefix lookup and LRU leaf selection.
-- `paged_cache.rs` orchestrates the other components and presents the paged
-  cache backend to model execution.
+| File | Responsibility |
+| --- | --- |
+| `manager.rs` | Maps request IDs to cache states and implements the model-facing cache interface. |
+| `contiguous_cache.rs` | Separates contiguous tensor storage from per-request, per-layer progress. |
+| `paged_cache.rs` | Coordinates shared paged storage, prefix metadata, and request mappings. |
+| `physical_page_pool.rs` | Implements tensor storage, allocation, ownership counting, and page reads and writes. |
+| `active_block_tables.rs` | Implements per-request virtual block tables without accessing tensors. |
+| `prefix_index.rs` | Implements reusable-prefix lookup and LRU leaf selection. |
+
+## Physical-page lifecycle
 
 ```mermaid
 stateDiagram-v2
@@ -67,7 +79,7 @@ and could differ with a more complex mapping. Keeping them equal means every
 indexed block has exactly one independently retainable and evictable page per
 model layer; it also avoids partial-page sharing.
 
-## Request lifecycle
+## Prefix-enabled paged-cache lifecycle
 
 ```mermaid
 flowchart TD
@@ -76,6 +88,8 @@ flowchart TD
     Find --> RetainMatch["PhysicalPagePool retains matched pages"]
     RetainMatch --> Attach["ActiveBlockTables installs virtual mappings"]
     Attach --> Work[Prefill unmatched tokens and generate]
+    Work -->|Reject draft tokens| Truncate[Truncate request cache]
+    Truncate --> Work
     Work -->|Request succeeds| Index["PrefixBlockIndex::index_cached_sequence"]
     Index --> RetainNew["PhysicalPagePool retains newly indexed complete pages"]
     RetainNew --> Reset["Reset virtual mappings and release active references"]
@@ -94,8 +108,12 @@ flowchart TD
 - Only complete blocks whose KV values exist in every model layer are indexed.
 - Target and draft caches restore prefixes independently. The final prompt token
   remains pending so it can produce the first generation logits.
-- Eviction removes only inactive prefixes; the active request's prefix remains
-  protected.
+- Each concurrently scheduled request has its own block tables and cached-token
+  counts. Truncation after rejected draft tokens releases pages that are no
+  longer part of that request.
+- Eviction excludes the allocating request's active prefix cursor. Page
+  reference counts prevent storage used by any other active request from being
+  overwritten, even if its prefix-index leaf is evicted.
 
 ## Prefix-block index example
 
@@ -117,89 +135,21 @@ two-layer model stored the complete blocks in these physical pages:
 | `[3, 4]` | Page 11 | Page 21 |
 | `[5, 6]` | Page 12 | Page 22 |
 
-### First block
-
-The first `PrefixBlockKey` has no parent because it starts the sequence:
-
-```text
-PrefixBlockKey { parent_id: None, token_ids: [1, 2] }
+```mermaid
+flowchart LR
+    Root --> B0["Block 0<br/>tokens [1, 2]<br/>pages [10, 20]"]
+    B0 --> B1["Block 1<br/>tokens [3, 4]<br/>pages [11, 21]"]
+    B1 --> B2["Block 2<br/>tokens [5, 6]<br/>pages [12, 22]"]
 ```
 
-`PrefixBlockIndex` assigns it `PrefixBlockId(0)`. Its `IndexedPrefixBlock`
-stores the physical page for that logical block in every model layer:
+Each key combines its token block with its parent block ID. This prevents an
+identical block in another context, such as `[8, 9] -> [3, 4]`, from reusing
+Block 1. Prompt and generated blocks follow the same rule. Each block records
+its latest access time; Block 2 is initially the only leaf eligible for LRU
+eviction.
 
-```text
-PrefixBlockId(0) -> IndexedPrefixBlock {
-  page_ids_by_layer: [Page 10, Page 20]
-}
-```
-
-### Second block
-
-The next key includes the first block's ID because KV values for `[3, 4]`
-depend on the tokens before it:
-
-```text
-PrefixBlockKey {
-  parent_id: Some(PrefixBlockId(0)),
-  token_ids: [3, 4]
-}
-
-PrefixBlockId(1) -> IndexedPrefixBlock {
-  page_ids_by_layer: [Page 11, Page 21]
-}
-```
-
-### Generated block
-
-The generated block follows the same rule. The index does not distinguish
-prompt tokens from generated tokens:
-
-```text
-PrefixBlockKey {
-  parent_id: Some(PrefixBlockId(1)),
-  token_ids: [5, 6]
-}
-
-PrefixBlockId(2) -> IndexedPrefixBlock {
-  page_ids_by_layer: [Page 12, Page 22]
-}
-```
-
-The resulting `blocks_map` contains:
-
-```text
-blocks_map:
-  (None,    [1, 2]) -> Block 0, [Page 10, Page 20]
-  (Block 0, [3, 4]) -> Block 1, [Page 11, Page 21]
-  (Block 1, [5, 6]) -> Block 2, [Page 12, Page 22]
-```
-
-`PrefixBlockIndex` also keeps a set containing Block 2's key because it is the
-only leaf eligible for eviction. Each block records its latest lookup or
-indexing timestamp so the least recently used leaf can be selected.
-
-Including the parent prevents an identical token block in another context,
-such as `[8, 9] -> [3, 4]`, from incorrectly reusing Block 1.
-
-### Prefix lookup
-
-Looking up `[1, 2, 3, 4, 8, 9]` matches Blocks 0 and 1, then stops at the
-divergent third block. `PrefixBlockMatch` reorganizes their page IDs by layer,
-which is the layout expected by `ActiveBlockTables`:
-
-```text
-PrefixBlockMatch {
-  page_ids_by_layer: [
-    [Page 10, Page 11],
-    [Page 20, Page 21],
-  ],
-  cursor: Block 1 after 4 matched tokens,
-}
-```
-
-The cursor records the final matched block and the four-token prefill start
-position. `PagedKvCache::restore_cached_prefix` retains these physical pages,
-installs them into the active block tables, saves the cursor for completion
-indexing, and returns the token count so request processing prefills only the
-unmatched suffix. A match at the root has no pages and a zero-token cursor.
+Looking up `[1, 2, 3, 4, 8, 9]` matches Blocks 0 and 1. The resulting
+`PrefixBlockMatch` contains pages `[[10, 11], [20, 21]]`, grouped by layer, and
+a cursor at Block 1 after four tokens. Restoration retains those pages, installs
+them in the active block tables, and returns `4` so prefill begins at the
+unmatched suffix. A root match contains no pages and returns `0`.

@@ -26,24 +26,20 @@ flowchart LR
     Events -->|"Text and final statistics"| Server
 ```
 
-- `client.rs` starts the request-handler process, waits for its public socket,
-  and manages shutdown and socket cleanup. Inference clients connect to that
-  socket directly.
-- `server/mod.rs` connects to the model runner before binding its public socket,
-  so the socket indicates that the request handler is ready to serve requests.
-  It assigns each request the ID used in preprocessing and model-runner logs.
-- `server/input_preprocessing_pool.rs` runs input validation, chat formatting, and
-  tokenization concurrently on a fixed-size worker pool.
-- `server/tokenizer.rs` loads the target tokenizer, validates the optional draft
-  tokenizer and both models' vocabulary sizes, formats chat prompts, tokenizes
-  model input, validates generation parameters and stop-token support, and
-  incrementally decodes generated token IDs.
-- `server/generation_event_processor.rs` converts model-runner token events into
-  public text events. It emits fragments immediately for streaming requests or
-  buffers them into one response when streaming is disabled.
-- The request handler owns text-oriented preprocessing and postprocessing; the
-  model runner receives token IDs and returns token IDs plus final generation
-  statistics.
+## Component responsibilities
+
+| Component | Responsibility |
+| --- | --- |
+| `client.rs` | Starts and stops the process, waits for readiness, and owns socket cleanup. |
+| `server/mod.rs` | Connects to the model runner, fetches metadata, validates startup compatibility, serves public RPCs, and assigns request IDs. |
+| `server/input_preprocessing_pool.rs` | Runs request validation, chat formatting, and tokenization on a fixed-size OS-thread pool outside the async runtime. |
+| `server/tokenizer.rs` | Loads and validates tokenizers, formats prompts, creates model-runner requests, and incrementally decodes generated token IDs. |
+| `server/generation_event_processor.rs` | Converts token events to streamed text fragments or one buffered response, followed by final statistics. |
+
+The public socket is bound only after upstream compatibility checks succeed,
+making it the readiness signal. Preprocessing runs on a fixed-size OS-thread
+pool, while per-request forwarding uses bounded asynchronous queues to apply
+backpressure.
 
 The generation path is:
 
@@ -58,7 +54,7 @@ sequenceDiagram
     Caller->>Handler: GenerateText(prompt, parameters)
     Handler->>Handler: Assign request ID
     Handler->>Preprocessing: Submit input preprocessing with request ID
-    Preprocessing-->>Handler: Input and stop token IDs
+    Preprocessing-->>Handler: Model-runner request, decoder, and streaming mode
     Handler->>Runner: GenerateTextRequest(token IDs)
     loop Generated tokens
         Runner-->>Handler: Token ID
@@ -74,5 +70,9 @@ sequenceDiagram
 ```
 
 A successful response always ends with a statistics event. Transport errors,
-malformed model-runner events, and incremental decoding failures are forwarded
-to the inference client as gRPC errors.
+malformed model-runner events, incremental decoding failures, and a
+model-runner stream that closes before its final statistics are forwarded to
+the inference client as gRPC errors.
+
+During shutdown, the shutdown RPC stops the tonic server. Dropping the
+preprocessing pool then signals and joins all of its worker threads.

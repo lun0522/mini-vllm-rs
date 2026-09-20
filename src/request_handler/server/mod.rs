@@ -189,7 +189,10 @@ async fn forward_generation_events(
     loop {
         let event = match model_events.message().await {
             Ok(Some(event)) => event,
-            Ok(None) => return,
+            Ok(None) => {
+                let _ = event_sender.send(Err(premature_stream_end_status())).await;
+                return;
+            }
             Err(error) => {
                 let _ = event_sender.send(Err(error)).await;
                 return;
@@ -214,8 +217,13 @@ async fn forward_generation_events(
     }
 }
 
+fn premature_stream_end_status() -> Status {
+    Status::internal("model runner stream ended before final statistics")
+}
+
 #[cfg(test)]
 mod tests {
+    use super::premature_stream_end_status;
     use super::RequestId;
 
     #[test]
@@ -224,5 +232,16 @@ mod tests {
 
         assert_eq!(request_id.next(), Ok(1));
         assert_eq!(request_id.next(), Ok(2));
+    }
+
+    #[test]
+    fn premature_stream_end_is_an_internal_error() {
+        let status = premature_stream_end_status();
+
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(
+            status.message(),
+            "model runner stream ended before final statistics"
+        );
     }
 }

@@ -1,164 +1,130 @@
 # Model runner architecture
 
-The `model_runner` module separates the main-process lifecycle client from the
-code that runs inside the model-runner process.
+The `model_runner` module owns model execution. Its lifecycle client runs in the
+main process; the RPC server, inference backends, loaded models, schedulers, and
+KV caches run in the model-runner process.
+
+## Process and backend topology
 
 ```mermaid
 flowchart LR
-    subgraph Main[Main process]
-        Client["client.rs<br/>Starts and stops the worker"]
-    end
+    Main["Main process<br/>client.rs"] -->|Start and stop| Rpc["Model-runner process<br/>server/mod.rs"]
+    Handler[Request-handler process] -->|Token-level RPC| Rpc
 
-    subgraph Worker[Model runner process]
-        Server["server/mod.rs<br/>tonic service and backend routing"]
-        Cli["server/cli.rs<br/>Worker arguments and artifact paths"]
-        KvCache["server/kv_cache/<br/>Engine-owned KV-cache implementations"]
-        InferenceEngine["server/inference_engine.rs<br/>One engine per CPU/GPU backend"]
-        RequestManager["server/request_manager.rs<br/>Request execution state, timing, and responses"]
-        Scheduler["server/scheduler.rs<br/>Queued and active scheduling metadata"]
-        ModelRunner["server/model_runner.rs<br/>Request execution across model instances"]
-        ModelInstance["server/model_instance.rs<br/>One loaded model and its KV-cache manager"]
-        TextGeneration["server/text_generation.rs<br/>Resumable request generation state"]
-    end
-
-    Client -->|"Spawns with local paths and socket"| Cli
-    Cli --> Server
-    Server -->|"Round-robin request routing<br/>to bounded backend queues"| InferenceEngine
-    InferenceEngine --> RequestManager
-    InferenceEngine --> Scheduler
-    InferenceEngine --> ModelRunner
-    ModelRunner --> ModelInstance
-    ModelInstance --> KvCache
-    ModelRunner --> TextGeneration
+    Rpc -->|Bounded queue per backend| Backends["Inference backend(s)<br/>CPU and/or GPU<br/>Dedicated thread each"]
+    Backends --> Engine["InferenceEngine<br/>Scheduler + request manager"]
+    Engine --> Models["Target + optional draft model<br/>Independent KV caches"]
 ```
 
-- `client.rs` checks that the socket path is available, starts the worker, waits
-  for the worker to bind the socket, and sends the shutdown command.
-- `server/cli.rs` receives target and optional draft GGUF paths and the selected
-  `cpu`, `gpu`, or `mixed` inference mode from the main process.
-- [`server/kv_cache/`](server/kv_cache/README.md) preallocates separate key/value
-  pools for contiguous or paged storage. Paged mode uses configurable
-  fixed-token-count pages and per-layer block tables. Metal reconstructs
-  contiguous tensors before attention; CPU can optionally calculate attention
-  directly over the pages. Its physical page pool owns tensor storage and free
-  page IDs, while its active block tables only map the current sequence to
-  those physical pages. Page ownership states keep cached pages allocated and
-  track whether active requests are currently reading them.
-- Prefix-enabled paged caches create a prefix-block index. It indexes only
-  complete blocks and includes the preceding block in each identity so equal
-  token blocks from different prompt contexts cannot share incompatible pages.
-- `server/model_runner.rs` owns the target model instance and optional draft
-  model instance and exposes request start, one-step execution, completion, and
-  abortion operations.
-- `server/mod.rs` creates one inference backend for `cpu` or `gpu` mode. In
-  `mixed` mode it creates two backends—one CPU and one GPU—and routes complete
-  requests between their bounded queues in round-robin order.
-- Each backend has its own dedicated inference thread, `InferenceEngine`,
-  scheduler, loaded target and optional draft model, and KV caches. The CPU and
-  GPU backends therefore execute independently rather than splitting a single
-  request across devices.
-- `server/inference_engine.rs` coordinates request storage, scheduling, model
-  execution, response events, and elapsed-time tracking.
-- `server/request_manager.rs` owns each request's payload, resumable execution
-  state, response channel, and lifecycle timing while the scheduler retains
-  only the metadata needed to make decisions.
-- `server/scheduler.rs` applies the selected scheduling policy and enforces the
-  configured active-request and token limits without owning generation state.
-- `server/model_instance.rs` keeps each loaded model paired with its cache
-  manager and passes request-aware forward contexts into model execution. The
-  target cache uses the configured byte budget; the draft cache is sized to
-  hold the same number of tokens.
-- `server/text_generation.rs` keeps each request's generation progress and
-  sampling state resumable between prefill and decode iterations. It supports
-  ordinary greedy decode or speculative decode using draft proposals, batched
-  target verification, cache rollback, and request-level acceptance statistics.
-- Tokenization, tokenizer compatibility checks, and incremental decoding belong
-  to the request-handler process. The model runner receives and returns token
-  IDs.
-- The worker binds its socket only after every configured backend has loaded
-  its model or models, so the socket signals readiness.
-- `client.rs` manages the worker lifecycle; it does not forward inference
-  requests.
+CPU-only and GPU-only modes create one backend. Mixed mode creates both and
+routes whole requests between their bounded queues in round-robin order. Each
+backend has its own inference thread, scheduler, loaded models, and KV caches;
+a request is never split across devices.
 
-Once startup is complete, inference requests come from the request-handler
-process rather than through `client.rs`:
+The server binds its Unix socket only after every configured backend has loaded
+its models, making the socket a readiness signal. After startup, inference
+requests arrive directly from the request-handler process rather than passing
+through the lifecycle client.
+
+## Component responsibilities
+
+| Component | Responsibility |
+| --- | --- |
+| `client.rs` | Starts and stops the process, waits for readiness, and owns socket cleanup. |
+| `server/cli.rs` | Receives model paths, device mode, cache settings, and scheduler settings from the main process. |
+| `server/mod.rs` | Serves tonic RPCs, validates request capacity, and routes requests to inference backends. |
+| `server/inference_engine.rs` | Coordinates admission, scheduled execution, event delivery, timing, and cleanup for one backend. |
+| `server/request_manager.rs` | Owns request payloads, resumable execution state, response channels, and lifecycle timing. |
+| `server/scheduler.rs` | Owns only scheduling metadata and applies active-request and token-budget limits. |
+| `server/model_runner.rs` | Owns the target and optional draft model instances and manages their request lifecycles. |
+| `server/model_instance.rs` | Pairs one loaded model with its request-aware KV-cache manager. |
+| `server/text_generation.rs` | Implements resumable prefill, ordinary decoding, speculative decoding, sampling, and statistics. |
+| [`server/kv_cache/`](server/kv_cache/README.md) | Implements contiguous and paged storage, prefix reuse, and per-request cache state. |
+
+Tokenization, tokenizer compatibility checks, and incremental text decoding
+belong to the request-handler process. The model runner receives token IDs and
+returns token IDs followed by final generation statistics.
+
+## Request lifecycle
 
 ```mermaid
 sequenceDiagram
-    participant Caller as Inference client
-    participant Handler as Request handler process
-    participant Rpc as model_runner/server/mod.rs
-    participant Engine as inference_engine.rs
-    participant Requests as request_manager.rs
-    participant Scheduler as scheduler.rs
-    participant Runner as model_runner.rs
-    participant Decode as text_generation.rs
-    participant Target as Target model / Candle
-    participant Draft as Optional draft model / Candle
+    participant Handler as Request handler
+    participant Rpc as RPC server
+    participant Engine as Inference engine
+    participant Scheduler
+    participant Runner as Model runner
+    participant Models as Target / draft models
 
-    Caller->>Handler: GenerateText request
-    Handler->>Rpc: Forward GenerateText over tonic/UDS
-    Rpc->>Rpc: Select CPU/GPU backend round-robin
-    Rpc->>Engine: Queue request on the selected backend thread
-    Engine->>Requests: Store request payload and response channel
-    Engine->>Scheduler: Queue scheduling metadata
-    Scheduler-->>Engine: Return newly admitted request IDs
-    Engine->>Requests: Start request by ID
-    Engine->>Runner: Initialize model and cache state
-    Runner->>Runner: Restore each model's longest cached prompt prefix
-    Runner-->>Engine: Return resumable execution state
-    Engine->>Requests: Store resumable execution state
-    Engine->>Scheduler: Request a token-budgeted scheduling decision
-    Engine->>Requests: Borrow each selected resumable execution state
-    Engine->>Runner: Execute one scheduled generation step
-    Runner->>Decode: Generate text with loaded model(s)
-    alt Draft model configured
-        Decode->>Target: Prefill through second-to-last prompt token
-        Decode->>Draft: Prefill through second-to-last prompt token
-    else Target-only generation
-        Decode->>Target: Prefill prompt and sample first token
+    Handler->>Rpc: GenerateText(token IDs)
+    Rpc->>Rpc: Validate capacity and select backend
+    Rpc->>Engine: Queue request
+    Engine->>Scheduler: Add scheduling metadata
+    Scheduler-->>Engine: Admit request when a slot is available
+    Engine->>Runner: Start request and restore cached prefixes
+    loop Until completion or cancellation
+        Scheduler-->>Engine: Select requests and token budgets
+        Engine->>Runner: Execute scheduled request batch
+        Runner->>Models: Run prefill, decode, or verification
+        Models-->>Runner: Return logits
+        Runner-->>Engine: Return generated tokens and updated phases
+        Engine-->>Rpc: Token-ID events
+        Rpc-->>Handler: Stream token-ID events
     end
-    loop Until stop token, limit, or cancellation
-        alt Draft model configured
-            Decode->>Draft: Generate proposals from pending prompt/output token
-            Draft-->>Decode: Proposed token IDs
-            Decode->>Target: Verify proposal batch in one forward pass
-            Target-->>Decode: Logits for every proposal position
-            Decode->>Decode: Accept matching prefix and choose replacement
-            Decode->>Target: Truncate rejected cache suffix
-            Decode->>Draft: Truncate rejected cache suffix
-        else Target-only decode
-            Decode->>Target: Forward the pending token
-            Target-->>Decode: Next-token logits
-        end
-        Decode-->>Runner: Push generated token ID
-        Runner-->>Engine: Push generated token ID
-        Engine-->>Rpc: Queue GenerateTextEvent::TokenId
-        Rpc-->>Handler: Stream token-ID event
-        Handler->>Handler: Incrementally decode token ID
-        Handler-->>Caller: Stream text event
+    alt Request completes
+        Engine->>Runner: Finish request and release active cache state
+        Runner-->>Engine: Generation statistics
+        Engine-->>Rpc: Final statistics event
+        Rpc-->>Handler: Final statistics event
+    else Cancellation or execution failure
+        Engine->>Runner: Abort request and release cache state
+        Engine-->>Rpc: gRPC error
+        Rpc-->>Handler: gRPC error
     end
-    Decode-->>Runner: Return TextGenerationStats
-    Runner->>Runner: Index complete cached blocks and release active references
-    Runner-->>Engine: Return completed generation
-    Engine-->>Rpc: Queue GenerateTextEvent::Stats
-    Rpc-->>Handler: Stream final statistics
-    Handler-->>Caller: Proxy final statistics
 ```
 
-- `server/mod.rs` rejects inputs that cannot fit the configured KV-cache
-  capacity, limits the requested output length to the remaining capacity, then
-  queues each valid tonic request on one backend's bounded channel. In `mixed`
-  mode, requests alternate between the CPU and GPU backends.
-- `inference_engine.rs` executes scheduled requests, records request-level
-  timing, streams generation events, and reports updated generation state to
-  the scheduler.
-- `model_runner.rs` owns the models and caches, restores reusable prefixes,
-  delegates decoding to `text_generation.rs`, and finishes or clears cache
-  state after each request.
-- `text_generation.rs` runs token-budgeted prefill chunks and decode steps,
-  samples tokens, checks cancellation and stop tokens, and records prefill, decode, and
-  speculative acceptance statistics.
-- The request handler decodes generated token IDs. It streams text fragments
-  immediately unless `stream_output` is false, in which case it buffers them.
-- A successful response ends with a `TextGenerationStats` event.
+The RPC server rejects empty inputs or inputs larger than the target KV-cache
+capacity. If the requested output would exceed the remaining capacity, it
+reduces `max_new_tokens` before queueing the request.
+
+## Scheduling
+
+Each backend admits requests up to its active-request limit and builds batches
+within its token budget. Decode work is prioritized over prefill work; prefills
+are ordered either first-come-first-served or shortest-prefill-first. Long
+prefills can be split across scheduling iterations.
+
+Paged KV caching supports multiple active requests and continuous batching. A
+contiguous cache permits only one active request, so the inference engine
+automatically limits its scheduler accordingly.
+
+## Speculative decoding
+
+When a draft model is configured, target and draft models restore cached prompt
+prefixes independently and prefill through the second-to-last input token. The
+draft model proposes tokens, and the target verifies proposals for scheduled
+requests in a batched forward pass. The longest matching prefix is accepted;
+after verification, both caches are truncated to discard state derived from
+any rejected proposals.
+
+Without a draft model, requests use ordinary target-only prefill and decode.
+Both paths remain resumable between scheduling iterations and report
+request-level timing; speculative responses additionally report the draft-token
+acceptance rate.
+
+## KV-cache execution
+
+Each model instance owns a separate cache manager. The target cache uses the
+configured byte budget, while the optional draft cache is sized for the same
+token capacity.
+
+Paged storage works on CPU and GPU backends. Direct paged attention is currently
+CPU-only and opt-in; other execution paths reconstruct contiguous key/value
+tensors from the pages before attention. Prefix-enabled paged caches retain
+complete blocks for reuse across requests. See the
+[KV-cache architecture](server/kv_cache/README.md) for allocation, prefix
+indexing, eviction, and page ownership details.
+
+A successful request ends with a `TextGenerationStats` event. Cancellation or
+execution failure aborts the request, releases its model and cache state, and
+returns a gRPC error.

@@ -79,7 +79,7 @@ boundary between request handling and inference.
 
 That choice fits mistral.rs's goal of providing both an embeddable Rust library
 and a standalone server with broad model and API support. `mini-vllm-rs` instead
-uses process boundaries so orchestration, text processing, and inference can in
+uses process boundaries so orchestration, text processing, and inference can
 be started and stopped independently and could support independent restart in
 the future. Like mistral.rs, its request and inference paths remain native Rust.
 
@@ -142,7 +142,13 @@ remain in native Rust and avoid Python interpreter overhead.
 
 ## Future directions
 
-- Make scheduler admission aware of available paged KV-cache capacity.
-- Verify the backend on Linux with NVIDIA GPUs and integrate
-  `candle-flash-attn` for paged attention.
-- Support multimodal models small enough for local execution.
+1. Validate requests against the model's context limit as well as KV-cache
+   capacity.
+2. Make scheduler admission aware of available paged KV-cache capacity.
+3. Add seeded temperature and top-p sampling for target-only generation.
+4. Improve overload and cancellation handling, including early removal of
+   cancelled queued requests and explicit capacity errors.
+5. Support and verify CUDA inference on Linux with NVIDIA GPUs.
+6. Add GPU paged attention, potentially using `candle-flash-attn`.
+7. Extend stochastic sampling to speculative decoding with a
+   distribution-correct acceptance algorithm.

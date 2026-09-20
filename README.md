@@ -39,22 +39,23 @@ measurement, and comparison.
 
 ## Run
 
+### Start the server
+
 Run the server with the default Qwen2.5 7B Instruct Q4_K_M model on Metal:
 
 ```shell
 cargo run --release
 ```
 
-Downloads are reused from the Hugging Face cache.
-
-### CLI arguments
+### Server CLI arguments
 
 - `--model '<textproto>'` selects the target model. Set `model_id`,
   `model_filename`, and `tokenizer_id`; optionally set `model_revision`, which
   defaults to `main`.
 - `--draft-model '<textproto>'` loads a tokenizer-compatible draft model for
   speculative decoding.
-- `--draft-token-count <count>` sets the proposal length and defaults to `4`.
+- `--draft-token-count <count>` sets the maximum proposal length and defaults to
+  `4`.
 - `--inference-device <device>` selects `gpu`, `cpu`, or `mixed` and defaults to
   `gpu`. Mixed mode runs one CPU and one GPU backend concurrently.
 - `--kv-cache-type <type>` selects `contiguous`, `paged[:tokens-per-page]`, or
@@ -69,7 +70,8 @@ Downloads are reused from the Hugging Face cache.
   defaults to `512`. See
   [Scheduling work budget](ARCHITECTURE.md#scheduling-work-budget).
 - `--max-active-request-count <count>` limits the number of requests holding
-  active inference state and defaults to `4`.
+  active inference state and defaults to `4`. Contiguous KV-cache storage
+  limits this to `1`.
 - `--scheduling-policy <policy>` selects `first-come-first-served` or
   `shortest-prefill-first` and defaults to `first-come-first-served`.
 - `--input-preprocessing-thread-count <count>` sets the request-handler
@@ -80,7 +82,7 @@ Downloads are reused from the Hugging Face cache.
   defaults to `/tmp/mini-vllm-main-process.sock` and exposes the `Shutdown` RPC
   defined in `proto/main_process.proto`.
 
-### Examples
+#### Examples
 
 Run the default target with a tokenizer-compatible Qwen2.5 0.5B draft model:
 
@@ -111,7 +113,7 @@ cargo run --release -- \
   --model 'model_id: "bartowski/Qwen2.5-0.5B-Instruct-GGUF" model_filename: "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" tokenizer_id: "Qwen/Qwen2.5-0.5B-Instruct"'
 ```
 
-### Environment variables
+### Server environment variables
 
 - `RUST_LOG` controls log filtering, for example `RUST_LOG=warn`.
 - `CANDLE_NUM_THREADS` controls Candle's CPU worker pool, including quantized
@@ -155,6 +157,45 @@ The default threshold follows the crossover measured in the
 - `MINI_VLLM_METAL_GEMV_MAX_ROWS` uses separate GEMV operations for Metal
   inputs up to the configured row count. It defaults to `4`; set it to `0` to
   disable the optimization.
+
+### Send a client request
+
+Install [`grpcurl`](https://github.com/fullstorydev/grpcurl) with Homebrew:
+
+```shell
+brew install grpcurl
+```
+
+Leave the server running in its terminal. In a second terminal, change to the
+`mini-vllm-rs` project directory so `-import-path proto` can find the protocol
+definitions, then send a protobuf text request over the Unix socket:
+
+```shell
+cd /path/to/mini-vllm-rs
+
+grpcurl \
+  -plaintext \
+  -authority localhost \
+  -import-path proto \
+  -proto request_handler.proto \
+  -format text \
+  -d 'prompt: "Explain paged attention briefly." max_new_tokens: 64 repeat_penalty: 1.0 repeat_last_n: 64 stream_output: true' \
+  unix:///tmp/mini-vllm-request-handler.sock \
+  request_handler.RequestHandlerService/GenerateText
+```
+
+The server does not expose gRPC reflection, so the protocol definition is
+required. When running the command from another directory, replace
+`-import-path proto` with an absolute path such as
+`-import-path /path/to/mini-vllm-rs/proto`.
+
+The request and streaming response schemas are defined in
+[`proto/request_handler.proto`](proto/request_handler.proto). For a Python
+client and benchmark orchestration, see
+[`mini-vllm-eval`](https://github.com/lun0522/mini-vllm-eval).
+
+After sending requests, return to the server terminal and press Ctrl-C to shut
+it down gracefully.
 
 ## Additional documentation
 
