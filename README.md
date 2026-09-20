@@ -197,6 +197,16 @@ client and benchmark orchestration, see
 After sending requests, return to the server terminal and press Ctrl-C to shut
 it down gracefully.
 
+## End-to-end test
+
+The ignored end-to-end test runs Qwen2.5 0.5B on CPU through the complete
+three-process serving path. It downloads the model on first use and reuses the
+Hugging Face cache afterward:
+
+```shell
+cargo test --release --test end_to_end -- --ignored --nocapture
+```
+
 ## Additional documentation
 
 - [Troubleshooting](TROUBLESHOOTING.md)

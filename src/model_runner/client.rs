@@ -21,8 +21,6 @@ use std::time::Duration;
 use tonic::transport::Channel;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(300);
-const SOCKET_PATH: &str = "/tmp/mini-vllm-model-runner.sock";
-
 /// Owns the worker process, RPC client, and Unix domain socket lifetime.
 pub(crate) struct ModelRunnerProcess {
     rpc_client: ModelRunnerServiceClient<Channel>,
@@ -42,9 +40,9 @@ impl ModelRunnerProcess {
     pub(crate) async fn start(
         model_artifacts: &ModelArtifacts,
         draft_model_artifacts: Option<&ModelArtifacts>,
+        socket_path: PathBuf,
         config: ModelRunnerProcessConfig,
     ) -> Result<Self> {
-        let socket_path = PathBuf::from(SOCKET_PATH);
         domain_socket::ensure_available(&socket_path, "model runner socket")?;
         let mut child_process = spawn(
             model_artifacts,

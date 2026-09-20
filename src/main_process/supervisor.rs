@@ -12,6 +12,10 @@ use log::info;
 
 pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
     info!("Server configuration:\n{args}");
+    let runtime_directory = tempfile::Builder::new()
+        .prefix("mini-vllm-")
+        .tempdir_in("/tmp")
+        .context("failed to create the server runtime directory")?;
     let scheduler_config = args.scheduler_config();
     let model_downloader = ModelDownloader::new(args.model, ModelRole::Target)?;
     let model_artifacts = model_downloader.download()?;
@@ -24,6 +28,7 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
     let model_runner_process = ModelRunnerProcess::start(
         &model_artifacts,
         draft_model_artifacts.as_ref(),
+        runtime_directory.path().join("model-runner.sock"),
         ModelRunnerProcessConfig {
             draft_token_count: args.draft_token_count,
             inference_device: args.inference_device,
