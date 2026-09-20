@@ -29,8 +29,9 @@ Candle 0.11.0 and adapted locally:
   tokens per page and maintain a block table for each layer. Their physical
   storage, virtual block tables, and reusable-prefix index are described in the
   [KV-cache architecture](../model_runner/server/kv_cache/README.md).
-- Paged caches reconstruct contiguous tensors before calling Candle's existing
-  attention operations.
+- Metal reconstructs contiguous tensors from paged caches before calling
+  Candle's existing attention operations. CPU can instead use the project's
+  optional direct paged-attention path.
 - Model backends provide logits for either the final input position or every
   input position; speculative decoding uses the latter to verify a draft token
   batch with one target-model forward pass.

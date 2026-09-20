@@ -10,10 +10,10 @@ flowchart LR
     end
 
     subgraph Worker[Model runner process]
-        Server["server/mod.rs<br/>tonic service and request queues"]
+        Server["server/mod.rs<br/>tonic service and backend routing"]
         Cli["server/cli.rs<br/>Worker arguments and artifact paths"]
         KvCache["server/kv_cache/<br/>Engine-owned KV-cache implementations"]
-        InferenceEngine["server/inference_engine.rs<br/>Request lifecycle orchestration and timing"]
+        InferenceEngine["server/inference_engine.rs<br/>One engine per CPU/GPU backend"]
         RequestManager["server/request_manager.rs<br/>Request execution state, timing, and responses"]
         Scheduler["server/scheduler.rs<br/>Queued and active scheduling metadata"]
         ModelRunner["server/model_runner.rs<br/>Request execution across model instances"]
@@ -23,7 +23,7 @@ flowchart LR
 
     Client -->|"Spawns with local paths and socket"| Cli
     Cli --> Server
-    Server -->|"Dedicated thread and bounded request channel"| InferenceEngine
+    Server -->|"Round-robin request routing<br/>to bounded backend queues"| InferenceEngine
     InferenceEngine --> RequestManager
     InferenceEngine --> Scheduler
     InferenceEngine --> ModelRunner
@@ -35,11 +35,12 @@ flowchart LR
 - `client.rs` checks that the socket path is available, starts the worker, waits
   for the worker to bind the socket, and sends the shutdown command.
 - `server/cli.rs` receives target and optional draft GGUF paths and the selected
-  inference device from the main process.
-- [`server/kv_cache/`](server/kv_cache/README.md) preallocates separate key/value pools for contiguous or
-  paged storage. Paged mode uses configurable fixed-token-count pages and
-  per-layer block tables, and reconstructs contiguous tensors for the existing
-  attention operations. Its physical page pool owns tensor storage and free
+  `cpu`, `gpu`, or `mixed` inference mode from the main process.
+- [`server/kv_cache/`](server/kv_cache/README.md) preallocates separate key/value
+  pools for contiguous or paged storage. Paged mode uses configurable
+  fixed-token-count pages and per-layer block tables. Metal reconstructs
+  contiguous tensors before attention; CPU can optionally calculate attention
+  directly over the pages. Its physical page pool owns tensor storage and free
   page IDs, while its active block tables only map the current sequence to
   those physical pages. Page ownership states keep cached pages allocated and
   track whether active requests are currently reading them.
@@ -49,8 +50,13 @@ flowchart LR
 - `server/model_runner.rs` owns the target model instance and optional draft
   model instance and exposes request start, one-step execution, completion, and
   abortion operations.
-- `server/mod.rs` starts the dedicated inference thread and forwards requests
-  from its bounded channel to `InferenceEngine`.
+- `server/mod.rs` creates one inference backend for `cpu` or `gpu` mode. In
+  `mixed` mode it creates two backends—one CPU and one GPU—and routes complete
+  requests between their bounded queues in round-robin order.
+- Each backend has its own dedicated inference thread, `InferenceEngine`,
+  scheduler, loaded target and optional draft model, and KV caches. The CPU and
+  GPU backends therefore execute independently rather than splitting a single
+  request across devices.
 - `server/inference_engine.rs` coordinates request storage, scheduling, model
   execution, response events, and elapsed-time tracking.
 - `server/request_manager.rs` owns each request's payload, resumable execution
@@ -69,8 +75,8 @@ flowchart LR
 - Tokenization, tokenizer compatibility checks, and incremental decoding belong
   to the request-handler process. The model runner receives and returns token
   IDs.
-- The worker binds its socket after loading the model, so the socket signals
-  readiness.
+- The worker binds its socket only after every configured backend has loaded
+  its model or models, so the socket signals readiness.
 - `client.rs` manages the worker lifecycle; it does not forward inference
   requests.
 
@@ -92,7 +98,8 @@ sequenceDiagram
 
     Caller->>Handler: GenerateText request
     Handler->>Rpc: Forward GenerateText over tonic/UDS
-    Rpc->>Engine: Queue InferenceRequest on the dedicated thread
+    Rpc->>Rpc: Select CPU/GPU backend round-robin
+    Rpc->>Engine: Queue request on the selected backend thread
     Engine->>Requests: Store request payload and response channel
     Engine->>Scheduler: Queue scheduling metadata
     Scheduler-->>Engine: Return newly admitted request IDs
@@ -141,7 +148,8 @@ sequenceDiagram
 
 - `server/mod.rs` rejects inputs that cannot fit the configured KV-cache
   capacity, limits the requested output length to the remaining capacity, then
-  queues valid tonic requests on a bounded channel.
+  queues each valid tonic request on one backend's bounded channel. In `mixed`
+  mode, requests alternate between the CPU and GPU backends.
 - `inference_engine.rs` executes scheduled requests, records request-level
   timing, streams generation events, and reports updated generation state to
   the scheduler.
