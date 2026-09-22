@@ -38,6 +38,9 @@ pub(crate) struct ModelRunnerProcessArgs {
     /// policy used to choose requests for the next model batch
     #[argh(option)]
     pub(super) scheduling_policy: SchedulingPolicy,
+    /// directory where a Chrome trace is written
+    #[argh(option)]
+    pub(crate) trace_directory: Option<PathBuf>,
     /// unix domain socket path used by the model runner worker
     #[argh(option)]
     pub(super) socket_path: PathBuf,

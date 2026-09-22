@@ -117,6 +117,19 @@ cargo run --release -- \
   --model 'model_id: "bartowski/Qwen2.5-0.5B-Instruct-GGUF" model_filename: "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" tokenizer_id: "Qwen/Qwen2.5-0.5B-Instruct"'
 ```
 
+### Performance tracing
+
+`--trace-directory` enables Chrome trace export for the model-runner process
+and writes `model-runner-<pid>.json` in the specified directory. For example,
+when running a benchmark from `mini-vllm-eval`:
+
+```shell
+python3 main.py --benchmark simple_generation \
+  --trace-directory /tmp/mini-vllm-traces
+```
+
+Open the generated JSON file in [Perfetto](https://ui.perfetto.dev).
+
 ### Server environment variables
 
 - `RUST_LOG` controls log filtering, for example `RUST_LOG=warn`.
@@ -210,6 +223,15 @@ Hugging Face cache afterward:
 ```shell
 cargo test --release --test end_to_end -- --ignored --nocapture
 ```
+
+Set `MINI_VLLM_TEST_TRACE_DIRECTORY` to collect a Chrome trace during the test:
+
+```shell
+MINI_VLLM_TEST_TRACE_DIRECTORY=/path/to/traces \
+cargo test --release --test end_to_end -- --ignored --nocapture
+```
+
+The test forwards the directory to the server's `--trace-directory` option.
 
 ## Additional documentation
 

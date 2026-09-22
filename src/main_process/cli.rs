@@ -54,6 +54,9 @@ pub(crate) struct MainProcessArgs {
     /// number of request-handler threads used for concurrent input preprocessing
     #[argh(option, default = "DEFAULT_INPUT_PREPROCESSING_THREAD_COUNT")]
     pub(crate) input_preprocessing_thread_count: usize,
+    /// directory where a Chrome trace is written
+    #[argh(option)]
+    pub(crate) trace_directory: Option<PathBuf>,
     /// unix domain socket exposed to local inference clients
     #[argh(option, default = "default_request_socket()")]
     pub(crate) request_socket: PathBuf,
@@ -101,6 +104,11 @@ impl fmt::Display for MainProcessArgs {
             "Input preprocessing thread count: {}",
             self.input_preprocessing_thread_count
         )?;
+        if let Some(trace_directory) = &self.trace_directory {
+            writeln!(formatter, "Trace directory: {}", trace_directory.display())?;
+        } else {
+            writeln!(formatter, "Trace export: disabled")?;
+        }
         writeln!(
             formatter,
             "Request socket: {}",
@@ -226,6 +234,15 @@ mod tests {
             MainProcessArgs::from_args(&["mini-vllm-rs"], &["--activation-dtype", "f32"])
                 .expect("F32 activation dtype should parse");
         assert_eq!(f32_args.activation_dtype, ActivationDType::F32);
+    }
+
+    #[test]
+    fn selects_trace_directory() {
+        let args =
+            MainProcessArgs::from_args(&["mini-vllm-rs"], &["--trace-directory", "/tmp/traces"])
+                .expect("trace directory should parse");
+
+        assert_eq!(args.trace_directory, Some(PathBuf::from("/tmp/traces")));
     }
 
     #[test]

@@ -36,6 +36,7 @@ pub(crate) struct ModelRunnerProcessConfig {
     pub(crate) kv_cache_type: KvCacheType,
     pub(crate) target_kv_cache_size_bytes: usize,
     pub(crate) scheduler_config: SchedulerConfig,
+    pub(crate) trace_directory: Option<PathBuf>,
 }
 
 impl ModelRunnerProcess {
@@ -135,6 +136,9 @@ fn spawn(
         .arg(config.scheduler_config.max_active_request_count.to_string())
         .arg("--scheduling-policy")
         .arg(config.scheduler_config.scheduling_policy.to_string());
+    if let Some(trace_directory) = &config.trace_directory {
+        command.arg("--trace-directory").arg(trace_directory);
+    }
     if let Some(draft_model_artifacts) = draft_model_artifacts {
         command
             .arg("--draft-model-path")

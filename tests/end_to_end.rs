@@ -29,6 +29,7 @@ const PROMPT: &str = "Reply with a short greeting.";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(600);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+const TRACE_DIRECTORY_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_TEST_TRACE_DIRECTORY";
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "downloads and runs Qwen2.5 0.5B; invoke explicitly in release mode"]
@@ -68,7 +69,8 @@ async fn run_end_to_end_test() -> anyhow::Result<()> {
 }
 
 fn spawn_server(request_socket: &Path, control_socket: &Path) -> anyhow::Result<Child> {
-    Command::new(env!("CARGO_BIN_EXE_mini-vllm-rs"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mini-vllm-rs"));
+    command
         .arg("--model")
         .arg(MODEL)
         .arg("--inference-device")
@@ -84,9 +86,11 @@ fn spawn_server(request_socket: &Path, control_socket: &Path) -> anyhow::Result<
         .arg("--request-socket")
         .arg(request_socket)
         .arg("--control-socket")
-        .arg(control_socket)
-        .spawn()
-        .map_err(Into::into)
+        .arg(control_socket);
+    if let Some(trace_directory) = std::env::var_os(TRACE_DIRECTORY_ENVIRONMENT_VARIABLE) {
+        command.arg("--trace-directory").arg(trace_directory);
+    }
+    command.spawn().map_err(Into::into)
 }
 
 async fn validate_text_generation(channel: Channel) -> anyhow::Result<()> {

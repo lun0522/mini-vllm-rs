@@ -28,6 +28,8 @@ tokenizers = { version = "0.22.0", default-features = false, features = ["onig"]
 tonic = "0.12"
 tower = { version = "0.4", features = ["util"] }
 tracing = "0.1"
+tracing-chrome = "0.7.2"
+tracing-subscriber = "0.3"
 
 [build-dependencies]
 tonic-build = "0.12"

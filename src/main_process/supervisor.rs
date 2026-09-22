@@ -36,6 +36,7 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
             kv_cache_type: args.kv_cache_type,
             target_kv_cache_size_bytes: args.target_kv_cache_size_bytes,
             scheduler_config,
+            trace_directory: args.trace_directory,
         },
     )
     .await?;
