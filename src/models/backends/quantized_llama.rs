@@ -16,6 +16,7 @@
 //! ![](https://raw.githubusercontent.com/huggingface/candle/main/candle-examples/examples/quantized/assets/aoc.gif)
 //!
 
+use super::common::dequantize_to_activation_dtype;
 use super::common::precompute_rotary_embedding_frequencies;
 use super::common::QMatMul;
 use super::common::RotaryEmbeddingContext;
@@ -23,6 +24,7 @@ use super::common::RotaryEmbeddingType;
 use super::common::SwiGluMlp;
 use super::common::TransformerBlock;
 use super::common::TransformerModelWeights;
+use crate::model_runner::ActivationDType;
 use crate::models::CausalLanguageModel;
 use crate::models::ForwardInput;
 use crate::models::ForwardOutput;
@@ -34,7 +36,7 @@ use candle::Device;
 use candle::Tensor;
 use candle_core as candle;
 use candle_nn::Embedding;
-use candle_transformers::quantized_nn::RmsNorm;
+use candle_nn::RmsNorm;
 use std::fs::File;
 
 pub(crate) struct LlamaBackend {
@@ -47,8 +49,9 @@ impl LlamaBackend {
         content: gguf_file::Content,
         gguf_file: &mut File,
         device: &Device,
+        activation_dtype: ActivationDType,
     ) -> Result<Self> {
-        let model = load_model_weights_from_gguf(content, gguf_file, device)?;
+        let model = load_model_weights_from_gguf(content, gguf_file, device, activation_dtype)?;
         let model_info = model.model_info();
         Ok(Self { model, model_info })
     }
@@ -75,6 +78,7 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
     ct: gguf_file::Content,
     reader: &mut R,
     device: &Device,
+    activation_dtype: ActivationDType,
 ) -> candle::Result<TransformerModelWeights> {
     let md_get = |s: &str| match ct.metadata.get(s) {
         None => candle::bail!("cannot find {s} in metadata"),
@@ -93,15 +97,24 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
         .and_then(|m| m.to_f32())
         .unwrap_or(10000f32);
 
-    let (cos, sin) =
-        precompute_rotary_embedding_frequencies(rope_dim, rope_freq_base, context_length, device)?;
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, device)?;
-    let quantized_token_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
-    let token_embeddings = quantized_token_embeddings.dequantize(device)?;
-    let output_norm = RmsNorm::from_qtensor(
-        ct.tensor(reader, "output_norm.weight", device)?,
-        rms_norm_eps,
+    // These tensors are model parameters or constants rather than activations, but Candle's
+    // elementwise and normalization operations require them to match the activation dtype.
+    let (cos, sin) = precompute_rotary_embedding_frequencies(
+        rope_dim,
+        rope_freq_base,
+        context_length,
+        device,
+        activation_dtype,
     )?;
+    let neg_inf = Tensor::new(f32::NEG_INFINITY, device)?.to_dtype(activation_dtype.into())?;
+    let quantized_token_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
+    let token_embeddings =
+        dequantize_to_activation_dtype(&quantized_token_embeddings, device, activation_dtype)?;
+    let output_norm_weight = ct.tensor(reader, "output_norm.weight", device)?;
+    let output_norm = RmsNorm::new(
+        dequantize_to_activation_dtype(&output_norm_weight, device, activation_dtype)?,
+        rms_norm_eps,
+    );
     let output = match ct.tensor(reader, "output.weight", device) {
         Ok(tensor) => tensor,
         Err(_) => quantized_token_embeddings,
@@ -141,9 +154,15 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
             attn_bq: None,
             attn_bk: None,
             attn_bv: None,
-            attn_norm: RmsNorm::from_qtensor(attn_norm, rms_norm_eps)?,
+            attn_norm: RmsNorm::new(
+                dequantize_to_activation_dtype(&attn_norm, device, activation_dtype)?,
+                rms_norm_eps,
+            ),
             mlp,
-            mlp_norm: RmsNorm::from_qtensor(ffn_norm, rms_norm_eps)?,
+            mlp_norm: RmsNorm::new(
+                dequantize_to_activation_dtype(&ffn_norm, device, activation_dtype)?,
+                rms_norm_eps,
+            ),
             num_q_heads: head_count,
             num_kv_heads: head_count_kv,
             head_dim: embedding_length / head_count,

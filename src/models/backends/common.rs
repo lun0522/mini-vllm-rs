@@ -1,3 +1,4 @@
+use crate::model_runner::ActivationDType;
 use crate::models::ContiguousCacheTensors;
 use crate::models::ForwardInput;
 use crate::models::ForwardOutput;
@@ -11,7 +12,7 @@ use candle_core::Result;
 use candle_core::Tensor;
 use candle_nn::Embedding;
 use candle_nn::Module;
-use candle_transformers::quantized_nn::RmsNorm;
+use candle_nn::RmsNorm;
 use candle_transformers::utils::repeat_kv;
 
 const DEFAULT_ENABLE_CPU_GROUPED_QUERY_MATMUL: bool = true;
@@ -89,10 +90,24 @@ impl QMatMul {
 impl Module for QMatMul {
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
         let _enter = self.span.enter();
+        // TODO: Revisit CPU F16 projection performance. Casting inputs to F32 around the
+        // optimized quantized matmul was close to F32 throughput in benchmarks, and the final
+        // output projection can retain F32 logits to avoid an F16-to-F32 sampling round trip.
         if let Some(output) = self.forward_metal_rows_with_gemv(input)? {
             return Ok(output);
         }
         self.inner.forward(input)
+    }
+}
+
+pub(super) fn dequantize_to_activation_dtype(
+    tensor: &QTensor,
+    device: &Device,
+    activation_dtype: ActivationDType,
+) -> Result<Tensor> {
+    match activation_dtype {
+        ActivationDType::F32 => tensor.dequantize(device),
+        ActivationDType::F16 => tensor.dequantize_f16(device),
     }
 }
 
@@ -480,6 +495,7 @@ pub(super) fn precompute_rotary_embedding_frequencies(
     freq_base: f32,
     context_len: usize,
     device: &Device,
+    activation_dtype: ActivationDType,
 ) -> Result<(Tensor, Tensor)> {
     let theta: Vec<_> = (0..head_dim)
         .step_by(2)
@@ -490,8 +506,8 @@ pub(super) fn precompute_rotary_embedding_frequencies(
         .to_dtype(DType::F32)?
         .reshape((context_len, 1))?
         .matmul(&theta.reshape((1, theta.elem_count()))?)?;
-    let cos = idx_theta.cos()?;
-    let sin = idx_theta.sin()?;
+    let cos = idx_theta.cos()?.to_dtype(activation_dtype.into())?;
+    let sin = idx_theta.sin()?.to_dtype(activation_dtype.into())?;
     Ok((cos, sin))
 }
 
@@ -915,7 +931,10 @@ mod tests {
     }
 
     fn assert_close(actual: &Tensor, expected: &[f32]) -> Result<()> {
-        let actual = actual.flatten_all()?.to_vec1::<f32>()?;
+        let actual = actual
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         assert_eq!(actual.len(), expected.len());
         for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
             assert!(
@@ -987,6 +1006,36 @@ mod tests {
             &neg_inf()?,
         )?;
 
+        assert_close(&output, &[1., 2., 3.])
+    }
+
+    #[test]
+    fn f16_rotary_frequencies_and_attention_preserve_dtype() -> Result<()> {
+        let (cos, sin) = precompute_rotary_embedding_frequencies(
+            2,
+            10_000.,
+            3,
+            &Device::Cpu,
+            ActivationDType::F16,
+        )?;
+        assert_eq!(cos.dtype(), DType::F16);
+        assert_eq!(sin.dtype(), DType::F16);
+
+        let q = tensor4(&[0., 0., 0.], 1, 1, 3, 1)?.to_dtype(DType::F16)?;
+        let k = tensor4(&[1., 2., 3.], 1, 1, 3, 1)?.to_dtype(DType::F16)?;
+        let v = tensor4(&[1., 3., 5.], 1, 1, 3, 1)?.to_dtype(DType::F16)?;
+        let neg_inf = neg_inf()?.to_dtype(DType::F16)?;
+
+        let output = forward_contiguous_attention(
+            &q,
+            k,
+            v,
+            attention_dimensions(1, 1, 1, 0, 3),
+            false,
+            &neg_inf,
+        )?;
+
+        assert_eq!(output.dtype(), DType::F16);
         assert_close(&output, &[1., 2., 3.])
     }
 

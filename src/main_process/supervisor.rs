@@ -32,6 +32,7 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
         ModelRunnerProcessConfig {
             draft_token_count: args.draft_token_count,
             inference_device: args.inference_device,
+            activation_dtype: args.activation_dtype,
             kv_cache_type: args.kv_cache_type,
             target_kv_cache_size_bytes: args.target_kv_cache_size_bytes,
             scheduler_config,

@@ -4,7 +4,51 @@ pub(crate) mod server;
 use std::fmt;
 use std::str::FromStr;
 
+use candle_core::DType;
+
 pub(crate) const DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT: usize = 16;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ActivationDType {
+    F32,
+    F16,
+}
+
+impl ActivationDType {
+    fn cli_value(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::F16 => "f16",
+        }
+    }
+}
+
+impl From<ActivationDType> for DType {
+    fn from(value: ActivationDType) -> Self {
+        match value {
+            ActivationDType::F32 => Self::F32,
+            ActivationDType::F16 => Self::F16,
+        }
+    }
+}
+
+impl fmt::Display for ActivationDType {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.cli_value())
+    }
+}
+
+impl FromStr for ActivationDType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "f32" => Ok(Self::F32),
+            "f16" => Ok(Self::F16),
+            unsupported => Err(format!("unsupported activation dtype: {unsupported}")),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SchedulingPolicy {
@@ -163,6 +207,17 @@ impl FromStr for KvCacheType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_activation_dtypes() {
+        assert_eq!("f32".parse(), Ok(ActivationDType::F32));
+        assert_eq!("f16".parse(), Ok(ActivationDType::F16));
+        assert!("bf16".parse::<ActivationDType>().is_err());
+        assert_eq!(ActivationDType::F32.to_string(), "f32");
+        assert_eq!(ActivationDType::F16.to_string(), "f16");
+        assert_eq!(DType::from(ActivationDType::F32), DType::F32);
+        assert_eq!(DType::from(ActivationDType::F16), DType::F16);
+    }
 
     #[test]
     fn parses_inference_devices() {

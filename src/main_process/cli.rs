@@ -1,3 +1,4 @@
+use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
 use crate::model_runner::SchedulerConfig;
@@ -32,6 +33,9 @@ pub(crate) struct MainProcessArgs {
     /// device used for model inference
     #[argh(option, default = "InferenceDevice::Gpu")]
     pub(crate) inference_device: InferenceDevice,
+    /// data type used for model activations and KV caches
+    #[argh(option, default = "ActivationDType::F32")]
+    pub(crate) activation_dtype: ActivationDType,
     /// KV cache implementation used for model inference
     #[argh(option, default = "KvCacheType::Contiguous")]
     pub(crate) kv_cache_type: KvCacheType,
@@ -74,6 +78,7 @@ impl fmt::Display for MainProcessArgs {
             writeln!(formatter, "Draft model: disabled")?;
         }
         writeln!(formatter, "Inference device: {}", self.inference_device)?;
+        writeln!(formatter, "Activation dtype: {}", self.activation_dtype)?;
         writeln!(formatter, "KV cache type: {}", self.kv_cache_type)?;
         writeln!(
             formatter,
@@ -209,6 +214,18 @@ mod tests {
             .expect("CPU arguments should parse");
 
         assert_eq!(args.inference_device, InferenceDevice::Cpu);
+    }
+
+    #[test]
+    fn selects_activation_dtype() {
+        let default_args = MainProcessArgs::from_args(&["mini-vllm-rs"], &[])
+            .expect("default arguments should parse");
+        assert_eq!(default_args.activation_dtype, ActivationDType::F32);
+
+        let f32_args =
+            MainProcessArgs::from_args(&["mini-vllm-rs"], &["--activation-dtype", "f32"])
+                .expect("F32 activation dtype should parse");
+        assert_eq!(f32_args.activation_dtype, ActivationDType::F32);
     }
 
     #[test]

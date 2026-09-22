@@ -1,4 +1,5 @@
 use crate::model_runner::server;
+use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
 use crate::model_runner::SchedulerConfig;
@@ -31,6 +32,7 @@ pub(crate) struct ModelRunnerProcess {
 pub(crate) struct ModelRunnerProcessConfig {
     pub(crate) draft_token_count: usize,
     pub(crate) inference_device: InferenceDevice,
+    pub(crate) activation_dtype: ActivationDType,
     pub(crate) kv_cache_type: KvCacheType,
     pub(crate) target_kv_cache_size_bytes: usize,
     pub(crate) scheduler_config: SchedulerConfig,
@@ -121,6 +123,8 @@ fn spawn(
         .arg(config.draft_token_count.to_string())
         .arg("--inference-device")
         .arg(config.inference_device.cli_value())
+        .arg("--activation-dtype")
+        .arg(config.activation_dtype.cli_value())
         .arg("--kv-cache-type")
         .arg(config.kv_cache_type.to_string())
         .arg("--target-kv-cache-size-bytes")

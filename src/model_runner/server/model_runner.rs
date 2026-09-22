@@ -1,3 +1,4 @@
+use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
 use crate::models::loaded_model::LoadedModel;
@@ -34,14 +35,19 @@ impl ModelRunner {
         draft_model_path: Option<&Path>,
         draft_token_count: usize,
         inference_device: InferenceDevice,
+        activation_dtype: ActivationDType,
         kv_cache_type: KvCacheType,
         target_kv_cache_size_bytes: usize,
     ) -> Result<Self> {
         let device = Self::get_inference_device(inference_device)?;
-        let loaded_model = LoadedModel::new(model_path, device)?;
+        let loaded_model = LoadedModel::new(model_path, device, activation_dtype)?;
         let loaded_draft_model = draft_model_path
             .map(|draft_model_path| {
-                LoadedModel::new(draft_model_path, loaded_model.device().clone())
+                LoadedModel::new(
+                    draft_model_path,
+                    loaded_model.device().clone(),
+                    activation_dtype,
+                )
             })
             .transpose()?;
         info!(

@@ -1,3 +1,4 @@
+use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::SchedulerConfig;
 use crate::proto::model_runner::model_runner_command;
@@ -177,14 +178,20 @@ fn create_inference_backends(
     args: &ModelRunnerProcessArgs,
     inference_devices: &[InferenceDevice],
 ) -> Result<InferenceBackends> {
-    let mut maybe_metadata = None;
+    let mut maybe_metadata: Option<ModelRunnerMetadata> = None;
     let mut threads = Vec::with_capacity(inference_devices.len());
     let mut request_senders = Vec::with_capacity(inference_devices.len());
     for (index, device) in inference_devices.iter().enumerate() {
         let backend_id = index + 1;
         let inference_backend: InferenceBackend =
             create_inference_backend(backend_id, args, *device)?;
-        if maybe_metadata.is_none() {
+        if let Some(metadata) = maybe_metadata.as_mut() {
+            // TODO: Track capacity per inference backend so mixed mode can use the CPU backend's
+            // additional F16 cache capacity instead of advertising only the shared minimum.
+            metadata.token_capacity = metadata
+                .token_capacity
+                .min(inference_backend.metadata.token_capacity);
+        } else {
             maybe_metadata = Some(inference_backend.metadata);
         }
         threads.push(inference_backend.thread);
@@ -203,11 +210,13 @@ fn create_inference_backend(
     args: &ModelRunnerProcessArgs,
     inference_device: InferenceDevice,
 ) -> Result<InferenceBackend> {
+    let activation_dtype = normalize_activation_dtype(args.activation_dtype, inference_device);
     let model_runner = ModelRunner::new(
         &args.model_path,
         args.draft_model_path.as_deref(),
         args.draft_token_count,
         inference_device,
+        activation_dtype,
         args.kv_cache_type,
         args.target_kv_cache_size_bytes,
     )?;
@@ -264,6 +273,23 @@ fn normalize_generate_text_request(
         request.max_new_tokens = maximum_new_token_count;
     }
     Ok(())
+}
+
+fn normalize_activation_dtype(
+    activation_dtype: ActivationDType,
+    inference_device: InferenceDevice,
+) -> ActivationDType {
+    if cfg!(target_os = "macos")
+        && inference_device == InferenceDevice::Gpu
+        && activation_dtype == ActivationDType::F16
+    {
+        warn!(
+            "Candle's Metal quantized matmul does not support F16 activations; using F32 instead"
+        );
+        ActivationDType::F32
+    } else {
+        activation_dtype
+    }
 }
 
 #[cfg(test)]

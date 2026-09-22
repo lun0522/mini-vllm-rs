@@ -1,3 +1,4 @@
+use crate::model_runner::ActivationDType;
 use crate::models::backends::quantized_llama::LlamaBackend;
 use crate::models::backends::quantized_qwen2::Qwen2Backend;
 use crate::models::CausalLanguageModel;
@@ -28,13 +29,17 @@ pub(crate) struct LoadedModel {
 
 impl LoadedModel {
     /// Loads model artifacts from disk and initializes a supported model backend once.
-    pub(crate) fn new(gguf_path: &Path, device: Device) -> Result<Self> {
+    pub(crate) fn new(
+        gguf_path: &Path,
+        device: Device,
+        activation_dtype: ActivationDType,
+    ) -> Result<Self> {
         let LoadedBackend {
             model,
             architecture,
             input_vocabulary_size,
             output_vocabulary_size,
-        } = load_model_backend(gguf_path, &device)?;
+        } = load_model_backend(gguf_path, &device, activation_dtype)?;
         let metadata = ModelMetadata {
             architecture: architecture.into(),
             input_vocabulary_size: u64::try_from(input_vocabulary_size)
@@ -75,7 +80,11 @@ impl LoadedModel {
     }
 }
 
-fn load_model_backend(gguf_path: &Path, device: &Device) -> Result<LoadedBackend> {
+fn load_model_backend(
+    gguf_path: &Path,
+    device: &Device,
+    activation_dtype: ActivationDType,
+) -> Result<LoadedBackend> {
     let mut gguf_file = File::open(gguf_path).context("failed to open the GGUF model")?;
     let content =
         gguf_file::Content::read(&mut gguf_file).context("failed to read GGUF metadata")?;
@@ -109,13 +118,23 @@ fn load_model_backend(gguf_path: &Path, device: &Device) -> Result<LoadedBackend
         .clone();
     match architecture.as_str() {
         "llama" => Ok(LoadedBackend {
-            model: Box::new(LlamaBackend::new(content, &mut gguf_file, device)?),
+            model: Box::new(LlamaBackend::new(
+                content,
+                &mut gguf_file,
+                device,
+                activation_dtype,
+            )?),
             architecture: ModelArchitecture::Llama,
             input_vocabulary_size,
             output_vocabulary_size,
         }),
         "qwen2" => Ok(LoadedBackend {
-            model: Box::new(Qwen2Backend::new(content, &mut gguf_file, device)?),
+            model: Box::new(Qwen2Backend::new(
+                content,
+                &mut gguf_file,
+                device,
+                activation_dtype,
+            )?),
             architecture: ModelArchitecture::Qwen2,
             input_vocabulary_size,
             output_vocabulary_size,

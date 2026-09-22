@@ -58,6 +58,10 @@ cargo run --release
   `4`.
 - `--inference-device <device>` selects `gpu`, `cpu`, or `mixed` and defaults to
   `gpu`. Mixed mode runs one CPU and one GPU backend concurrently.
+- `--activation-dtype <dtype>` selects `f16` or `f32` and defaults to `f32`. On
+  macOS, Candle's Metal quantized matmul does not support F16 activations, so
+  GPU inference falls back to `f32` with a warning. In mixed mode on macOS, an
+  `f16` request uses `f16` on the CPU backend and `f32` on the Metal backend.
 - `--kv-cache-type <type>` selects `contiguous`, `paged[:tokens-per-page]`, or
   `paged-prefix[:tokens-per-page]` KV-cache storage and defaults to
   `contiguous`. Paged caches contain 16 tokens per page when the count is

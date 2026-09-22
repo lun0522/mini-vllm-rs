@@ -1,3 +1,4 @@
+use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
 use crate::model_runner::SchedulingPolicy;
@@ -19,6 +20,9 @@ pub(crate) struct ModelRunnerProcessArgs {
     /// device used for model inference
     #[argh(option)]
     pub(super) inference_device: InferenceDevice,
+    /// data type used for model activations and KV caches
+    #[argh(option)]
+    pub(super) activation_dtype: ActivationDType,
     /// KV cache implementation used for model inference
     #[argh(option)]
     pub(super) kv_cache_type: KvCacheType,
