@@ -66,6 +66,7 @@ fn initialize_trace_export(trace_directory: &Path) -> anyhow::Result<FlushGuard>
         .with_context(|| format!("failed to create trace file {}", trace_path.display()))?;
     let (chrome_layer, guard) = ChromeLayerBuilder::new()
         .writer(trace_file)
+        .include_args(true)
         .include_locations(false)
         .build();
     let subscriber = tracing_subscriber::registry().with(chrome_layer);

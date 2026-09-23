@@ -1,3 +1,4 @@
+use super::trace;
 use crate::model_runner::ActivationDType;
 use crate::models::ContiguousCacheTensors;
 use crate::models::ForwardInput;
@@ -46,14 +47,13 @@ const METAL_GEMV_MAX_ROWS: usize = match option_env!("MINI_VLLM_METAL_GEMV_MAX_R
 #[derive(Debug, Clone)]
 pub(super) struct QMatMul {
     inner: candle_core::quantized::QMatMul,
-    span: tracing::Span,
+    operation: &'static str,
 }
 
 impl QMatMul {
-    pub(super) fn from_qtensor(qtensor: QTensor) -> Result<Self> {
+    pub(super) fn from_qtensor(qtensor: QTensor, operation: &'static str) -> Result<Self> {
         let inner = candle_core::quantized::QMatMul::from_qtensor(qtensor)?;
-        let span = tracing::span!(tracing::Level::TRACE, "qmatmul");
-        Ok(Self { inner, span })
+        Ok(Self { inner, operation })
     }
 
     /// Uses separate GEMV operations for small Metal inputs because Candle's quantized GEMM
@@ -77,6 +77,7 @@ impl QMatMul {
             return Ok(None);
         }
 
+        let _enter = trace::qmatmul(self.operation, "metal-rowwise-gemv");
         let mut outputs = Vec::with_capacity(row_count);
         for row_index in 0..row_count {
             let row = input.narrow(row_dim, row_index, /* len */ 1)?;
@@ -89,13 +90,13 @@ impl QMatMul {
 
 impl Module for QMatMul {
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        let _enter = self.span.enter();
         // TODO: Revisit CPU F16 projection performance. Casting inputs to F32 around the
         // optimized quantized matmul was close to F32 throughput in benchmarks, and the final
         // output projection can retain F32 logits to avoid an F16-to-F32 sampling round trip.
         if let Some(output) = self.forward_metal_rows_with_gemv(input)? {
             return Ok(output);
         }
+        let _enter = trace::qmatmul(self.operation, "quantized-matmul");
         self.inner.forward(input)
     }
 }
@@ -160,7 +161,6 @@ pub(super) struct RotaryEmbeddingContext {
     pub(super) rope_type: RotaryEmbeddingType,
     pub(super) cos: Tensor,
     pub(super) sin: Tensor,
-    pub(super) span_rope: tracing::Span,
 }
 
 #[derive(Debug, Clone)]
@@ -180,8 +180,6 @@ pub(super) struct TransformerBlock {
     pub(super) head_dim: usize,
     pub(super) rope_context: RotaryEmbeddingContext,
     pub(super) neg_inf: Tensor,
-    pub(super) span_attn: tracing::Span,
-    pub(super) span_mlp: tracing::Span,
 }
 
 impl TransformerBlock {
@@ -193,6 +191,7 @@ impl TransformerBlock {
         layer_index: usize,
         cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
+        let _enter = trace::layer(layer_index);
         let residual = x;
         let x = self.attn_norm.forward(x)?;
         let x = self.forward_attention(&x, contexts, layer_index, cache)?;
@@ -215,7 +214,7 @@ impl TransformerBlock {
         layer_index: usize,
         cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
-        let _enter = self.span_attn.enter();
+        let _enter = trace::attention();
 
         // packed_x: [1, packed_q_len, embedding_len].
         // packed_q: [1, num_q_heads, packed_q_len, head_dim].
@@ -255,18 +254,21 @@ impl TransformerBlock {
                 .narrow(/* dim */ 2, q_start_index, q_len)?
                 .contiguous()?;
             let request_v = packed_v.narrow(/* dim */ 2, q_start_index, q_len)?;
-            let request_q = self.forward_rope(&request_q, start_pos)?;
-            let request_k = self.forward_rope(&request_k, start_pos)?;
+            let request_q = self.forward_rope(&request_q, start_pos, "query")?;
+            let request_k = self.forward_rope(&request_k, start_pos, "key")?;
 
-            cache
-                .append_new_key_value(
-                    request_id,
-                    layer_index,
-                    cached_kv_len,
-                    &request_k,
-                    &request_v,
-                )
-                .map_err(candle_core::Error::wrap)?;
+            {
+                let _enter = trace::attention_cache_append();
+                cache
+                    .append_new_key_value(
+                        request_id,
+                        layer_index,
+                        cached_kv_len,
+                        &request_k,
+                        &request_v,
+                    )
+                    .map_err(candle_core::Error::wrap)?;
+            }
             // request_y: [1, num_q_heads, q_len, head_dim].
             let request_y = self.forward_self_attention(context, layer_index, cache, &request_q)?;
             request_attention_outputs.push(request_y);
@@ -283,16 +285,21 @@ impl TransformerBlock {
     }
 
     fn forward_mlp(&self, x: &Tensor) -> Result<Tensor> {
-        let _enter = self.span_mlp.enter();
+        let _enter = trace::mlp();
         let residual = x;
         let x = self.mlp_norm.forward(x)?;
         let x = self.mlp.forward(&x)?;
         x + residual
     }
 
-    fn forward_rope(&self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
+    fn forward_rope(
+        &self,
+        x: &Tensor,
+        index_pos: usize,
+        tensor_name: &'static str,
+    ) -> Result<Tensor> {
         let context = &self.rope_context;
-        let _enter = context.span_rope.enter();
+        let _enter = trace::rope(tensor_name);
         let (_, _, query_len, _) = x.dims4()?;
         let cos = context.cos.narrow(/* dim */ 0, index_pos, query_len)?;
         let sin = context.sin.narrow(/* dim */ 0, index_pos, query_len)?;
@@ -326,9 +333,12 @@ impl TransformerBlock {
         let ContiguousCacheTensors {
             key: request_full_k,
             value: request_full_v,
-        } = cache
-            .get_contiguous_cache_tensors(context.request_id, layer_index)
-            .map_err(candle_core::Error::wrap)?;
+        } = {
+            let _enter = trace::attention_cache_access("contiguous");
+            cache
+                .get_contiguous_cache_tensors(context.request_id, layer_index)
+                .map_err(candle_core::Error::wrap)?
+        };
         let (_, _, request_kv_len, _) = request_full_k.dims4()?;
         let expected_request_kv_len = dimensions.full_kv_len();
         if request_kv_len != expected_request_kv_len {
@@ -340,6 +350,7 @@ impl TransformerBlock {
 
         // Metal SDPA handles GQA or MQA without explicitly repeating K and V.
         if request_q.device().is_metal() && dimensions.q_len == 1 {
+            let _enter = trace::attention_sdpa("metal");
             return candle_nn::ops::sdpa(
                 request_q,
                 &request_full_k,
@@ -373,10 +384,12 @@ impl TransformerBlock {
             return Ok(None);
         }
 
-        let Some(paged_cache_layout) = cache
-            .get_paged_cache_layout(context.request_id, layer_index)
-            .map_err(candle_core::Error::wrap)?
-        else {
+        let Some(paged_cache_layout) = ({
+            let _enter = trace::attention_cache_access("paged");
+            cache
+                .get_paged_cache_layout(context.request_id, layer_index)
+                .map_err(candle_core::Error::wrap)?
+        }) else {
             return Ok(None);
         };
 
@@ -405,8 +418,6 @@ pub(super) struct TransformerModelWeights {
     layers: Vec<TransformerBlock>,
     output_norm: RmsNorm,
     output_proj: QMatMul,
-    span_model: tracing::Span,
-    span_output: tracing::Span,
 }
 
 impl TransformerModelWeights {
@@ -421,8 +432,6 @@ impl TransformerModelWeights {
             layers,
             output_norm,
             output_proj,
-            span_model: tracing::span!(tracing::Level::TRACE, "model"),
-            span_output: tracing::span!(tracing::Level::TRACE, "output"),
         }
     }
 
@@ -442,7 +451,7 @@ impl TransformerModelWeights {
         verification_inputs: &[ForwardInput],
         kv_cache: &mut dyn KvCache,
     ) -> Result<ForwardOutput> {
-        let _enter_model = self.span_model.enter();
+        let _enter_model = trace::model();
 
         let combined_inputs = generation_inputs
             .iter()
@@ -462,6 +471,8 @@ impl TransformerModelWeights {
             packed_hidden_states =
                 layer.forward(&packed_hidden_states, &contexts, layer_index, kv_cache)?;
         }
+
+        let _enter_output = trace::output();
         let packed_hidden_states = self.output_norm.forward(&packed_hidden_states)?;
 
         let (generation_contexts, verification_contexts) =
@@ -472,7 +483,6 @@ impl TransformerModelWeights {
             verification_contexts,
         )?;
 
-        let _enter_output = self.span_output.enter();
         // packed_logits:
         // [generation_request_count + verification_token_count, vocabulary_size].
         let packed_logits = self.output_proj.forward(&packed_output_hidden_states)?;
@@ -652,13 +662,16 @@ fn forward_contiguous_attention(
         request_kv_len,
         enable_group_query_heads,
     )? / (dimensions.head_dim as f64).sqrt())?;
-    let request_attn_scores = apply_causal_attention_mask(
-        request_attn_scores,
-        dimensions.q_len,
-        dimensions.cached_kv_len,
-        neg_inf,
-    )?;
-    let request_attn_weights = candle_nn::ops::softmax_last_dim(&request_attn_scores)?;
+    let request_attn_weights = {
+        let _enter = trace::attention_mask_softmax();
+        let request_attn_scores = apply_causal_attention_mask(
+            request_attn_scores,
+            dimensions.q_len,
+            dimensions.cached_kv_len,
+            neg_inf,
+        )?;
+        candle_nn::ops::softmax_last_dim(&request_attn_scores)?
+    };
     matmul_attention_value(
         request_attn_weights,
         request_full_v,
@@ -715,15 +728,19 @@ fn forward_paged_attention(
     // request_attn_scores: [1, num_q_heads, q_len, kv_len].
     let request_attn_scores = (Tensor::cat(&request_attn_score_slices, /* dim */ 3)?
         / (dimensions.head_dim as f64).sqrt())?;
-    let request_attn_scores = apply_causal_attention_mask(
-        request_attn_scores,
-        dimensions.q_len,
-        dimensions.cached_kv_len,
-        neg_inf,
-    )?;
-    let request_attn_weights = candle_nn::ops::softmax_last_dim(&request_attn_scores)?;
+    let request_attn_weights = {
+        let _enter = trace::attention_mask_softmax();
+        let request_attn_scores = apply_causal_attention_mask(
+            request_attn_scores,
+            dimensions.q_len,
+            dimensions.cached_kv_len,
+            neg_inf,
+        )?;
+        candle_nn::ops::softmax_last_dim(&request_attn_scores)?
+    };
 
     if enable_pagewise_value_matmul {
+        let _enter = trace::attention_paged_value("pagewise");
         matmul_paged_attention_value(
             request_attn_weights,
             request_v_slices,
@@ -731,6 +748,7 @@ fn forward_paged_attention(
             enable_group_query_heads,
         )
     } else {
+        let _enter = trace::attention_paged_value("concatenated");
         // request_full_v: [1, num_kv_heads, kv_len, head_dim].
         let request_full_v = Tensor::cat(&request_v_slices, /* dim */ 2)?.contiguous()?;
         matmul_attention_value(
@@ -762,10 +780,15 @@ fn matmul_query_key(
     let repetition_count = dimensions.repetition_count();
     if !enable_group_query_heads || repetition_count == 1 {
         // request_repeated_k: [1, num_q_heads, kv_len, head_dim].
-        let request_repeated_k = repeat_kv(request_k, repetition_count)?;
+        let request_repeated_k = {
+            let _enter = trace::attention_repeat_kv("key");
+            repeat_kv(request_k, repetition_count)?
+        };
+        let _enter = trace::attention_query_key("repeated-kv");
         return request_q.matmul(&request_repeated_k.t()?);
     }
 
+    let _enter = trace::attention_query_key("grouped");
     // grouped_q: [num_kv_heads, repetition_count * q_len, head_dim].
     let grouped_q = request_q.squeeze(0)?.reshape((
         dimensions.num_kv_heads,
@@ -799,10 +822,15 @@ fn matmul_attention_value(
     let repetition_count = dimensions.repetition_count();
     if !enable_group_query_heads || repetition_count == 1 {
         // request_repeated_v: [1, num_q_heads, kv_len, head_dim].
-        let request_repeated_v = repeat_kv(request_v, repetition_count)?;
+        let request_repeated_v = {
+            let _enter = trace::attention_repeat_kv("value");
+            repeat_kv(request_v, repetition_count)?
+        };
+        let _enter = trace::attention_value("repeated-kv");
         return request_attn_weights.matmul(&request_repeated_v.contiguous()?);
     }
 
+    let _enter = trace::attention_value("grouped");
     // grouped_weights: [num_kv_heads, repetition_count * q_len, kv_len].
     let grouped_weights = request_attn_weights.reshape((
         dimensions.num_kv_heads,

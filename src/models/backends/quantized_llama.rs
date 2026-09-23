@@ -133,24 +133,20 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
             let ffn_down = ct.tensor(reader, &format!("{prefix}.ffn_down.weight"), device)?;
             let ffn_up = ct.tensor(reader, &format!("{prefix}.ffn_up.weight"), device)?;
             SwiGluMlp {
-                gate_proj: QMatMul::from_qtensor(ffn_gate)?,
-                down_proj: QMatMul::from_qtensor(ffn_down)?,
-                up_proj: QMatMul::from_qtensor(ffn_up)?,
+                gate_proj: QMatMul::from_qtensor(ffn_gate, "mlp-gate")?,
+                down_proj: QMatMul::from_qtensor(ffn_down, "mlp-down")?,
+                up_proj: QMatMul::from_qtensor(ffn_up, "mlp-up")?,
             }
         };
 
         let attn_norm = ct.tensor(reader, &format!("{prefix}.attn_norm.weight"), device)?;
         let ffn_norm = ct.tensor(reader, &format!("{prefix}.ffn_norm.weight"), device)?;
 
-        let span_attn = tracing::span!(tracing::Level::TRACE, "attn");
-        let span_rope = tracing::span!(tracing::Level::TRACE, "attn-rope");
-        let span_mlp = tracing::span!(tracing::Level::TRACE, "attn-mlp");
-
         layers.push(TransformerBlock {
-            attn_wq: QMatMul::from_qtensor(attn_wq)?,
-            attn_wk: QMatMul::from_qtensor(attn_wk)?,
-            attn_wv: QMatMul::from_qtensor(attn_wv)?,
-            attn_wo: QMatMul::from_qtensor(attn_wo)?,
+            attn_wq: QMatMul::from_qtensor(attn_wq, "attention-query")?,
+            attn_wk: QMatMul::from_qtensor(attn_wk, "attention-key")?,
+            attn_wv: QMatMul::from_qtensor(attn_wv, "attention-value")?,
+            attn_wo: QMatMul::from_qtensor(attn_wo, "attention-output")?,
             attn_bq: None,
             attn_bk: None,
             attn_bv: None,
@@ -170,11 +166,8 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
                 rope_type: RotaryEmbeddingType::Interleaved,
                 cos: cos.clone(),
                 sin: sin.clone(),
-                span_rope,
             },
             neg_inf: neg_inf.clone(),
-            span_attn,
-            span_mlp,
         })
     }
 
@@ -182,6 +175,6 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
         Embedding::new(token_embeddings, embedding_length),
         layers,
         output_norm,
-        QMatMul::from_qtensor(output)?,
+        QMatMul::from_qtensor(output, "output")?,
     ))
 }
