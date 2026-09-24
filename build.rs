@@ -1,7 +1,4 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!(
-        "cargo:rerun-if-env-changed=MINI_VLLM_ENABLE_CPU_F16_CHUNKED_EMBEDDING_DEQUANTIZATION"
-    );
     println!("cargo:rerun-if-env-changed=MINI_VLLM_ENABLE_CPU_F16_QMATMUL_VIA_F32");
     println!("cargo:rerun-if-env-changed=MINI_VLLM_ENABLE_CPU_GROUPED_QUERY_MATMUL");
     println!("cargo:rerun-if-env-changed=MINI_VLLM_ENABLE_CPU_PAGED_ATTENTION");

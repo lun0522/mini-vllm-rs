@@ -16,20 +16,11 @@ use candle_nn::Module;
 use candle_nn::RmsNorm;
 use candle_transformers::utils::repeat_kv;
 
-const DEFAULT_ENABLE_CPU_F16_CHUNKED_EMBEDDING_DEQUANTIZATION: bool = true;
 const DEFAULT_ENABLE_CPU_F16_QMATMUL_VIA_F32: bool = true;
 const DEFAULT_ENABLE_CPU_GROUPED_QUERY_MATMUL: bool = true;
 const DEFAULT_ENABLE_CPU_PAGED_ATTENTION: bool = false;
 const DEFAULT_ENABLE_CPU_PAGEWISE_VALUE_MATMUL: bool = false;
 const DEFAULT_METAL_GEMV_MAX_ROWS: usize = 4;
-
-const F16_TOKEN_EMBEDDING_DEQUANTIZE_CHUNK_SIZE: usize = 1024;
-
-const ENABLE_CPU_F16_CHUNKED_EMBEDDING_DEQUANTIZATION: bool =
-    match option_env!("MINI_VLLM_ENABLE_CPU_F16_CHUNKED_EMBEDDING_DEQUANTIZATION") {
-        Some(value) => const_str::parse!(value, bool),
-        None => DEFAULT_ENABLE_CPU_F16_CHUNKED_EMBEDDING_DEQUANTIZATION,
-    };
 
 const ENABLE_CPU_F16_QMATMUL_VIA_F32: bool =
     match option_env!("MINI_VLLM_ENABLE_CPU_F16_QMATMUL_VIA_F32") {
@@ -152,38 +143,6 @@ pub(super) fn dequantize_to_activation_dtype(
         ActivationDType::F32 => tensor.dequantize(device),
         ActivationDType::F16 => tensor.dequantize_f16(device),
     }
-}
-
-pub(super) fn dequantize_token_embeddings(
-    tensor: &QTensor,
-    device: &Device,
-    activation_dtype: ActivationDType,
-) -> Result<Tensor> {
-    // Outside CUDA, Candle implements `QTensor::dequantize_f16` by first dequantizing the entire
-    // tensor to F32 and then converting that full tensor to F16. Token embeddings are large and
-    // long-lived, so this briefly allocates both complete representations; the CPU allocator may
-    // retain the released F32 allocation and keep the process RSS high after model loading.
-    //
-    // Dequantizing selected rows through `QTensor::embedding` bounds that F32 temporary to one
-    // chunk. Each chunk is converted and copied into the final F16 tensor immediately. The final
-    // embeddings are identical in layout and dtype, while peak temporary memory depends on the
-    // chunk size rather than the vocabulary size.
-    if !ENABLE_CPU_F16_CHUNKED_EMBEDDING_DEQUANTIZATION
-        || !device.is_cpu()
-        || activation_dtype != ActivationDType::F16
-    {
-        return dequantize_to_activation_dtype(tensor, device, activation_dtype);
-    }
-
-    let (row_count, embedding_length) = tensor.shape().dims2()?;
-    let embeddings = Tensor::zeros((row_count, embedding_length), DType::F16, device)?;
-    for row_start in (0..row_count).step_by(F16_TOKEN_EMBEDDING_DEQUANTIZE_CHUNK_SIZE) {
-        let row_end = (row_start + F16_TOKEN_EMBEDDING_DEQUANTIZE_CHUNK_SIZE).min(row_count);
-        let row_ids = Tensor::arange(row_start as u32, row_end as u32, device)?;
-        let chunk = tensor.embedding(&row_ids)?.to_dtype(DType::F16)?;
-        embeddings.slice_set(&chunk, /* dim */ 0, row_start)?;
-    }
-    Ok(embeddings)
 }
 
 #[derive(Debug, Clone)]

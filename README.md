@@ -168,14 +168,11 @@ cargo run --release -- --inference-device cpu --kv-cache-type paged:16
 
 #### CPU F16
 
-- `MINI_VLLM_ENABLE_CPU_F16_CHUNKED_EMBEDDING_DEQUANTIZATION` dequantizes token
-  embeddings in chunks, avoiding a full-size temporary F32 embedding tensor.
 - `MINI_VLLM_ENABLE_CPU_F16_QMATMUL_VIA_F32` converts F16 inputs to F32 for
   Candle's optimized quantized matmul and converts the result back to F16,
   avoiding Candle's slower F16-input quantized kernel.
 
-Both optimizations default to `true` and can be disabled independently for
-benchmarking.
+This optimization defaults to `true` and can be disabled for benchmarking.
 
 #### Metal GEMV
 

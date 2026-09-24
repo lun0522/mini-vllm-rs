@@ -14,7 +14,6 @@
 //!
 
 use super::common::dequantize_to_activation_dtype;
-use super::common::dequantize_token_embeddings;
 use super::common::precompute_rotary_embedding_frequencies;
 use super::common::QMatMul;
 use super::common::RotaryEmbeddingContext;
@@ -106,7 +105,7 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
     let neg_inf = Tensor::new(f32::NEG_INFINITY, device)?.to_dtype(activation_dtype.into())?;
     let quantized_token_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
     let token_embeddings =
-        dequantize_token_embeddings(&quantized_token_embeddings, device, activation_dtype)?;
+        dequantize_to_activation_dtype(&quantized_token_embeddings, device, activation_dtype)?;
     let output_norm_weight = ct.tensor(reader, "output_norm.weight", device)?;
     let output_norm = RmsNorm::new(
         dequantize_to_activation_dtype(&output_norm_weight, device, activation_dtype)?,
