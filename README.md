@@ -120,7 +120,7 @@ cargo run --release -- \
 ### Performance tracing
 
 `--trace-directory` enables Chrome trace export for the model-runner process
-and writes `model-runner-<pid>.json` in the specified directory. For example,
+and writes `model-runner-<timestamp>.json` in the specified directory. For example,
 when running a benchmark from `mini-vllm-eval`:
 
 ```shell
@@ -165,6 +165,17 @@ MINI_VLLM_ENABLE_CPU_PAGED_ATTENTION=false \
 MINI_VLLM_ENABLE_CPU_GROUPED_QUERY_MATMUL=false \
 cargo run --release -- --inference-device cpu --kv-cache-type paged:16
 ```
+
+#### CPU F16
+
+- `MINI_VLLM_ENABLE_CPU_F16_CHUNKED_EMBEDDING_DEQUANTIZATION` dequantizes token
+  embeddings in chunks, avoiding a full-size temporary F32 embedding tensor.
+- `MINI_VLLM_ENABLE_CPU_F16_QMATMUL_VIA_F32` converts F16 inputs to F32 for
+  Candle's optimized quantized matmul and converts the result back to F16,
+  avoiding Candle's slower F16-input quantized kernel.
+
+Both optimizations default to `true` and can be disabled independently for
+benchmarking.
 
 #### Metal GEMV
 

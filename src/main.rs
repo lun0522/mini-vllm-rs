@@ -14,6 +14,8 @@ use log::info;
 use std::fs::File;
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use tracing_chrome::ChromeLayerBuilder;
 use tracing_chrome::FlushGuard;
 use tracing_subscriber::layer::SubscriberExt;
@@ -61,7 +63,11 @@ fn initialize_trace_export(trace_directory: &Path) -> anyhow::Result<FlushGuard>
             trace_directory.display()
         )
     })?;
-    let trace_path = trace_directory.join(format!("model-runner-{}.json", std::process::id()));
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_millis();
+    let trace_path = trace_directory.join(format!("model-runner-{timestamp}.json"));
     let trace_file = File::create(&trace_path)
         .with_context(|| format!("failed to create trace file {}", trace_path.display()))?;
     let (chrome_layer, guard) = ChromeLayerBuilder::new()

@@ -16,10 +16,26 @@ use candle_nn::Module;
 use candle_nn::RmsNorm;
 use candle_transformers::utils::repeat_kv;
 
+const DEFAULT_ENABLE_CPU_F16_CHUNKED_EMBEDDING_DEQUANTIZATION: bool = true;
+const DEFAULT_ENABLE_CPU_F16_QMATMUL_VIA_F32: bool = true;
 const DEFAULT_ENABLE_CPU_GROUPED_QUERY_MATMUL: bool = true;
 const DEFAULT_ENABLE_CPU_PAGED_ATTENTION: bool = false;
 const DEFAULT_ENABLE_CPU_PAGEWISE_VALUE_MATMUL: bool = false;
 const DEFAULT_METAL_GEMV_MAX_ROWS: usize = 4;
+
+const F16_TOKEN_EMBEDDING_DEQUANTIZE_CHUNK_SIZE: usize = 1024;
+
+const ENABLE_CPU_F16_CHUNKED_EMBEDDING_DEQUANTIZATION: bool =
+    match option_env!("MINI_VLLM_ENABLE_CPU_F16_CHUNKED_EMBEDDING_DEQUANTIZATION") {
+        Some(value) => const_str::parse!(value, bool),
+        None => DEFAULT_ENABLE_CPU_F16_CHUNKED_EMBEDDING_DEQUANTIZATION,
+    };
+
+const ENABLE_CPU_F16_QMATMUL_VIA_F32: bool =
+    match option_env!("MINI_VLLM_ENABLE_CPU_F16_QMATMUL_VIA_F32") {
+        Some(value) => const_str::parse!(value, bool),
+        None => DEFAULT_ENABLE_CPU_F16_QMATMUL_VIA_F32,
+    };
 
 const ENABLE_CPU_GROUPED_QUERY_MATMUL: bool =
     match option_env!("MINI_VLLM_ENABLE_CPU_GROUPED_QUERY_MATMUL") {
@@ -56,6 +72,31 @@ impl QMatMul {
         Ok(Self { inner, operation })
     }
 
+    /// Routes F16 CPU activations through Candle's optimized F32 quantized-matmul path.
+    ///
+    /// Candle's native F16 CPU path calls the generic `matmul_t_f16` implementation. For F32
+    /// input on AArch64 with dot-product support, its Q4_K implementation instead repacks the
+    /// still-quantized weights and uses the optimized Q4_K x8 kernel. In our benchmarks the
+    /// native F16 path took roughly twice as long, while converting the relatively small
+    /// activation to F32 and the result back to F16 added little overhead.
+    ///
+    /// This workaround does not dequantize or retain a full-precision copy of the weights: only
+    /// the input and output activations are converted, and Candle continues to multiply directly
+    /// from its quantized weight storage.
+    fn forward_cpu_f16_optimized(&self, input: &Tensor) -> Result<Option<Tensor>> {
+        if !ENABLE_CPU_F16_QMATMUL_VIA_F32
+            || !input.device().is_cpu()
+            || input.dtype() != DType::F16
+        {
+            return Ok(None);
+        }
+
+        let _enter = trace::qmatmul(self.operation, "cpu-f16-via-f32");
+        let input = input.to_dtype(DType::F32)?;
+        let output = self.inner.forward(&input)?;
+        Ok(Some(output.to_dtype(DType::F16)?))
+    }
+
     /// Uses separate GEMV operations for small Metal inputs because Candle's quantized GEMM
     /// kernel performs poorly at very small row counts. Returns `None` when the compile-time
     /// threshold is disabled, the input is not on Metal, or the regular GEMM path is preferable.
@@ -90,12 +131,13 @@ impl QMatMul {
 
 impl Module for QMatMul {
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        // TODO: Revisit CPU F16 projection performance. Casting inputs to F32 around the
-        // optimized quantized matmul was close to F32 throughput in benchmarks, and the final
-        // output projection can retain F32 logits to avoid an F16-to-F32 sampling round trip.
+        if let Some(output) = self.forward_cpu_f16_optimized(input)? {
+            return Ok(output);
+        }
         if let Some(output) = self.forward_metal_rows_with_gemv(input)? {
             return Ok(output);
         }
+
         let _enter = trace::qmatmul(self.operation, "quantized-matmul");
         self.inner.forward(input)
     }
@@ -110,6 +152,38 @@ pub(super) fn dequantize_to_activation_dtype(
         ActivationDType::F32 => tensor.dequantize(device),
         ActivationDType::F16 => tensor.dequantize_f16(device),
     }
+}
+
+pub(super) fn dequantize_token_embeddings(
+    tensor: &QTensor,
+    device: &Device,
+    activation_dtype: ActivationDType,
+) -> Result<Tensor> {
+    // Outside CUDA, Candle implements `QTensor::dequantize_f16` by first dequantizing the entire
+    // tensor to F32 and then converting that full tensor to F16. Token embeddings are large and
+    // long-lived, so this briefly allocates both complete representations; the CPU allocator may
+    // retain the released F32 allocation and keep the process RSS high after model loading.
+    //
+    // Dequantizing selected rows through `QTensor::embedding` bounds that F32 temporary to one
+    // chunk. Each chunk is converted and copied into the final F16 tensor immediately. The final
+    // embeddings are identical in layout and dtype, while peak temporary memory depends on the
+    // chunk size rather than the vocabulary size.
+    if !ENABLE_CPU_F16_CHUNKED_EMBEDDING_DEQUANTIZATION
+        || !device.is_cpu()
+        || activation_dtype != ActivationDType::F16
+    {
+        return dequantize_to_activation_dtype(tensor, device, activation_dtype);
+    }
+
+    let (row_count, embedding_length) = tensor.shape().dims2()?;
+    let embeddings = Tensor::zeros((row_count, embedding_length), DType::F16, device)?;
+    for row_start in (0..row_count).step_by(F16_TOKEN_EMBEDDING_DEQUANTIZE_CHUNK_SIZE) {
+        let row_end = (row_start + F16_TOKEN_EMBEDDING_DEQUANTIZE_CHUNK_SIZE).min(row_count);
+        let row_ids = Tensor::arange(row_start as u32, row_end as u32, device)?;
+        let chunk = tensor.embedding(&row_ids)?.to_dtype(DType::F16)?;
+        embeddings.slice_set(&chunk, /* dim */ 0, row_start)?;
+    }
+    Ok(embeddings)
 }
 
 #[derive(Debug, Clone)]
