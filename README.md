@@ -132,6 +132,9 @@ Open the generated JSON file in [Perfetto](https://ui.perfetto.dev).
 
 ### Server environment variables
 
+All the following environment variables are read once when the process starts,
+so changing them does not rebuild the binary.
+
 - `RUST_LOG` controls log filtering, for example `RUST_LOG=warn`.
 - `CANDLE_NUM_THREADS` controls Candle's CPU worker pool, including quantized
   matrix multiplication.
@@ -140,9 +143,6 @@ Open the generated JSON file in [Perfetto](https://ui.perfetto.dev).
 On Apple Silicon, Candle defaults to the number of performance-core logical
 CPUs, so efficiency cores are not used by default. Tune both thread counts for
 the workload; more threads do not always improve throughput.
-
-The remaining variables are evaluated at compile time. Set them when invoking
-Cargo.
 
 #### CPU attention
 

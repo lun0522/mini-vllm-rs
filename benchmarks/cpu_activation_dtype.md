@@ -20,7 +20,7 @@ workaround.
 - We also keep the attention implementation fixed at contiguous attention,
   grouped Q, and upfront full V. Finding the best implementation is out of scope
   here and belongs in a separate
-  [CPU paged-attention benchmark](cpu_paged_attention.md).
+  [F16 CPU paged-attention benchmark](cpu_paged_attention_f16.md).
 
 **Reproducibility:**
 

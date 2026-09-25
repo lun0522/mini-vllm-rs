@@ -6,6 +6,8 @@ use crate::models::ForwardOutput;
 use crate::models::KvCache;
 use crate::models::ModelInfo;
 use crate::models::PagedCacheLayout;
+use crate::utils::environment_bool;
+use crate::utils::environment_usize;
 use candle_core::quantized::QTensor;
 use candle_core::DType;
 use candle_core::Device;
@@ -15,6 +17,7 @@ use candle_nn::Embedding;
 use candle_nn::Module;
 use candle_nn::RmsNorm;
 use candle_transformers::utils::repeat_kv;
+use std::sync::LazyLock;
 
 const DEFAULT_ENABLE_CPU_F16_QMATMUL_VIA_F32: bool = true;
 const DEFAULT_ENABLE_CPU_GROUPED_QUERY_MATMUL: bool = true;
@@ -22,33 +25,37 @@ const DEFAULT_ENABLE_CPU_PAGED_ATTENTION: bool = false;
 const DEFAULT_ENABLE_CPU_PAGEWISE_VALUE_MATMUL: bool = false;
 const DEFAULT_METAL_GEMV_MAX_ROWS: usize = 4;
 
-const ENABLE_CPU_F16_QMATMUL_VIA_F32: bool =
-    match option_env!("MINI_VLLM_ENABLE_CPU_F16_QMATMUL_VIA_F32") {
-        Some(value) => const_str::parse!(value, bool),
-        None => DEFAULT_ENABLE_CPU_F16_QMATMUL_VIA_F32,
-    };
+static ENABLE_CPU_F16_QMATMUL_VIA_F32: LazyLock<bool> = LazyLock::new(|| {
+    environment_bool(
+        "MINI_VLLM_ENABLE_CPU_F16_QMATMUL_VIA_F32",
+        DEFAULT_ENABLE_CPU_F16_QMATMUL_VIA_F32,
+    )
+});
 
-const ENABLE_CPU_GROUPED_QUERY_MATMUL: bool =
-    match option_env!("MINI_VLLM_ENABLE_CPU_GROUPED_QUERY_MATMUL") {
-        Some(value) => const_str::parse!(value, bool),
-        None => DEFAULT_ENABLE_CPU_GROUPED_QUERY_MATMUL,
-    };
+static ENABLE_CPU_GROUPED_QUERY_MATMUL: LazyLock<bool> = LazyLock::new(|| {
+    environment_bool(
+        "MINI_VLLM_ENABLE_CPU_GROUPED_QUERY_MATMUL",
+        DEFAULT_ENABLE_CPU_GROUPED_QUERY_MATMUL,
+    )
+});
 
-const ENABLE_CPU_PAGED_ATTENTION: bool = match option_env!("MINI_VLLM_ENABLE_CPU_PAGED_ATTENTION") {
-    Some(value) => const_str::parse!(value, bool),
-    None => DEFAULT_ENABLE_CPU_PAGED_ATTENTION,
-};
+static ENABLE_CPU_PAGED_ATTENTION: LazyLock<bool> = LazyLock::new(|| {
+    environment_bool(
+        "MINI_VLLM_ENABLE_CPU_PAGED_ATTENTION",
+        DEFAULT_ENABLE_CPU_PAGED_ATTENTION,
+    )
+});
 
-const ENABLE_CPU_PAGEWISE_VALUE_MATMUL: bool =
-    match option_env!("MINI_VLLM_ENABLE_CPU_PAGEWISE_VALUE_MATMUL") {
-        Some(value) => const_str::parse!(value, bool),
-        None => DEFAULT_ENABLE_CPU_PAGEWISE_VALUE_MATMUL,
-    };
+static ENABLE_CPU_PAGEWISE_VALUE_MATMUL: LazyLock<bool> = LazyLock::new(|| {
+    environment_bool(
+        "MINI_VLLM_ENABLE_CPU_PAGEWISE_VALUE_MATMUL",
+        DEFAULT_ENABLE_CPU_PAGEWISE_VALUE_MATMUL,
+    )
+});
 
-const METAL_GEMV_MAX_ROWS: usize = match option_env!("MINI_VLLM_METAL_GEMV_MAX_ROWS") {
-    Some(value) => const_str::parse!(value, u32) as usize,
-    None => DEFAULT_METAL_GEMV_MAX_ROWS,
-};
+static METAL_GEMV_MAX_ROWS: LazyLock<usize> = LazyLock::new(|| {
+    environment_usize("MINI_VLLM_METAL_GEMV_MAX_ROWS", DEFAULT_METAL_GEMV_MAX_ROWS)
+});
 
 // QMatMul wrapper adding tracing.
 #[derive(Debug, Clone)]
@@ -75,7 +82,7 @@ impl QMatMul {
     /// the input and output activations are converted, and Candle continues to multiply directly
     /// from its quantized weight storage.
     fn forward_cpu_f16_optimized(&self, input: &Tensor) -> Result<Option<Tensor>> {
-        if !ENABLE_CPU_F16_QMATMUL_VIA_F32
+        if !*ENABLE_CPU_F16_QMATMUL_VIA_F32
             || !input.device().is_cpu()
             || input.dtype() != DType::F16
         {
@@ -89,7 +96,7 @@ impl QMatMul {
     }
 
     /// Uses separate GEMV operations for small Metal inputs because Candle's quantized GEMM
-    /// kernel performs poorly at very small row counts. Returns `None` when the compile-time
+    /// kernel performs poorly at very small row counts. Returns `None` when the configured
     /// threshold is disabled, the input is not on Metal, or the regular GEMM path is preferable.
     fn forward_metal_rows_with_gemv(&self, input: &Tensor) -> Result<Option<Tensor>> {
         if !input.device().is_metal() {
@@ -105,7 +112,7 @@ impl QMatMul {
             _ => return Ok(None),
         };
         let row_count = input.dim(row_dim)?;
-        if row_count <= 1 || row_count > METAL_GEMV_MAX_ROWS {
+        if row_count <= 1 || row_count > *METAL_GEMV_MAX_ROWS {
             return Ok(None);
         }
 
@@ -400,7 +407,7 @@ impl TransformerBlock {
             request_full_k,
             request_full_v,
             dimensions,
-            ENABLE_CPU_GROUPED_QUERY_MATMUL,
+            *ENABLE_CPU_GROUPED_QUERY_MATMUL,
             &self.neg_inf,
         )
     }
@@ -413,7 +420,7 @@ impl TransformerBlock {
         cache: &mut dyn KvCache,
         request_q: &Tensor,
     ) -> Result<Option<Tensor>> {
-        if !request_q.device().is_cpu() || !ENABLE_CPU_PAGED_ATTENTION {
+        if !request_q.device().is_cpu() || !*ENABLE_CPU_PAGED_ATTENTION {
             return Ok(None);
         }
 
@@ -439,8 +446,8 @@ impl TransformerBlock {
             request_q,
             paged_cache_layout,
             dimensions,
-            ENABLE_CPU_GROUPED_QUERY_MATMUL,
-            ENABLE_CPU_PAGEWISE_VALUE_MATMUL,
+            *ENABLE_CPU_GROUPED_QUERY_MATMUL,
+            *ENABLE_CPU_PAGEWISE_VALUE_MATMUL,
             &self.neg_inf,
         )?))
     }
