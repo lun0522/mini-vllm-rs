@@ -4,22 +4,23 @@ Local inference is often constrained by memory capacity and bandwidth. Using
 F16 instead of F32 for activations and the KV cache halves their element size,
 which allows longer contexts or more concurrent requests within the same
 memory budget. F16 can also reduce the cost of bandwidth-bound computations
-and may make matmul faster when the backend has an optimized
-F16 kernel.
+and may make matmul faster when the backend has an optimized F16 kernel.
 
 We added configurable F32 and F16 activation types, then benchmarked CPU
 inference to determine whether F16 provides those benefits in practice. The
-initial implementation reduced memory use and accelerated the unquantized
-attention matmuls, but made the model substantially slower overall. Tracing
-identified Candle's F16-input quantized matmul as the bottleneck. We therefore
-tested a small workaround that converts F16 inputs to F32, uses Candle's
-optimized F32 quantized matmul, and converts the result back to F16.
+initial results revealed a substantial performance regression, which we
+investigated with operation-level tracing and addressed with a targeted
+workaround.
 
 **Scope:**
 
-The goal is not to implement a new quantized CPU kernel. We want a simple path
-that preserves most of F16's memory savings while keeping performance close to
-the existing F32 implementation.
+- The goal is not to implement a new quantized CPU kernel. We want a simple path
+  that preserves most of F16's memory savings while keeping performance close to
+  the existing F32 implementation.
+- We also keep the attention implementation fixed at contiguous attention,
+  grouped Q, and upfront full V. Finding the best implementation is out of scope
+  here and belongs in a separate
+  [CPU paged-attention benchmark](cpu_paged_attention.md).
 
 **Reproducibility:**
 
@@ -28,16 +29,19 @@ the existing F32 implementation.
 - Operating system: macOS 26.6.2.
 - Model: Qwen2.5 0.5B Instruct Q4_K_M, using a paged KV cache with 16 tokens per
   page.
-- Revisions: `mini-vllm-rs` based on `47a5bc2` and `mini-vllm-eval` based on
-  `6355b85`, including the activation-dtype benchmark changes in their working
-  trees.
+- Revisions:
+  [`mini-vllm-rs` `830ce6e`](https://github.com/lun0522/mini-vllm-rs/commit/830ce6e872cf10bc46f138371065c15b7a4d89a5)
+  and
+  [`mini-vllm-eval` `c8f85a2`](https://github.com/lun0522/mini-vllm-eval/commit/c8f85a2b32d75903df54994ed47f771ddb8fc782).
 - Attention implementation: contiguous attention, grouped Q, and upfront full
-  V. `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` were unset.
+  V.
+- `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` were unset.
 - Each server handled a 1-token warm-up, a 121-input-token request generating
   1 token, and a 1068-input-token request generating 1024 tokens. The maximum
   batched token count was 1024.
 - Overall latency, throughput, and RSS are the mean and sample standard
-  deviation from five runs without tracing.
+  deviation from 5 runs without tracing.
+- Operation-level timings come from 1 representative run with tracing enabled.
 
 ## Initial F16 Implementation
 
@@ -45,60 +49,72 @@ The first implementation uses F16 for runtime activations, dequantized token
 embeddings and normalization weights, model constants, and the KV cache. Model
 weights remain in their original GGUF quantized format.
 
-The benchmark gives F32 and F16 the same KV-cache token capacity. This requires
-128 MiB for F32 and 64 MiB for F16. During the long request, raw F16 reduced the
-peak RSS increase from **266.03 MiB** to **107.73 MiB**, a **59.5%** reduction.
+The benchmark gives F32 and F16 the same KV-cache token capacity, allocating
+128 MiB for F32 and 64 MiB for F16. During the long request, native F16 reduced
+the peak RSS increase from **268.28 MiB** to **107.79 MiB**, a **59.8%**
+reduction.
 
-F16 was nevertheless substantially slower in every overall performance
-measurement:
+### Overall Performance Regressed
 
-| Metric | F32 | F16 | F16 / F32 |
-|---|---:|---:|---:|
-| Small-prefill TTFT | 1601.78 ± 2.75 ms | 5526.66 ± 2.33 ms | 3.45x |
-| Large-prefill TTFT | 15363.52 ± 27.97 ms | 50293.72 ± 93.13 ms | 3.27x |
-| End-to-end latency | 45.009 ± 0.127 s | 112.532 ± 0.178 s | 2.50x |
-| Decode throughput | 34.51 ± 0.17 tok/s | 16.44 ± 0.03 tok/s | 0.48x |
-| Peak RSS increase | 266.03 ± 4.22 MiB | 107.73 ± 1.18 MiB | 0.40x |
+Native F16 was substantially slower in every overall performance metric:
+
+| Metric | F32 | Native F16 |
+|---|---:|---:|
+| Small-prefill TTFT | 1595.77 ± 15.52 ms | 5548.18 ± 46.32 ms |
+| Large-prefill TTFT | 15423.44 ± 153.73 ms | 50552.54 ± 415.10 ms |
+| Decode throughput | 34.32 ± 0.26 tok/s | 16.37 ± 0.07 tok/s |
+| End-to-end latency | 45.234 ± 0.378 s | 113.046 ± 0.626 s |
+| Peak RSS increase | 268.28 ± 2.70 MiB | 107.79 ± 0.92 MiB |
 
 Starting and absolute peak RSS varied substantially between processes, while
 the peak increase during the measured long request was stable. We therefore use
 the peak RSS increase for the memory comparison.
 
-### Attention Was Faster With F16
+### Attention Improved as Expected
 
-The trace shows that the large-prefill query-key and attention-value matmuls
-benefit from F16. These operations multiply unquantized tensors, so both
-operands use the activation dtype. KV-cache access and append operations are
-also faster with the smaller tensors.
+The representative trace shows that the large-prefill query-key and
+attention-value matmuls benefit from F16. These operations multiply
+unquantized tensors, so both operands use the activation dtype. KV-cache access
+and append operations are also faster with the smaller tensors.
 
-| Large-prefill attention span | F32 | F16 | F16 / F32 |
-|---|---:|---:|---:|
-| Q × K | 179.18 ± 2.35 ms | 85.64 ± 0.51 ms | 0.48x |
-| Attention × V | 195.58 ± 2.83 ms | 103.24 ± 1.35 ms | 0.53x |
-| KV-cache access | 1.74 ± 0.05 ms | 1.26 ± 0.02 ms | 0.73x |
-| KV-cache append | 4.88 ± 0.19 ms | 3.16 ± 0.12 ms | 0.65x |
-| Mask and softmax | 1218.50 ± 25.70 ms | 1391.94 ± 4.29 ms | 1.14x |
+| Large-prefill attention span | F32 | Native F16 |
+|---|---:|---:|
+| Q × K | 177.57 ms | 85.07 ms |
+| Attention × V | 194.40 ms | 103.35 ms |
+| KV-cache access | 1.793 ms | 1.286 ms |
+| KV-cache append | 4.713 ms | 3.209 ms |
+| Mask and softmax | 1147.02 ms | 1392.12 ms |
 
-The faster attention matmuls were too small to offset the regression elsewhere.
-The traced `qmatmul` spans cover multiplication of activations by quantized
-model weights. Comparing the same named large-prefill spans shows that each
-major quantized matmul was about three to four times slower with F16 inputs:
+Mask and softmax is the exception. Candle's CPU softmax uses a generic element
+loop. For F16, `half::f16::exp()` converts each value to F32 for the exponential
+and then back to F16. That conversion-heavy path is the likely cause of the
+**21.4%** regression.
 
-| Large-prefill `qmatmul` operation | F32 | F16 | F16 / F32 |
-|---|---:|---:|---:|
-| Attention key | 160.40 ± 0.23 ms | 488.50 ± 0.24 ms | 3.05x |
-| Attention query | 962.24 ± 13.50 ms | 3296.90 ± 28.67 ms | 3.43x |
-| Attention value | 102.48 ± 5.71 ms | 298.32 ± 0.30 ms | 2.91x |
-| Attention output | 946.89 ± 19.29 ms | 3300.86 ± 28.43 ms | 3.49x |
-| MLP gate | 4934.84 ± 32.15 ms | 17747.42 ± 54.00 ms | 3.60x |
-| MLP up | 4920.78 ± 57.42 ms | 17754.40 ± 31.24 ms | 3.61x |
-| MLP down | 882.29 ± 20.87 ms | 3328.60 ± 3.02 ms | 3.77x |
+We chose to accept the remaining F16 softmax cost, as its excess over F32 is
+about 1.6% of F16-QMatMul large-prefill latency and 0.74 ms (2.6%) of a final
+decode step.
 
-The MLP gate and up projections contribute the most absolute time, which
-explains why the model is substantially slower even though Q × K and
-Attention × V are nearly twice as fast.
+### Quantized Matmul Was the Bottleneck
 
-## F16 Quantized Matmul Via F32
+The faster attention matmuls were too small to offset the regression. The
+traced `qmatmul` spans cover multiplication of activations by quantized model
+weights. The same large-prefill operations were three to four times slower
+with F16 inputs:
+
+| Large-prefill `qmatmul` operation | F32 | Native F16 |
+|---|---:|---:|
+| Attention key | 153.53 ms | 489.83 ms |
+| Attention query | 931.23 ms | 3282.11 ms |
+| Attention value | 98.23 ms | 300.15 ms |
+| Attention output | 924.97 ms | 3283.27 ms |
+| MLP gate | 4892.27 ms | 17714.60 ms |
+| MLP up | 4920.87 ms | 17723.80 ms |
+| MLP down | 981.71 ms | 3326.83 ms |
+
+The large MLP projections dominate the forward pass, overwhelming the faster
+Q × K and Attention × V operations.
+
+## Why Native F16 Quantized Matmul Is Slow
 
 We checked Candle 0.11.0's source code, specifically `quantized/mod.rs` and
 `quantized/k_quants.rs`, and found that its CPU quantized-matmul dispatcher
@@ -117,6 +133,73 @@ match input.dtype() {
 }
 ```
 
+The F16 branch therefore misses the optimized eight-column kernel, see the
+[implementation details](#candle-f16-quantized-matmul-implementation).
+Implementing an equivalent optimized Q4 × F16 kernel in this project would be
+a much larger change.
+
+## F16 Quantized Matmul via F32
+
+Our workaround converts only the input activation from F16 to F32, invokes
+Candle's existing quantized matmul, and converts the output back to F16. The
+weights remain in the quantized format.
+
+The conversions become negligible for larger matmuls: multiplication is
+`O(m × n × k)`, while converting the input is `O(m × k)` and the output is
+`O(m × n)`.
+
+### Overall Performance Recovered
+
+The resulting overall metrics for F16-QMatMul relative to F32 are:
+
+![Overall F16-QMatMul metrics relative to F32](assets/cpu_activation_dtype_overall.svg)
+
+F16-QMatMul's peak RSS increase is 13.70 MiB higher than native F16, likely
+because the workaround temporarily holds full F32 input and output tensors for
+each quantized matmul, while Candle's native F16 path allocates only temporary
+F32 vectors for individual activation rows. We accept this small temporary
+increase in exchange for the persistent memory savings from F16 activations and
+the KV cache.
+
+### Quantized Matmul Recovered
+
+The representative trace confirms that the workaround fixes the original
+bottleneck in large-prefill `qmatmul` spans with the same operation labels:
+
+![Large-prefill quantized matmul latency relative to F32](assets/cpu_activation_dtype_qmatmul.svg)
+
+- Native F16 is roughly 3–4× slower than F32.
+- F16-QMatMul is within 0–10% of F32.
+
+### F16 Attention Was Preserved
+
+The workaround applies only to quantized matmul. Attention continues to operate
+directly on F16 activations:
+
+![Attention latency for F16-QMatMul relative to native F16](assets/cpu_activation_dtype_attention.svg)
+
+- Q × K and Attention × V remain effectively unchanged from native F16.
+- Cache, mask, and softmax operations show no material regression from native
+  F16.
+
+Exact timings and the small differences are listed in the
+[attention timings appendix](#attention-timings).
+
+## Conclusions
+
+1. Native F16 cuts the measured peak RSS increase by **59.8%** and accelerates
+   unquantized attention, but Candle's F16 quantized matmul makes inference
+   substantially slower overall.
+2. Routing F16 quantized matmul through Candle's optimized F32 path restores
+   approximately F32 performance without materializing a dequantized copy of
+   the model weights.
+3. The workaround retains a **54.7%** lower peak RSS increase than F32. A custom
+   Q4 × F16 kernel is not justified by the remaining performance difference.
+
+## Appendix
+
+### Candle F16 Quantized-Matmul Implementation
+
 The specialized F32 path repacks Q4_K weights in eight-column groups, converts
 each F32 activation row to Q8_K once, and evaluates eight output columns at a
 time with an AArch64 dot-product kernel. The generic F16 implementation instead
@@ -132,101 +215,72 @@ for output_column in output_columns {
 }
 ```
 
-This explains why F16 does not benefit from the optimized eight-column kernel
-on this CPU. Implementing and maintaining another architecture-specific
-quantized kernel in this project would be a much larger change.
-
-The workaround converts only the input activation from F16 to F32, invokes
-Candle's existing quantized matmul, and converts the output back to F16. The
-weights remain quantized throughout; it does not retain an F32 or F16 copy of
-the weight matrices. The activation conversion is small compared with the matmul
-and lets us reuse Candle's optimized kernel.
-
 ### Overall Results
 
-The "F16-QMatMul" column corresponds to the matmul via F32 workaround:
-
-| Metric | F32 | F16 | F16-QMatMul |
+| Metric | F32 | Native F16 | F16-QMatMul |
 |---|---:|---:|---:|
-| Small-prefill TTFT | 1601.78 ± 2.75 ms | 5526.66 ± 2.33 ms | 1649.62 ± 52.08 ms |
-| Large-prefill TTFT | 15363.52 ± 27.97 ms | 50293.72 ± 93.13 ms | 15746.92 ± 83.21 ms |
-| End-to-end latency | 45.009 ± 0.127 s | 112.532 ± 0.178 s | 45.210 ± 0.530 s |
-| Decode throughput | 34.51 ± 0.17 tok/s | 16.44 ± 0.03 tok/s | 34.73 ± 0.53 tok/s |
-| Peak RSS increase | 266.03 ± 4.22 MiB | 107.73 ± 1.18 MiB | 121.54 ± 0.65 MiB |
+| Small-prefill TTFT | 1595.77 ± 15.52 ms | 5548.18 ± 46.32 ms | 1632.16 ± 57.65 ms |
+| Large-prefill TTFT | 15423.44 ± 153.73 ms | 50552.54 ± 415.10 ms | 15798.24 ± 220.32 ms |
+| Decode throughput | 34.32 ± 0.26 tok/s | 16.37 ± 0.07 tok/s | 34.75 ± 0.11 tok/s |
+| End-to-end latency | 45.234 ± 0.378 s | 113.046 ± 0.626 s | 45.236 ± 0.290 s |
+| Peak RSS increase | 268.28 ± 2.70 MiB | 107.79 ± 0.92 MiB | 121.49 ± 1.74 MiB |
 
-Compared with F32, F16-QMatMul is:
+- One 1732.02 ms F16-QMatMul small-prefill outlier increased both the mean and
+  standard deviation. The other 4 measurements were between 1597.48 and
+  1631.98 ms.
 
-- **2.5%** slower for large-prefill TTFT.
-- **0.4%** slower end-to-end.
-- Effectively tied for decode throughput.
-- **54.3%** lower in peak RSS increase.
-- **3.0%** slower on average for small-prefill TTFT. One 1742.72 ms outlier
-  increased both the mean and standard deviation; the other four measurements
-  were between 1624.22 and 1629.00 ms, about 1–2% slower than F32.
+### Large-Prefill Quantized Matmul Timings
 
-### Quantized Matmul Trace
-
-The traced aggregate confirms that the workaround fixes the original
-bottleneck in the same named large-prefill `qmatmul` spans:
-
-| Large-prefill `qmatmul` operation | F32 | F16 | F16-QMatMul | F16-QMatMul / F32 |
+| `qmatmul` operation | F32 | Native F16 | F16-QMatMul | F16-QMatMul / F32 |
 |---|---:|---:|---:|---:|
-| Attention key | 160.40 ± 0.23 ms | 488.50 ± 0.24 ms | 184.39 ± 29.20 ms | 1.15x |
-| Attention query | 962.24 ± 13.50 ms | 3296.90 ± 28.67 ms | 1001.34 ± 54.81 ms | 1.04x |
-| Attention value | 102.48 ± 5.71 ms | 298.32 ± 0.30 ms | 111.88 ± 5.81 ms | 1.09x |
-| Attention output | 946.89 ± 19.29 ms | 3300.86 ± 28.43 ms | 983.59 ± 53.65 ms | 1.04x |
-| MLP gate | 4934.84 ± 32.15 ms | 17747.42 ± 54.00 ms | 5020.18 ± 174.89 ms | 1.02x |
-| MLP up | 4920.78 ± 57.42 ms | 17754.40 ± 31.24 ms | 5032.51 ± 209.36 ms | 1.02x |
-| MLP down | 882.29 ± 20.87 ms | 3328.60 ± 3.02 ms | 951.84 ± 49.25 ms | 1.08x |
+| Attention key | 153.53 ms | 489.83 ms | 160.75 ms | 1.05× |
+| Attention query | 931.23 ms | 3282.11 ms | 952.61 ms | 1.02× |
+| Attention value | 98.23 ms | 300.15 ms | 108.04 ms | 1.10× |
+| Attention output | 924.97 ms | 3283.27 ms | 963.02 ms | 1.04× |
+| MLP gate | 4892.27 ms | 17714.60 ms | 4957.78 ms | 1.01× |
+| MLP up | 4920.87 ms | 17723.80 ms | 4960.48 ms | 1.01× |
+| MLP down | 981.71 ms | 3326.83 ms | 985.71 ms | 1.00× |
 
-The optimized spans are generally within a few percent of F32. Smaller
-operations show more relative overhead because activation conversion is a
-larger fraction of their execution time, but their absolute contribution is
-small.
+- The optimized spans are generally within a few percent of F32.
+- Smaller operations have more relative conversion overhead, but their absolute
+  contribution is small.
 
-The workaround applies only to quantized matmul. Attention spans that continue
-to operate directly on F16 activations remain close to the native F16 path in
-the short prefill, large prefill, and final long-context decode:
+### Attention Timings
 
-| Phase | Attention span | F32 | F16 | F16-QMatMul | F16-QMatMul / F16 |
-|---|---|---:|---:|---:|---:|
-| Short prefill | Q × K | 6.66 ± 0.39 ms | 5.61 ± 0.09 ms | 5.61 ± 0.05 ms | 1.00x |
-| Short prefill | Attention × V | 6.14 ± 0.14 ms | 5.11 ± 0.32 ms | 5.06 ± 0.08 ms | 0.99x |
-| Short prefill | KV-cache access | 0.342 ± 0.024 ms | 0.223 ± 0.010 ms | 0.228 ± 0.004 ms | 1.02x |
-| Short prefill | KV-cache append | 0.713 ± 0.071 ms | 0.447 ± 0.013 ms | 0.532 ± 0.027 ms | 1.19x |
-| Short prefill | Mask and softmax | 19.41 ± 0.13 ms | 22.58 ± 0.27 ms | 23.33 ± 0.15 ms | 1.03x |
-| Large prefill | Q × K | 179.18 ± 2.35 ms | 85.64 ± 0.51 ms | 85.73 ± 0.44 ms | 1.00x |
-| Large prefill | Attention × V | 195.58 ± 2.83 ms | 103.24 ± 1.35 ms | 105.24 ± 4.96 ms | 1.02x |
-| Large prefill | KV-cache access | 1.738 ± 0.053 ms | 1.263 ± 0.022 ms | 1.116 ± 0.028 ms | 0.88x |
-| Large prefill | KV-cache append | 4.881 ± 0.188 ms | 3.161 ± 0.119 ms | 3.219 ± 0.013 ms | 1.02x |
-| Large prefill | Mask and softmax | 1218.50 ± 25.70 ms | 1391.94 ± 4.29 ms | 1467.90 ± 12.88 ms | 1.05x |
-| Final decode | Q × K | 4.12 ± 0.17 ms | 4.28 ± 0.46 ms | 4.01 ± 0.09 ms | 0.94x |
-| Final decode | Attention × V | 1.61 ± 0.01 ms | 1.35 ± 0.01 ms | 1.36 ± 0.02 ms | 1.01x |
-| Final decode | KV-cache access | 4.190 ± 0.102 ms | 2.966 ± 0.063 ms | 3.040 ± 0.074 ms | 1.03x |
-| Final decode | KV-cache append | 0.042 ± 0.005 ms | 0.034 ± 0.002 ms | 0.038 ± 0.004 ms | 1.12x |
-| Final decode | Mask and softmax | 3.88 ± 0.03 ms | 4.62 ± 0.16 ms | 4.69 ± 0.10 ms | 1.02x |
+#### Short Prefill
 
-Q × K and Attention × V remain effectively unchanged from native F16 in all
-three phases. Most cache and mask differences are also small. Short-prefill and
-final-decode KV-cache append are 19% and 12% slower respectively, but the
-absolute increases are only 0.09 ms and 0.004 ms. Large-prefill mask and
-softmax has the largest absolute regression at 5.5%, or 75.96 ms. That span is
-not routed through the workaround, and the increase is about 0.5% of the full
-large-prefill forward, so it does not materially change the overall result.
+| Attention span | F32 | Native F16 | F16-QMatMul | F16-QMatMul / Native F16 |
+|---|---:|---:|---:|---:|
+| Q × K | 6.681 ms | 5.403 ms | 5.158 ms | 0.95× |
+| Attention × V | 6.548 ms | 5.362 ms | 5.113 ms | 0.95× |
+| KV-cache access | 0.338 ms | 0.230 ms | 0.247 ms | 1.07× |
+| KV-cache append | 0.730 ms | 0.443 ms | 0.488 ms | 1.10× |
+| Mask and softmax | 18.431 ms | 22.222 ms | 22.451 ms | 1.01× |
 
-## Conclusions
+#### Large Prefill
 
-1. Simply changing CPU activations to F16 is not sufficient. It reduces the
-   measured peak RSS increase by **59.5%** and makes large attention matmuls
-   roughly twice as fast, but Candle's native F16 quantized matmul makes small
-   prefill **3.45x** slower, large prefill **3.27x** slower, and end-to-end
-   generation **2.50x** slower.
-2. Routing F16 quantized matmul through Candle's optimized F32 path recovers
-   nearly all F32 performance without implementing a new kernel. End-to-end
-   latency is within **0.4%**, and decode throughput is effectively unchanged.
-3. The workaround retains most of the memory benefit because model weights stay
-   quantized and the persistent activations and KV cache remain F16. Its peak
-   RSS increase is **121.54 MiB**, **54.3%** lower than F32.
-4. A native optimized Q4 × F16 kernel could remove the remaining activation
-   conversions, but the current performance difference is small enough that
-   maintaining a custom kernel is not justified by this benchmark.
+| Attention span | F32 | Native F16 | F16-QMatMul | F16-QMatMul / Native F16 |
+|---|---:|---:|---:|---:|
+| Q × K | 177.573 ms | 85.073 ms | 87.395 ms | 1.03× |
+| Attention × V | 194.404 ms | 103.352 ms | 104.861 ms | 1.01× |
+| KV-cache access | 1.793 ms | 1.286 ms | 1.274 ms | 0.99× |
+| KV-cache append | 4.713 ms | 3.209 ms | 3.189 ms | 0.99× |
+| Mask and softmax | 1147.020 ms | 1392.120 ms | 1398.950 ms | 1.00× |
+
+#### Final Decode
+
+| Attention span | F32 | Native F16 | F16-QMatMul | F16-QMatMul / Native F16 |
+|---|---:|---:|---:|---:|
+| Q × K | 4.308 ms | 4.122 ms | 3.840 ms | 0.93× |
+| Attention × V | 1.572 ms | 1.373 ms | 1.359 ms | 0.99× |
+| KV-cache access | 4.140 ms | 2.898 ms | 2.997 ms | 1.03× |
+| KV-cache append | 0.045 ms | 0.032 ms | 0.036 ms | 1.13× |
+| Mask and softmax | 3.713 ms | 4.759 ms | 4.452 ms | 0.94× |
+
+- Compared with native F16, F16-QMatMul makes short-prefill and final-decode
+  KV-cache append 10% and 13% slower, but the increases are only 0.045 ms and
+  0.004 ms.
+- The F16-QMatMul large-prefill mask-and-softmax span is 6.83 ms slower than
+  native F16, less than 0.1% of the complete large-prefill forward.
+- Overall, the attention spans show no material regression from native F16 to
+  F16-QMatMul.

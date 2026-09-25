@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="390" viewBox="0 0 960 390" role="img" aria-labelledby="title description">
+  <title id="title">Attention latency for F16-QMatMul relative to native F16</title>
+  <desc id="description">Across short prefill, large prefill, and final decode, attention operations remain close to native F16 performance.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
+    .title { font-size: 18px; font-weight: 600; }
+    .phase { font-size: 15px; font-weight: 600; }
+    .label { font-size: 13px; }
+    .tick { font-size: 11px; fill: #57606a; }
+    .value { font-size: 11px; font-weight: 600; }
+    .grid { stroke: #d0d7de; stroke-width: 1; }
+    .baseline { stroke: #57606a; stroke-width: 1.5; stroke-dasharray: 4 3; }
+    .stem { stroke: #8c959f; stroke-width: 2; }
+  </style>
+
+  <rect width="960" height="390" fill="#ffffff"/>
+  <text x="480" y="28" text-anchor="middle" class="title">Attention latency relative to native F16</text>
+
+  <text x="300" y="59" text-anchor="middle" class="phase">Short prefill</text>
+  <text x="550" y="59" text-anchor="middle" class="phase">Large prefill</text>
+  <text x="800" y="59" text-anchor="middle" class="phase">Final decode</text>
+
+  <!-- Each panel spans 0.8x to 1.2x. -->
+  <g>
+    <line x1="270" y1="75" x2="270" y2="315" class="grid"/>
+    <line x1="330" y1="75" x2="330" y2="315" class="baseline"/>
+    <line x1="390" y1="75" x2="390" y2="315" class="grid"/>
+
+    <line x1="520" y1="75" x2="520" y2="315" class="grid"/>
+    <line x1="580" y1="75" x2="580" y2="315" class="baseline"/>
+    <line x1="640" y1="75" x2="640" y2="315" class="grid"/>
+
+    <line x1="770" y1="75" x2="770" y2="315" class="grid"/>
+    <line x1="830" y1="75" x2="830" y2="315" class="baseline"/>
+    <line x1="890" y1="75" x2="890" y2="315" class="grid"/>
+  </g>
+
+  <text x="195" y="103" text-anchor="end" class="label">Q × K</text>
+  <text x="195" y="153" text-anchor="end" class="label">Attention × V</text>
+  <text x="195" y="203" text-anchor="end" class="label">KV-cache access</text>
+  <text x="195" y="253" text-anchor="end" class="label">KV-cache append</text>
+  <text x="195" y="303" text-anchor="end" class="label">Mask and softmax</text>
+
+  <!-- Short prefill: 0.95, 0.95, 1.07, 1.10, 1.01. -->
+  <line x1="300" y1="99" x2="330" y2="99" class="stem"/><circle cx="300" cy="99" r="6" fill="#2563eb"/><text x="290" y="91" text-anchor="middle" class="value">0.95×</text>
+  <line x1="300" y1="149" x2="330" y2="149" class="stem"/><circle cx="300" cy="149" r="6" fill="#2563eb"/><text x="290" y="141" text-anchor="middle" class="value">0.95×</text>
+  <line x1="330" y1="199" x2="372" y2="199" class="stem"/><circle cx="372" cy="199" r="6" fill="#2563eb"/><text x="382" y="191" text-anchor="middle" class="value">1.07×</text>
+  <line x1="330" y1="249" x2="390" y2="249" class="stem"/><circle cx="390" cy="249" r="6" fill="#2563eb"/><text x="400" y="241" text-anchor="middle" class="value">1.10×</text>
+  <line x1="330" y1="299" x2="336" y2="299" class="stem"/><circle cx="336" cy="299" r="6" fill="#2563eb"/><text x="346" y="291" text-anchor="middle" class="value">1.01×</text>
+
+  <!-- Large prefill: 1.03, 1.01, 0.99, 0.99, 1.00. -->
+  <line x1="580" y1="99" x2="598" y2="99" class="stem"/><circle cx="598" cy="99" r="6" fill="#2563eb"/><text x="608" y="91" text-anchor="middle" class="value">1.03×</text>
+  <line x1="580" y1="149" x2="586" y2="149" class="stem"/><circle cx="586" cy="149" r="6" fill="#2563eb"/><text x="596" y="141" text-anchor="middle" class="value">1.01×</text>
+  <line x1="574" y1="199" x2="580" y2="199" class="stem"/><circle cx="574" cy="199" r="6" fill="#2563eb"/><text x="564" y="191" text-anchor="middle" class="value">0.99×</text>
+  <line x1="574" y1="249" x2="580" y2="249" class="stem"/><circle cx="574" cy="249" r="6" fill="#2563eb"/><text x="564" y="241" text-anchor="middle" class="value">0.99×</text>
+  <circle cx="580" cy="299" r="6" fill="#2563eb"/><text x="590" y="291" text-anchor="middle" class="value">1.00×</text>
+
+  <!-- Final decode: 0.93, 0.99, 1.03, 1.13, 0.94. -->
+  <line x1="788" y1="99" x2="830" y2="99" class="stem"/><circle cx="788" cy="99" r="6" fill="#2563eb"/><text x="778" y="91" text-anchor="middle" class="value">0.93×</text>
+  <line x1="824" y1="149" x2="830" y2="149" class="stem"/><circle cx="824" cy="149" r="6" fill="#2563eb"/><text x="814" y="141" text-anchor="middle" class="value">0.99×</text>
+  <line x1="830" y1="199" x2="848" y2="199" class="stem"/><circle cx="848" cy="199" r="6" fill="#2563eb"/><text x="858" y="191" text-anchor="middle" class="value">1.03×</text>
+  <line x1="830" y1="249" x2="908" y2="249" class="stem"/><circle cx="908" cy="249" r="6" fill="#2563eb"/><text x="918" y="241" text-anchor="middle" class="value">1.13×</text>
+  <line x1="794" y1="299" x2="830" y2="299" class="stem"/><circle cx="794" cy="299" r="6" fill="#2563eb"/><text x="784" y="291" text-anchor="middle" class="value">0.94×</text>
+
+  <g class="tick">
+    <text x="270" y="335" text-anchor="middle">0.9×</text><text x="330" y="335" text-anchor="middle">1.0×</text><text x="390" y="335" text-anchor="middle">1.1×</text>
+    <text x="520" y="335" text-anchor="middle">0.9×</text><text x="580" y="335" text-anchor="middle">1.0×</text><text x="640" y="335" text-anchor="middle">1.1×</text>
+    <text x="770" y="335" text-anchor="middle">0.9×</text><text x="830" y="335" text-anchor="middle">1.0×</text><text x="890" y="335" text-anchor="middle">1.1×</text>
+  </g>
+
+  <circle cx="360" cy="367" r="6" fill="#2563eb"/><text x="372" y="371" class="tick">F16-QMatMul</text>
+  <line x1="520" y1="367" x2="540" y2="367" class="baseline"/><text x="548" y="371" class="tick">Native F16 baseline</text>
+</svg>

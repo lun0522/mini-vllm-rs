@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="350" viewBox="0 0 900 350" role="img" aria-labelledby="title description">
+  <title id="title">Overall F16-QMatMul metrics relative to F32</title>
+  <desc id="description">F16-QMatMul is within two percent of F32 latency and throughput while its peak RSS increase is 45 percent of F32.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
+    .title { font-size: 18px; font-weight: 600; }
+    .subtitle { font-size: 12px; fill: #57606a; }
+    .label { font-size: 14px; }
+    .tick { font-size: 12px; fill: #57606a; }
+    .value { font-size: 12px; font-weight: 600; }
+    .grid { stroke: #d0d7de; stroke-width: 1; }
+    .baseline { stroke: #57606a; stroke-width: 1.5; stroke-dasharray: 4 3; }
+  </style>
+
+  <rect width="900" height="350" fill="#ffffff"/>
+  <text x="450" y="27" text-anchor="middle" class="title">Overall F16-QMatMul metrics relative to F32</text>
+  <text x="450" y="46" text-anchor="middle" class="subtitle">Lower is better for latency and RSS; higher is better for throughput</text>
+
+  <!-- Plot: x=250..810 maps 0x..1.2x. -->
+  <line x1="250" y1="60" x2="250" y2="292" class="grid"/>
+  <line x1="483" y1="60" x2="483" y2="292" class="grid"/>
+  <line x1="717" y1="60" x2="717" y2="292" class="baseline"/>
+  <line x1="810" y1="60" x2="810" y2="292" class="grid"/>
+
+  <text x="235" y="90" text-anchor="end" class="label">Small-prefill TTFT</text>
+  <rect x="250" y="73" width="477" height="22" rx="3" fill="#2563eb"/>
+  <text x="735" y="89" class="value">1.02×</text>
+
+  <text x="235" y="136" text-anchor="end" class="label">Large-prefill TTFT</text>
+  <rect x="250" y="119" width="478" height="22" rx="3" fill="#2563eb"/>
+  <text x="736" y="135" class="value">1.02×</text>
+
+  <text x="235" y="182" text-anchor="end" class="label">Decode throughput</text>
+  <rect x="250" y="165" width="473" height="22" rx="3" fill="#2563eb"/>
+  <text x="731" y="181" class="value">1.01×</text>
+
+  <text x="235" y="228" text-anchor="end" class="label">End-to-end latency</text>
+  <rect x="250" y="211" width="467" height="22" rx="3" fill="#2563eb"/>
+  <text x="725" y="227" class="value">1.00×</text>
+
+  <text x="235" y="274" text-anchor="end" class="label">Peak RSS increase</text>
+  <rect x="250" y="257" width="211" height="22" rx="3" fill="#2563eb"/>
+  <text x="469" y="273" class="value">0.45×</text>
+
+  <text x="250" y="313" text-anchor="middle" class="tick">0×</text>
+  <text x="483" y="313" text-anchor="middle" class="tick">0.5×</text>
+  <text x="717" y="313" text-anchor="middle" class="tick">1.0×</text>
+  <text x="810" y="313" text-anchor="middle" class="tick">1.2×</text>
+
+  <line x1="374" y1="334" x2="394" y2="334" class="baseline"/>
+  <text x="402" y="338" class="tick">F32 baseline</text>
+  <rect x="500" y="329" width="14" height="10" rx="2" fill="#2563eb"/>
+  <text x="522" y="338" class="tick">F16-QMatMul</text>
+</svg>

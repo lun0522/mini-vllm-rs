@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="440" viewBox="0 0 900 440" role="img" aria-labelledby="title description">
+  <title id="title">Large-prefill quantized matmul latency relative to F32</title>
+  <desc id="description">Native F16 takes approximately 3.1 to 3.6 times as long as F32, while F16-QMatMul takes approximately 1.0 to 1.1 times as long.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
+    .title { font-size: 18px; font-weight: 600; }
+    .label { font-size: 14px; }
+    .tick { font-size: 12px; fill: #57606a; }
+    .value { font-size: 12px; font-weight: 600; }
+    .grid { stroke: #d0d7de; stroke-width: 1; }
+    .baseline { stroke: #57606a; stroke-width: 1.5; stroke-dasharray: 4 3; }
+  </style>
+
+  <rect width="900" height="440" fill="#ffffff"/>
+  <text x="450" y="28" text-anchor="middle" class="title">Large-prefill quantized matmul latency relative to F32</text>
+
+  <!-- Plot: x=190..830 maps 0x..4x. -->
+  <line x1="190" y1="58" x2="190" y2="390" class="grid"/>
+  <line x1="350" y1="58" x2="350" y2="390" class="baseline"/>
+  <line x1="510" y1="58" x2="510" y2="390" class="grid"/>
+  <line x1="670" y1="58" x2="670" y2="390" class="grid"/>
+  <line x1="830" y1="58" x2="830" y2="390" class="grid"/>
+
+  <text x="190" y="410" text-anchor="middle" class="tick">0×</text>
+  <text x="350" y="410" text-anchor="middle" class="tick">1×</text>
+  <text x="510" y="410" text-anchor="middle" class="tick">2×</text>
+  <text x="670" y="410" text-anchor="middle" class="tick">3×</text>
+  <text x="830" y="410" text-anchor="middle" class="tick">4×</text>
+
+  <text x="180" y="83" text-anchor="end" class="label">Attention key</text>
+  <rect x="190" y="66" width="510.4" height="13" rx="2" fill="#d97706"/>
+  <rect x="190" y="82" width="168.0" height="13" rx="2" fill="#2563eb"/>
+  <text x="708" y="77" class="value">3.19×</text>
+  <text x="366" y="93" class="value">1.05×</text>
+
+  <text x="180" y="129" text-anchor="end" class="label">Attention query</text>
+  <rect x="190" y="112" width="563.2" height="13" rx="2" fill="#d97706"/>
+  <rect x="190" y="128" width="163.2" height="13" rx="2" fill="#2563eb"/>
+  <text x="761" y="123" class="value">3.52×</text>
+  <text x="361" y="139" class="value">1.02×</text>
+
+  <text x="180" y="175" text-anchor="end" class="label">Attention value</text>
+  <rect x="190" y="158" width="488.0" height="13" rx="2" fill="#d97706"/>
+  <rect x="190" y="174" width="176.0" height="13" rx="2" fill="#2563eb"/>
+  <text x="686" y="169" class="value">3.05×</text>
+  <text x="374" y="185" class="value">1.10×</text>
+
+  <text x="180" y="221" text-anchor="end" class="label">Attention output</text>
+  <rect x="190" y="204" width="568.0" height="13" rx="2" fill="#d97706"/>
+  <rect x="190" y="220" width="166.4" height="13" rx="2" fill="#2563eb"/>
+  <text x="766" y="215" class="value">3.55×</text>
+  <text x="364" y="231" class="value">1.04×</text>
+
+  <text x="180" y="267" text-anchor="end" class="label">MLP gate</text>
+  <rect x="190" y="250" width="579.2" height="13" rx="2" fill="#d97706"/>
+  <rect x="190" y="266" width="161.6" height="13" rx="2" fill="#2563eb"/>
+  <text x="777" y="261" class="value">3.62×</text>
+  <text x="360" y="277" class="value">1.01×</text>
+
+  <text x="180" y="313" text-anchor="end" class="label">MLP up</text>
+  <rect x="190" y="296" width="576.0" height="13" rx="2" fill="#d97706"/>
+  <rect x="190" y="312" width="161.6" height="13" rx="2" fill="#2563eb"/>
+  <text x="774" y="307" class="value">3.60×</text>
+  <text x="360" y="323" class="value">1.01×</text>
+
+  <text x="180" y="359" text-anchor="end" class="label">MLP down</text>
+  <rect x="190" y="342" width="542.4" height="13" rx="2" fill="#d97706"/>
+  <rect x="190" y="358" width="160.0" height="13" rx="2" fill="#2563eb"/>
+  <text x="740" y="353" class="value">3.39×</text>
+  <text x="358" y="369" class="value">1.00×</text>
+
+  <rect x="282" y="420" width="14" height="10" rx="2" fill="#d97706"/>
+  <text x="302" y="429" class="tick">Native F16</text>
+  <rect x="430" y="420" width="14" height="10" rx="2" fill="#2563eb"/>
+  <text x="450" y="429" class="tick">F16-QMatMul</text>
+  <line x1="586" y1="425" x2="606" y2="425" class="baseline"/>
+  <text x="612" y="429" class="tick">F32 baseline</text>
+</svg>
