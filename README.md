@@ -31,11 +31,22 @@ the flexible benchmarking harness separate lets `mini-vllm-rs` remain entirely
 in Rust for inference performance while Python handles experiment setup,
 measurement, and comparison.
 
-- [Metal GEMV threshold](benchmarks/metal_gemv_threshold.md): Measures the
-  initial continuous-batching implementation and the effect of the Metal GEMV
-  threshold.
-- [CPU paged attention](benchmarks/cpu_paged_attention_f32.md): Compares contiguous
-  and paged CPU attention using repeated KV, grouped Q, and page-wise V matmul.
+The reports follow the project's optimization path and are best read in this
+order:
+
+1. [Metal GEMV threshold](benchmarks/metal_gemv_threshold.md) starts with GPU
+   inference, measuring the initial continuous-batching implementation and
+   when Metal's GEMV path should replace quantized matmul.
+2. [CPU paged attention with F32 activations](benchmarks/cpu_paged_attention_f32.md)
+   then establishes the CPU attention baseline, comparing contiguous and paged
+   attention, repeated KV, grouped Q, and page-wise V matmul.
+3. [CPU activation dtype](benchmarks/cpu_activation_dtype.md) introduces F16 to
+   reduce activation and KV-cache memory, diagnoses Candle's slow native F16
+   quantized matmul, and recovers approximately F32 performance by routing it
+   through the optimized F32 path.
+4. [CPU paged attention with F16 activations](benchmarks/cpu_paged_attention_f16.md)
+   revisits the earlier attention choices under the new activation dtype and
+   verifies whether the best F32 implementation remains the best F16 default.
 
 ## Run
 
@@ -58,7 +69,7 @@ cargo run --release
   `4`.
 - `--inference-device <device>` selects `gpu`, `cpu`, or `mixed` and defaults to
   `gpu`. Mixed mode runs one CPU and one GPU backend concurrently.
-- `--activation-dtype <dtype>` selects `f16` or `f32` and defaults to `f32`. On
+- `--activation-dtype <dtype>` selects `f16` or `f32` and defaults to `f16`. On
   macOS, Candle's Metal quantized matmul does not support F16 activations, so
   GPU inference falls back to `f32` with a warning. In mixed mode on macOS, an
   `f16` request uses `f16` on the CPU backend and `f32` on the Metal backend.
@@ -146,8 +157,8 @@ the workload; more threads do not always improve throughput.
 
 #### CPU attention
 
-These defaults follow the results in the
-[CPU paged-attention benchmark](benchmarks/cpu_paged_attention_f32.md):
+These defaults follow the CPU results summarized in
+[Benchmarks](#benchmarks):
 
 - `MINI_VLLM_ENABLE_CPU_GROUPED_QUERY_MATMUL` groups query heads sharing a KV
   head instead of explicitly replicating K and V heads. It defaults to `true`.
@@ -172,12 +183,13 @@ cargo run --release -- --inference-device cpu --kv-cache-type paged:16
   Candle's optimized quantized matmul and converts the result back to F16,
   avoiding Candle's slower F16-input quantized kernel.
 
-This optimization defaults to `true` and can be disabled for benchmarking.
+This optimization defaults to `true` and can be disabled when reproducing the
+[benchmark comparisons](#benchmarks).
 
 #### Metal GEMV
 
-The default threshold follows the crossover measured in the
-[Metal GEMV threshold benchmark](benchmarks/metal_gemv_threshold.md):
+The default threshold follows the crossover summarized in
+[Benchmarks](#benchmarks):
 
 - `MINI_VLLM_METAL_GEMV_MAX_ROWS` uses separate GEMV operations for Metal
   inputs up to the configured row count. It defaults to `4`; set it to `0` to

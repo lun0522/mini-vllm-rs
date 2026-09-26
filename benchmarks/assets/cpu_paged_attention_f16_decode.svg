@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="610" viewBox="0 0 1400 610" role="img" aria-labelledby="title desc">
+  <title id="title">F32 and F16 decode throughput by CPU attention implementation</title>
+  <desc id="desc">Paired horizontal bars compare F32 and F16 decode throughput for six CPU attention implementations during the long request.</desc>
+  <rect width="1400" height="610" fill="#fff"/>
+  <g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" fill="#24292f">
+    <text x="700" y="42" text-anchor="middle" font-size="26" font-weight="700">Long-Request Decode Throughput</text>
+    <text x="700" y="70" text-anchor="middle" font-size="16" fill="#57606a">Higher is better · tokens per second</text>
+
+    <g stroke="#d8dee4" stroke-width="1">
+      <line x1="350" y1="105" x2="350" y2="510"/>
+      <line x1="550" y1="105" x2="550" y2="510"/>
+      <line x1="750" y1="105" x2="750" y2="510"/>
+      <line x1="950" y1="105" x2="950" y2="510"/>
+      <line x1="1150" y1="105" x2="1150" y2="510"/>
+    </g>
+    <g font-size="14" fill="#57606a" text-anchor="middle">
+      <text x="350" y="532">0</text>
+      <text x="550" y="532">10</text>
+      <text x="750" y="532">20</text>
+      <text x="950" y="532">30</text>
+      <text x="1150" y="532">40</text>
+    </g>
+
+    <g font-size="14" text-anchor="end">
+      <text x="330" y="143">Contiguous / Repeated KV / Upfront full V</text>
+      <text x="330" y="208">Contiguous / Grouped Q / Upfront full V</text>
+      <text x="330" y="273">Paged / Repeated KV / Concatenated V</text>
+      <text x="330" y="338">Paged / Repeated KV / Page-wise V</text>
+      <text x="330" y="403">Paged / Grouped Q / Concatenated V</text>
+      <text x="330" y="468">Paged / Grouped Q / Page-wise V</text>
+    </g>
+
+    <g fill="#6e7781">
+      <rect x="350" y="120" width="521.6" height="17" rx="3"/>
+      <rect x="350" y="185" width="688.6" height="17" rx="3"/>
+      <rect x="350" y="250" width="466.6" height="17" rx="3"/>
+      <rect x="350" y="315" width="420.2" height="17" rx="3"/>
+      <rect x="350" y="380" width="626.3" height="17" rx="3"/>
+      <rect x="350" y="445" width="536.8" height="17" rx="3"/>
+    </g>
+    <g fill="#2f6feb">
+      <rect x="350" y="140" width="626.1" height="17" rx="3"/>
+      <rect x="350" y="205" width="697.6" height="17" rx="3"/>
+      <rect x="350" y="270" width="553.0" height="17" rx="3"/>
+      <rect x="350" y="335" width="492.6" height="17" rx="3"/>
+      <rect x="350" y="400" width="614.3" height="17" rx="3"/>
+      <rect x="350" y="465" width="522.5" height="17" rx="3"/>
+    </g>
+    <g font-size="13" font-weight="600">
+      <text x="879" y="134">26.08</text><text x="984" y="154">31.30</text>
+      <text x="1046" y="199">34.43</text><text x="1055" y="219">34.88</text>
+      <text x="824" y="264">23.33</text><text x="911" y="284">27.65</text>
+      <text x="778" y="329">21.01</text><text x="850" y="349">24.63</text>
+      <text x="984" y="394">31.31</text><text x="972" y="414">30.71</text>
+      <text x="895" y="459">26.84</text><text x="881" y="479">26.13</text>
+    </g>
+
+    <g font-size="14" fill="#57606a">
+      <rect x="520" y="560" width="18" height="12" rx="2" fill="#6e7781"/>
+      <text x="546" y="571">F32</text>
+      <rect x="650" y="560" width="18" height="12" rx="2" fill="#2f6feb"/>
+      <text x="676" y="571">F16</text>
+      <text x="810" y="571">Decode throughput (tok/s)</text>
+    </g>
+  </g>
+</svg>

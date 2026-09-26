@@ -21,8 +21,8 @@
     </g>
 
     <g font-size="15" text-anchor="end">
-      <text x="330" y="133">Contiguous / Repeated KV / Full V</text>
-      <text x="330" y="198">Contiguous / Grouped Q / Full V</text>
+      <text x="330" y="133">Contiguous / Repeated KV / Upfront full V</text>
+      <text x="330" y="198">Contiguous / Grouped Q / Upfront full V</text>
       <text x="330" y="263">Paged / Repeated KV / Concatenated V</text>
       <text x="330" y="328">Paged / Repeated KV / Page-wise V</text>
       <text x="330" y="393">Paged / Grouped Q / Concatenated V</text>

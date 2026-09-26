@@ -34,7 +34,7 @@ pub(crate) struct MainProcessArgs {
     #[argh(option, default = "InferenceDevice::Gpu")]
     pub(crate) inference_device: InferenceDevice,
     /// data type used for model activations and KV caches
-    #[argh(option, default = "ActivationDType::F32")]
+    #[argh(option, default = "ActivationDType::F16")]
     pub(crate) activation_dtype: ActivationDType,
     /// KV cache implementation used for model inference
     #[argh(option, default = "KvCacheType::Contiguous")]
@@ -228,7 +228,7 @@ mod tests {
     fn selects_activation_dtype() {
         let default_args = MainProcessArgs::from_args(&["mini-vllm-rs"], &[])
             .expect("default arguments should parse");
-        assert_eq!(default_args.activation_dtype, ActivationDType::F32);
+        assert_eq!(default_args.activation_dtype, ActivationDType::F16);
 
         let f32_args =
             MainProcessArgs::from_args(&["mini-vllm-rs"], &["--activation-dtype", "f32"])
