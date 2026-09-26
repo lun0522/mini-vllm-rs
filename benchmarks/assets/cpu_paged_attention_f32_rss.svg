@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="570" viewBox="0 0 1200 570" role="img" aria-labelledby="title desc">
+  <title id="title">F32 peak RSS increase by CPU attention implementation</title>
+  <desc id="desc">Horizontal bars compare peak RSS increase after warm-up for six CPU attention implementations.</desc>
+  <rect width="1200" height="570" fill="#fff"/>
+  <g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" fill="#24292f">
+    <text x="600" y="42" text-anchor="middle" font-size="26" font-weight="700">F32 Peak RSS Increase</text>
+    <text x="600" y="70" text-anchor="middle" font-size="16" fill="#57606a">Lower is better · MiB after warm-up</text>
+
+    <g stroke="#d8dee4" stroke-width="1">
+      <line x1="350" y1="100" x2="350" y2="490"/>
+      <line x1="490" y1="100" x2="490" y2="490"/>
+      <line x1="630" y1="100" x2="630" y2="490"/>
+      <line x1="770" y1="100" x2="770" y2="490"/>
+      <line x1="910" y1="100" x2="910" y2="490"/>
+      <line x1="1050" y1="100" x2="1050" y2="490"/>
+    </g>
+    <g font-size="14" fill="#57606a" text-anchor="middle">
+      <text x="350" y="512">0</text><text x="490" y="512">30</text>
+      <text x="630" y="512">60</text><text x="770" y="512">90</text>
+      <text x="910" y="512">120</text><text x="1050" y="512">150</text>
+    </g>
+
+    <g font-size="15" text-anchor="end">
+      <text x="330" y="133">Contiguous / Repeated KV / Full V</text>
+      <text x="330" y="198">Contiguous / Grouped Q / Full V</text>
+      <text x="330" y="263">Paged / Repeated KV / Concatenated V</text>
+      <text x="330" y="328">Paged / Repeated KV / Page-wise V</text>
+      <text x="330" y="393">Paged / Grouped Q / Concatenated V</text>
+      <text x="330" y="458">Paged / Grouped Q / Page-wise V</text>
+    </g>
+
+    <g fill="#2f6feb">
+      <rect x="350" y="112" width="655.6" height="28" rx="3"/>
+      <rect x="350" y="177" width="69.3" height="28" rx="3"/>
+      <rect x="350" y="242" width="568.8" height="28" rx="3"/>
+      <rect x="350" y="307" width="73.1" height="28" rx="3"/>
+      <rect x="350" y="372" width="76.0" height="28" rx="3"/>
+      <rect x="350" y="437" width="74.8" height="28" rx="3"/>
+    </g>
+    <g font-size="14" font-weight="600">
+      <text x="1014" y="132">140.48</text>
+      <text x="427" y="197">14.86</text>
+      <text x="927" y="262">121.89</text>
+      <text x="431" y="327">15.66</text>
+      <text x="434" y="392">16.28</text>
+      <text x="433" y="457">16.02</text>
+    </g>
+    <text x="700" y="548" text-anchor="middle" font-size="14" fill="#57606a">Peak RSS increase (MiB)</text>
+  </g>
+</svg>

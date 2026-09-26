@@ -22,26 +22,19 @@ workaround.
   here and belongs in a separate
   [F16 CPU paged-attention benchmark](cpu_paged_attention_f16.md).
 
-**Reproducibility:**
+## Reproducibility
 
-- Hardware: Apple M2 with an 8-core CPU, 10-core GPU, and 16 GB of unified
-  memory.
-- Operating system: macOS 26.6.2.
-- Model: Qwen2.5 0.5B Instruct Q4_K_M, using a paged KV cache with 16 tokens per
-  page.
-- Revisions:
-  [`mini-vllm-rs` `830ce6e`](https://github.com/lun0522/mini-vllm-rs/commit/830ce6e872cf10bc46f138371065c15b7a4d89a5)
-  and
-  [`mini-vllm-eval` `c8f85a2`](https://github.com/lun0522/mini-vllm-eval/commit/c8f85a2b32d75903df54994ed47f771ddb8fc782).
-- Attention implementation: contiguous attention, grouped Q, and upfront full
-  V.
-- `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` were unset.
-- Each server handled a 1-token warm-up, a 121-input-token request generating
-  1 token, and a 1068-input-token request generating 1024 tokens. The maximum
-  batched token count was 1024.
-- Overall latency, throughput, and RSS are the mean and sample standard
-  deviation from 5 runs without tracing.
-- Operation-level timings come from 1 representative run with tracing enabled.
+| Item | Details |
+|---|---|
+| Hardware | Apple M2 with an 8-core CPU, 10-core GPU, and 16 GB of unified memory |
+| Operating system | macOS 26.6.2 |
+| Model | Qwen2.5 0.5B Instruct Q4_K_M, using a paged KV cache with 16 tokens per page |
+| Revisions | [`mini-vllm-rs` `830ce6e`](https://github.com/lun0522/mini-vllm-rs/commit/830ce6e872cf10bc46f138371065c15b7a4d89a5) and [`mini-vllm-eval` `c8f85a2`](https://github.com/lun0522/mini-vllm-eval/commit/c8f85a2b32d75903df54994ed47f771ddb8fc782) |
+| Procedure | Follow the `activation-dtype-benchmark` skill in the `mini-vllm-eval` repository |
+| Configuration | Contiguous attention, grouped Q, upfront full V, and a maximum batched token count of 1024 |
+| Workload | A 1-token warm-up; a 121-input-token request generating 1 token; and a 1068-input-token request generating 1024 tokens |
+| Measurements | Overall latency, throughput, and RSS are the mean and sample standard deviation from 5 untraced runs; operation-level timings come from 1 representative traced run |
+| Thread settings | `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` unset |
 
 ## Initial F16 Implementation
 

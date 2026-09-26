@@ -5,8 +5,9 @@ at contiguous attention, grouped Q, and upfront full V so it can isolate the
 effect of F16 activations. This benchmark instead fixes the activation dtype at
 F16 and finds the best CPU attention implementation.
 
-The earlier [CPU paged-attention benchmark](cpu_paged_attention.md) evaluated
-the same implementation choices with F32 activations. F16 halves the size of
+The earlier
+[F32 CPU paged-attention benchmark](cpu_paged_attention_f32.md) evaluated the
+same implementation choices with F32 activations. F16 halves the size of
 attention tensors and the KV cache, and its unquantized attention matmuls have
 different performance characteristics, so the best F32 configuration is not
 assumed to remain optimal.
@@ -19,6 +20,20 @@ assumed to remain optimal.
   available V-matmul strategies.
 - Select the best default from the existing implementations. New fused or
   architecture-specific attention kernels are out of scope.
+
+## Reproducibility
+
+| Item | Details |
+|---|---|
+| Hardware | Apple M2 with an 8-core CPU, 10-core GPU, and 16 GB of unified memory |
+| Operating system | macOS 26.6.2 |
+| Model | Qwen2.5 0.5B Instruct Q4_K_M, using a paged KV cache with 16 tokens per page |
+| Revisions | Not recorded; this report was drafted before the benchmark changes were committed |
+| Procedure | Follow the `cpu-paged-attention-benchmark` skill in the `mini-vllm-eval` repository |
+| Configuration | The six attention implementations below, a maximum batched token count of 1024, and F16 quantized matmul routed through Candle's optimized F32 path |
+| Workload | A 1-token warm-up; a 121-input-token request generating 1 token; and a 1068-input-token request generating 1024 tokens |
+| Measurements | Each F32 and F16 configuration was measured 5 times without tracing; results report the mean and sample standard deviation |
+| Thread settings | `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` unset |
 
 ## Implementations
 

@@ -13,32 +13,19 @@ generating **512 output tokens** per request.
 2. The attention kernels are not yet fully optimized. Each request currently
    executes self-attention sequentially and independently.
 
-**Reproducibility:**
+## Reproducibility
 
-- Hardware: Apple M2 with an 8-core CPU, 10-core GPU, and 16 GB of unified
-  memory.
-- Operating system: macOS 26.6.2.
-- Models: Qwen2.5 7B Instruct Q4_K_M as the target and Qwen2.5 0.5B Instruct
-  Q4_K_M as the speculative draft model. Target-only cases omit the draft.
-- Revisions: the two-request baseline and `MINI_VLLM_METAL_GEMV_MAX_ROWS=2`
-  comparison used
-  [`mini-vllm-rs` `49e72a8`](https://github.com/lun0522/mini-vllm-rs/commit/49e72a8cf1c8154292ba90620e19442f070b4f90).
-  The three-to-five-request threshold sweep used
-  [`mini-vllm-rs` `3efcfc2`](https://github.com/lun0522/mini-vllm-rs/commit/3efcfc27703edf0a73c7eb995f07865e7d7b926f).
-  Both used the benchmark harness based on
-  [`mini-vllm-eval` `0cdd38f`](https://github.com/lun0522/mini-vllm-eval/commit/0cdd38f2acf6cf3ec561b4ae74765d76fe421f37).
-- Harness entry point, run from the `mini-vllm-eval` repository:
-
-  ```shell
-  python3 main.py --benchmark concurrent_requests
-  ```
-
-  The benchmark cases selected CPU or GPU execution, sequential or batched
-  scheduling, request concurrency, and the Metal GEMV threshold shown in each
-  table.
-- Each configuration was measured once. `CANDLE_NUM_THREADS` and
-  `RAYON_NUM_THREADS` were unset, and no settings outside the benchmark cases
-  were changed.
+| Item | Details |
+|---|---|
+| Hardware | Apple M2 with an 8-core CPU, 10-core GPU, and 16 GB of unified memory |
+| Operating system | macOS 26.6.2 |
+| Model | Qwen2.5 7B Instruct Q4_K_M as the target and Qwen2.5 0.5B Instruct Q4_K_M as the speculative draft model; target-only cases omit the draft |
+| Revisions | The two-request baseline and `MINI_VLLM_METAL_GEMV_MAX_ROWS=2` comparison used [`mini-vllm-rs` `49e72a8`](https://github.com/lun0522/mini-vllm-rs/commit/49e72a8cf1c8154292ba90620e19442f070b4f90); the three-to-five-request threshold sweep used [`mini-vllm-rs` `3efcfc2`](https://github.com/lun0522/mini-vllm-rs/commit/3efcfc27703edf0a73c7eb995f07865e7d7b926f); both used the benchmark harness based on [`mini-vllm-eval` `0cdd38f`](https://github.com/lun0522/mini-vllm-eval/commit/0cdd38f2acf6cf3ec561b4ae74765d76fe421f37) |
+| Procedure | Run `python3 main.py --benchmark concurrent_requests` from the `mini-vllm-eval` repository |
+| Configuration | CPU or GPU execution, sequential or batched scheduling, request concurrency, and the Metal GEMV threshold shown in each table |
+| Workload | Concurrent-request cases containing two to five requests, as identified in the results tables |
+| Measurements | Each configuration was measured once; no settings outside the benchmark cases were changed |
+| Thread settings | `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` unset |
 
 ### CPU Backend
 

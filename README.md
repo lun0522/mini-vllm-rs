@@ -34,7 +34,7 @@ measurement, and comparison.
 - [Metal GEMV threshold](benchmarks/metal_gemv_threshold.md): Measures the
   initial continuous-batching implementation and the effect of the Metal GEMV
   threshold.
-- [CPU paged attention](benchmarks/cpu_paged_attention.md): Compares contiguous
+- [CPU paged attention](benchmarks/cpu_paged_attention_f32.md): Compares contiguous
   and paged CPU attention using repeated KV, grouped Q, and page-wise V matmul.
 
 ## Run
@@ -147,7 +147,7 @@ the workload; more threads do not always improve throughput.
 #### CPU attention
 
 These defaults follow the results in the
-[CPU paged-attention benchmark](benchmarks/cpu_paged_attention.md):
+[CPU paged-attention benchmark](benchmarks/cpu_paged_attention_f32.md):
 
 - `MINI_VLLM_ENABLE_CPU_GROUPED_QUERY_MATMUL` groups query heads sharing a KV
   head instead of explicitly replicating K and V heads. It defaults to `true`.
