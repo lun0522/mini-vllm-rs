@@ -4,12 +4,14 @@ use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
 use crate::model_runner::SchedulerConfig;
 use crate::models::model_downloader::ModelArtifacts;
+use crate::proto::inference_config::DraftModelRunnerConfig;
 use crate::proto::model_runner::model_runner_command::Command::Shutdown as ShutdownCommand;
 use crate::proto::model_runner::model_runner_service_client::ModelRunnerServiceClient;
 use crate::proto::model_runner::ModelRunnerCommand;
 use crate::proto::model_runner::Shutdown;
 use crate::utils::child_process::ChildProcess;
 use crate::utils::domain_socket;
+use crate::utils::textproto::format_textproto;
 use anyhow::Context;
 use anyhow::Result;
 use log::error;
@@ -30,11 +32,11 @@ pub(crate) struct ModelRunnerProcess {
 }
 
 pub(crate) struct ModelRunnerProcessConfig {
-    pub(crate) draft_token_count: usize,
     pub(crate) inference_device: InferenceDevice,
     pub(crate) activation_dtype: ActivationDType,
     pub(crate) kv_cache_type: KvCacheType,
     pub(crate) target_kv_cache_size_bytes: usize,
+    pub(crate) draft_model_runner_config: Option<DraftModelRunnerConfig>,
     pub(crate) scheduler_config: SchedulerConfig,
     pub(crate) trace_directory: Option<PathBuf>,
 }
@@ -42,17 +44,11 @@ pub(crate) struct ModelRunnerProcessConfig {
 impl ModelRunnerProcess {
     pub(crate) async fn start(
         model_artifacts: &ModelArtifacts,
-        draft_model_artifacts: Option<&ModelArtifacts>,
         socket_path: PathBuf,
         config: ModelRunnerProcessConfig,
     ) -> Result<Self> {
         domain_socket::ensure_available(&socket_path, "model runner socket")?;
-        let mut child_process = spawn(
-            model_artifacts,
-            draft_model_artifacts,
-            &config,
-            &socket_path,
-        )?;
+        let mut child_process = spawn(model_artifacts, &config, &socket_path)?;
         let channel =
             match domain_socket::wait_for_server(&mut child_process, &socket_path, STARTUP_TIMEOUT)
                 .await
@@ -109,7 +105,6 @@ impl Drop for ModelRunnerProcess {
 
 fn spawn(
     model_artifacts: &ModelArtifacts,
-    draft_model_artifacts: Option<&ModelArtifacts>,
     config: &ModelRunnerProcessConfig,
     socket_path: &Path,
 ) -> Result<ChildProcess> {
@@ -120,8 +115,6 @@ fn spawn(
         .env(server::PROCESS_ENVIRONMENT_VARIABLE, "1")
         .arg("--model-path")
         .arg(&model_artifacts.gguf)
-        .arg("--draft-token-count")
-        .arg(config.draft_token_count.to_string())
         .arg("--inference-device")
         .arg(config.inference_device.cli_value())
         .arg("--activation-dtype")
@@ -139,10 +132,10 @@ fn spawn(
     if let Some(trace_directory) = &config.trace_directory {
         command.arg("--trace-directory").arg(trace_directory);
     }
-    if let Some(draft_model_artifacts) = draft_model_artifacts {
-        command
-            .arg("--draft-model-path")
-            .arg(&draft_model_artifacts.gguf);
+    if let Some(config) = &config.draft_model_runner_config {
+        let config = format_textproto(config, "inference_config.DraftModelRunnerConfig")
+            .map_err(anyhow::Error::msg)?;
+        command.arg("--draft-model-runner-config").arg(config);
     }
     let child = command
         .arg("--socket-path")

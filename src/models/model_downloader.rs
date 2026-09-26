@@ -1,5 +1,5 @@
 use crate::models::ModelRole;
-use crate::proto::model_config::ModelConfig;
+use crate::proto::inference_config::ModelConfig;
 use anyhow::Context;
 use anyhow::Result;
 use hf_hub::api::sync::Api;
@@ -17,9 +17,8 @@ pub(crate) struct ModelDownloader {
 }
 
 impl ModelDownloader {
-    pub(crate) fn new(model: ModelConfig, role: ModelRole) -> Result<Self> {
-        model.validate()?;
-        Ok(Self { model, role })
+    pub(crate) fn new(model: ModelConfig, role: ModelRole) -> Self {
+        Self { model, role }
     }
 
     /// Ensures the GGUF and tokenizer are present on disk and returns their paths.

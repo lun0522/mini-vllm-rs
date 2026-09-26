@@ -63,10 +63,10 @@ cargo run --release
 - `--model '<textproto>'` selects the target model. Set `model_id`,
   `model_filename`, and `tokenizer_id`; optionally set `model_revision`, which
   defaults to `main`.
-- `--draft-model '<textproto>'` loads a tokenizer-compatible draft model for
-  speculative decoding.
-- `--draft-token-count <count>` sets the maximum proposal length and defaults to
-  `4`.
+- `--draft-model '<textproto>'` loads a tokenizer-compatible draft model and
+  configures its speculative-decoding token-count policy. Set `model` to a
+  `ModelConfig` and `token_count_policy.fixed.draft_token_count` to the proposal
+  length.
 - `--inference-device <device>` selects `gpu`, `cpu`, or `mixed` and defaults to
   `gpu`. Mixed mode runs one CPU and one GPU backend concurrently.
 - `--activation-dtype <dtype>` selects `f16` or `f32` and defaults to `f16`. On
@@ -104,8 +104,7 @@ Run the default target with a tokenizer-compatible Qwen2.5 0.5B draft model:
 ```shell
 cargo run --release -- \
   --model 'model_id: "bartowski/Qwen2.5-7B-Instruct-GGUF" model_filename: "Qwen2.5-7B-Instruct-Q4_K_M.gguf" tokenizer_id: "Qwen/Qwen2.5-7B-Instruct"' \
-  --draft-model 'model_id: "bartowski/Qwen2.5-0.5B-Instruct-GGUF" model_filename: "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" tokenizer_id: "Qwen/Qwen2.5-7B-Instruct"' \
-  --draft-token-count 4
+  --draft-model 'model { model_id: "bartowski/Qwen2.5-0.5B-Instruct-GGUF" model_filename: "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" tokenizer_id: "Qwen/Qwen2.5-7B-Instruct" } token_count_policy { fixed { draft_token_count: 4 } }'
 ```
 
 Run Llama 3.1 8B with a tokenizer-compatible Llama 3.2 1B draft model and
@@ -115,8 +114,7 @@ Run Llama 3.1 8B with a tokenizer-compatible Llama 3.2 1B draft model and
 cargo run --release -- \
   --kv-cache-type paged:32 \
   --model 'model_id: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF" model_filename: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"' \
-  --draft-model 'model_id: "bartowski/Llama-3.2-1B-Instruct-GGUF" model_filename: "Llama-3.2-1B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"' \
-  --draft-token-count 4
+  --draft-model 'model { model_id: "bartowski/Llama-3.2-1B-Instruct-GGUF" model_filename: "Llama-3.2-1B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct" } token_count_policy { fixed { draft_token_count: 4 } }'
 ```
 
 Run Qwen2.5 0.5B on both CPU and Metal, with requests distributed between the

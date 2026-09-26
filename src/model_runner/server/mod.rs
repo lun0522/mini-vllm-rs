@@ -1,6 +1,7 @@
 use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::SchedulerConfig;
+use crate::proto::inference_config::DraftModelRunnerConfig as DraftModelRunnerConfigProto;
 use crate::proto::model_runner::model_runner_command;
 use crate::proto::model_runner::model_runner_service_server::ModelRunnerService;
 use crate::proto::model_runner::model_runner_service_server::ModelRunnerServiceServer;
@@ -38,6 +39,7 @@ mod text_generation;
 
 pub(crate) use cli::ModelRunnerProcessArgs;
 use inference_engine::InferenceEngine;
+use model_runner::DraftModelRunnerConfig;
 use model_runner::ModelRunner;
 use model_runner::ModelRunnerMetadata;
 
@@ -211,10 +213,14 @@ fn create_inference_backend(
     inference_device: InferenceDevice,
 ) -> Result<InferenceBackend> {
     let activation_dtype = normalize_activation_dtype(args.activation_dtype, inference_device);
+    let draft_model_config = args
+        .draft_model_runner_config
+        .as_ref()
+        .map(create_draft_model_config)
+        .transpose()?;
     let model_runner = ModelRunner::new(
         &args.model_path,
-        args.draft_model_path.as_deref(),
-        args.draft_token_count,
+        draft_model_config,
         inference_device,
         activation_dtype,
         args.kv_cache_type,
@@ -239,6 +245,22 @@ fn create_inference_backend(
         metadata,
         thread,
         request_sender,
+    })
+}
+
+fn create_draft_model_config(
+    config: &DraftModelRunnerConfigProto,
+) -> Result<DraftModelRunnerConfig> {
+    anyhow::ensure!(
+        !config.model_path.is_empty(),
+        "draft model runner configuration requires a model path"
+    );
+    let token_count_policy = config.token_count_policy.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("draft model runner configuration requires a token-count policy")
+    })?;
+    Ok(DraftModelRunnerConfig {
+        model_path: config.model_path.clone().into(),
+        draft_token_count: token_count_policy.draft_token_count()?,
     })
 }
 

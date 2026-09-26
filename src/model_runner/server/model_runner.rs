@@ -12,6 +12,7 @@ use anyhow::Result;
 use candle_core::Device;
 use log::info;
 use std::path::Path;
+use std::path::PathBuf;
 
 use super::kv_cache::create_kv_cache;
 use super::model_instance::ModelInstance;
@@ -22,18 +23,24 @@ pub(super) struct ModelRunnerMetadata {
     pub token_capacity: usize,
 }
 
+pub(super) struct DraftModelRunnerConfig {
+    pub(super) model_path: PathBuf,
+    // TODO: This will not store a static number.
+    pub(super) draft_token_count: usize,
+}
+
 /// Owns the loaded models and executes requests on the inference thread.
 pub(super) struct ModelRunner {
     target: ModelInstance,
     draft: Option<ModelInstance>,
+    // TODO: draft_token_count will not always be a fixed number.
     draft_token_count: usize,
 }
 
 impl ModelRunner {
     pub(super) fn new(
         model_path: &Path,
-        draft_model_path: Option<&Path>,
-        draft_token_count: usize,
+        draft_model_config: Option<DraftModelRunnerConfig>,
         inference_device: InferenceDevice,
         activation_dtype: ActivationDType,
         kv_cache_type: KvCacheType,
@@ -41,10 +48,13 @@ impl ModelRunner {
     ) -> Result<Self> {
         let device = Self::get_inference_device(inference_device)?;
         let loaded_model = LoadedModel::new(model_path, device, activation_dtype)?;
-        let loaded_draft_model = draft_model_path
-            .map(|draft_model_path| {
+        let draft_token_count = draft_model_config
+            .as_ref()
+            .map_or(0, |config| config.draft_token_count);
+        let loaded_draft_model = draft_model_config
+            .map(|config| {
                 LoadedModel::new(
-                    draft_model_path,
+                    &config.model_path,
                     loaded_model.device().clone(),
                     activation_dtype,
                 )

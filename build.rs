@@ -2,7 +2,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/model_runner.proto");
     println!("cargo:rerun-if-changed=proto/request_handler.proto");
     println!("cargo:rerun-if-changed=proto/main_process.proto");
-    println!("cargo:rerun-if-changed=proto/model_config.proto");
+    println!("cargo:rerun-if-changed=proto/inference_config.proto");
     let descriptor_path =
         std::path::PathBuf::from(std::env::var("OUT_DIR")?).join("file_descriptor_set.bin");
     tonic_build::configure()
@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .compile_protos(
             &[
-                "proto/model_config.proto",
+                "proto/inference_config.proto",
                 "proto/model_runner.proto",
                 "proto/request_handler.proto",
                 "proto/main_process.proto",

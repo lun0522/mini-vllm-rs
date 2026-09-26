@@ -2,52 +2,78 @@ use super::cli::MainProcessArgs;
 use super::server::ControlServer;
 use crate::model_runner::client::ModelRunnerProcess;
 use crate::model_runner::client::ModelRunnerProcessConfig;
+use crate::model_runner::SchedulerConfig;
+use crate::models::model_downloader::ModelArtifacts;
 use crate::models::model_downloader::ModelDownloader;
 use crate::models::ModelRole;
+use crate::proto::inference_config::DraftModelConfig;
+use crate::proto::inference_config::DraftModelRunnerConfig;
+use crate::proto::inference_config::ModelConfig;
 use crate::request_handler::client::RequestHandlerProcess;
 use anyhow::Context;
 use anyhow::Result;
 use log::error;
 use log::info;
+use std::path::PathBuf;
+
+struct DraftModelArtifacts {
+    config: DraftModelRunnerConfig,
+    tokenizer_path: PathBuf,
+}
 
 pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
+    args.validate()?;
     info!("Server configuration:\n{args}");
+    let MainProcessArgs {
+        model,
+        draft_model,
+        inference_device,
+        activation_dtype,
+        kv_cache_type,
+        target_kv_cache_size_bytes,
+        max_batched_token_count,
+        max_active_request_count,
+        scheduling_policy,
+        input_preprocessing_thread_count,
+        trace_directory,
+        request_socket,
+        control_socket,
+    } = args;
+    let model_artifacts = download_model(model, ModelRole::Target)?;
+    let (draft_model_runner_config, draft_tokenizer_path) = draft_model
+        .map(download_draft_model)
+        .transpose()?
+        .map(|draft_model| (draft_model.config, draft_model.tokenizer_path))
+        .unzip();
     let runtime_directory = tempfile::Builder::new()
         .prefix("mini-vllm-")
         .tempdir_in("/tmp")
         .context("failed to create the server runtime directory")?;
-    let scheduler_config = args.scheduler_config();
-    let model_downloader = ModelDownloader::new(args.model, ModelRole::Target)?;
-    let model_artifacts = model_downloader.download()?;
-    let draft_model_artifacts = args
-        .draft_model
-        .map(|model| ModelDownloader::new(model, ModelRole::Draft))
-        .transpose()?
-        .map(|downloader| downloader.download())
-        .transpose()?;
+    let scheduler_config = SchedulerConfig {
+        max_batched_token_count,
+        max_active_request_count,
+        scheduling_policy,
+    };
     let model_runner_process = ModelRunnerProcess::start(
         &model_artifacts,
-        draft_model_artifacts.as_ref(),
         runtime_directory.path().join("model-runner.sock"),
         ModelRunnerProcessConfig {
-            draft_token_count: args.draft_token_count,
-            inference_device: args.inference_device,
-            activation_dtype: args.activation_dtype,
-            kv_cache_type: args.kv_cache_type,
-            target_kv_cache_size_bytes: args.target_kv_cache_size_bytes,
+            inference_device,
+            activation_dtype,
+            kv_cache_type,
+            target_kv_cache_size_bytes,
+            draft_model_runner_config,
             scheduler_config,
-            trace_directory: args.trace_directory,
+            trace_directory,
         },
     )
     .await?;
     let request_handler_process = match RequestHandlerProcess::start(
         model_runner_process.socket_path(),
         &model_artifacts.tokenizer,
-        draft_model_artifacts
-            .as_ref()
-            .map(|artifacts| artifacts.tokenizer.as_path()),
-        args.input_preprocessing_thread_count,
-        args.request_socket,
+        draft_tokenizer_path.as_deref(),
+        input_preprocessing_thread_count,
+        request_socket,
     )
     .await
     {
@@ -60,12 +86,12 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
         }
     };
 
-    let control_server = ControlServer::bind(&args.control_socket)?;
+    let control_server = ControlServer::bind(&control_socket)?;
     let serving_result = async {
         info!(
             "Listening for local requests on {}. Send a shutdown command to {} or press Ctrl-C to stop.",
             request_handler_process.socket_path().display(),
-            args.control_socket.display(),
+            control_socket.display(),
         );
         tokio::select! {
             ctrl_c_result = tokio::signal::ctrl_c() => {
@@ -81,4 +107,34 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
     serving_result?;
     request_handler_shutdown?;
     model_runner_shutdown
+}
+
+fn download_draft_model(config: DraftModelConfig) -> Result<DraftModelArtifacts> {
+    let model = config
+        .model
+        .expect("validated draft model configuration should contain a model");
+    let token_count_policy = config
+        .token_count_policy
+        .expect("validated draft model configuration should contain a token-count policy");
+    let ModelArtifacts {
+        gguf: model_path,
+        tokenizer: tokenizer_path,
+    } = download_model(model, ModelRole::Draft)?;
+    let model_path = model_path.into_os_string().into_string().map_err(|path| {
+        anyhow::anyhow!(
+            "draft model path is not valid UTF-8: {}",
+            std::path::PathBuf::from(path).display()
+        )
+    })?;
+    Ok(DraftModelArtifacts {
+        config: DraftModelRunnerConfig {
+            model_path,
+            token_count_policy: Some(token_count_policy),
+        },
+        tokenizer_path,
+    })
+}
+
+fn download_model(config: ModelConfig, role: ModelRole) -> Result<ModelArtifacts> {
+    ModelDownloader::new(config, role).download()
 }

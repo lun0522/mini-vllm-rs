@@ -8,6 +8,12 @@ use tonic::transport::Channel;
 use tonic::transport::Endpoint;
 use tower::service_fn;
 
+#[allow(dead_code)]
+mod inference_config {
+    tonic::include_proto!("inference_config");
+}
+
+#[allow(dead_code)]
 mod model_runner {
     tonic::include_proto!("model_runner");
 }

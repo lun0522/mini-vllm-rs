@@ -1,22 +1,66 @@
 use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
-use crate::model_runner::SchedulerConfig;
 use crate::model_runner::SchedulingPolicy;
-use crate::proto::model_config::ModelConfig;
-use crate::utils::textproto::parse_textproto;
+use crate::proto::inference_config::DraftModelConfig;
+use crate::proto::inference_config::ModelConfig;
 use argh::FromArgs;
 use log::warn;
 use std::fmt;
 use std::path::PathBuf;
-use std::str::FromStr;
 use thousands::Separable;
 
-const DEFAULT_DRAFT_TOKEN_COUNT: usize = 4;
 const DEFAULT_TARGET_KV_CACHE_SIZE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_BATCHED_TOKEN_COUNT: usize = 512;
 const DEFAULT_MAX_ACTIVE_REQUEST_COUNT: usize = 4;
 const DEFAULT_INPUT_PREPROCESSING_THREAD_COUNT: usize = 4;
+
+impl ModelConfig {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.model_id.is_empty(), "model_id must not be empty");
+        anyhow::ensure!(
+            !self.model_filename.is_empty(),
+            "model_filename must not be empty"
+        );
+        anyhow::ensure!(
+            !self.tokenizer_id.is_empty(),
+            "tokenizer_id must not be empty"
+        );
+        anyhow::ensure!(
+            self.model_filename.to_ascii_lowercase().ends_with(".gguf"),
+            "model filename must identify a .gguf file"
+        );
+        Ok(())
+    }
+}
+
+impl DraftModelConfig {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        self.model
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("draft model configuration is missing a model"))?
+            .validate()?;
+        self.token_count_policy
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!("draft model configuration is missing a token-count policy")
+            })?
+            .draft_token_count()?;
+        Ok(())
+    }
+}
+
+impl fmt::Display for DraftModelConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let model = self.model.as_ref().ok_or(fmt::Error)?;
+        let token_count_policy = self.token_count_policy.as_ref().ok_or(fmt::Error)?;
+        writeln!(formatter, "Draft model: {}", model.model_id)?;
+        writeln!(formatter, "Draft GGUF file: {}", model.model_filename)?;
+        writeln!(formatter, "Draft tokenizer: {}", model.tokenizer_id)?;
+        writeln!(formatter, "Draft revision: {}", model.model_revision)?;
+        writeln!(formatter, "Draft token count policy: {token_count_policy}")
+    }
+}
 
 /// Runs text generation with a model from Hugging Face.
 #[derive(FromArgs)]
@@ -24,12 +68,9 @@ pub(crate) struct MainProcessArgs {
     /// textproto configuration for the target GGUF model
     #[argh(option, default = "default_model_config()")]
     pub(crate) model: ModelConfig,
-    /// textproto configuration for the speculative-decoding draft model
+    /// textproto configuration for the speculative-decoding draft model and token-count policy
     #[argh(option)]
-    pub(crate) draft_model: Option<ModelConfig>,
-    /// number of tokens proposed by the draft model per speculative decoding step
-    #[argh(option, default = "DEFAULT_DRAFT_TOKEN_COUNT")]
-    pub(crate) draft_token_count: usize,
+    pub(crate) draft_model: Option<DraftModelConfig>,
     /// device used for model inference
     #[argh(option, default = "InferenceDevice::Gpu")]
     pub(crate) inference_device: InferenceDevice,
@@ -71,12 +112,8 @@ impl fmt::Display for MainProcessArgs {
         writeln!(formatter, "GGUF file: {}", self.model.model_filename)?;
         writeln!(formatter, "Tokenizer: {}", self.model.tokenizer_id)?;
         writeln!(formatter, "Revision: {}", self.model.model_revision)?;
-        if let Some(model) = &self.draft_model {
-            writeln!(formatter, "Draft model: {}", model.model_id)?;
-            writeln!(formatter, "Draft GGUF file: {}", model.model_filename)?;
-            writeln!(formatter, "Draft tokenizer: {}", model.tokenizer_id)?;
-            writeln!(formatter, "Draft revision: {}", model.model_revision)?;
-            writeln!(formatter, "Draft token count: {}", self.draft_token_count)?;
+        if let Some(draft_model) = &self.draft_model {
+            write!(formatter, "{draft_model}")?;
         } else {
             writeln!(formatter, "Draft model: disabled")?;
         }
@@ -122,25 +159,17 @@ impl fmt::Display for MainProcessArgs {
     }
 }
 
-impl FromStr for ModelConfig {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        parse_textproto(value, "model_config.ModelConfig")
-    }
-}
-
 pub(crate) fn parse() -> MainProcessArgs {
     normalize(argh::from_env())
 }
 
 impl MainProcessArgs {
-    pub(crate) fn scheduler_config(&self) -> SchedulerConfig {
-        SchedulerConfig {
-            max_batched_token_count: self.max_batched_token_count,
-            max_active_request_count: self.max_active_request_count,
-            scheduling_policy: self.scheduling_policy,
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        self.model.validate()?;
+        if let Some(draft_model) = &self.draft_model {
+            draft_model.validate()?;
         }
+        Ok(())
     }
 }
 
@@ -194,11 +223,10 @@ fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
         args.model.model_revision = "main".to_owned();
     }
     if let Some(draft_model) = args.draft_model.as_mut() {
-        if draft_model.model_revision.is_empty() {
-            draft_model.model_revision = "main".to_owned();
-        }
-        if args.draft_token_count == 0 {
-            args.draft_token_count = DEFAULT_DRAFT_TOKEN_COUNT;
+        if let Some(model) = draft_model.model.as_mut() {
+            if model.model_revision.is_empty() {
+                model.model_revision = "main".to_owned();
+            }
         }
     }
     args
@@ -274,5 +302,31 @@ mod tests {
             .expect("default arguments should parse");
 
         assert_eq!(args.input_preprocessing_thread_count, 4);
+    }
+
+    #[test]
+    fn parses_a_draft_model_with_a_fixed_token_count_policy() {
+        let args = MainProcessArgs::from_args(
+            &["mini-vllm-rs"],
+            &[
+                "--draft-model",
+                "model { model_id: 'draft' model_filename: 'draft.gguf' tokenizer_id: 'tokenizer' } token_count_policy { fixed { draft_token_count: 6 } }",
+            ],
+        )
+        .expect("draft model configuration should parse");
+        let args = normalize(args);
+        let draft_model = args.draft_model.as_ref().unwrap();
+
+        assert!(args.validate().is_ok());
+        assert_eq!(draft_model.model.as_ref().unwrap().model_revision, "main");
+        assert_eq!(
+            draft_model
+                .token_count_policy
+                .as_ref()
+                .unwrap()
+                .draft_token_count()
+                .unwrap(),
+            6
+        );
     }
 }

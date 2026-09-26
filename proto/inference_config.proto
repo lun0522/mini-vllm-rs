@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package inference_config;
+
+// Identifies a GGUF model and the tokenizer used with it on Hugging Face.
+message ModelConfig {
+  // Hugging Face repository containing the GGUF file.
+  string model_id = 1;
+  // GGUF filename within the model repository.
+  string model_filename = 2;
+  // Hugging Face repository providing tokenizer.json.
+  string tokenizer_id = 3;
+  // Model repository branch, tag, or commit hash; defaults to main when empty.
+  string model_revision = 4;
+}
+
+// Configures the model and token-count policy used for speculative decoding.
+message DraftModelConfig {
+  // Hugging Face model and tokenizer used to produce draft tokens.
+  ModelConfig model = 1;
+  // Policy controlling the number of tokens proposed per decode step.
+  DraftTokenCountPolicy token_count_policy = 2;
+}
+
+// Configures a model-runner process with an already downloaded draft model.
+message DraftModelRunnerConfig {
+  // Local path to the draft model's GGUF file.
+  string model_path = 1;
+  // Policy controlling the number of tokens proposed per decode step.
+  DraftTokenCountPolicy token_count_policy = 2;
+}
+
+// Selects how many tokens the draft model proposes per speculative decode step.
+message DraftTokenCountPolicy {
+  oneof policy {
+    // Uses a constant proposal length.
+    FixedDraftTokenCountPolicy fixed = 1;
+  }
+}
+
+// Uses the same draft proposal length throughout a request.
+message FixedDraftTokenCountPolicy {
+  // Number of tokens proposed by the draft model per speculative decode step.
+  uint64 draft_token_count = 1;
+}

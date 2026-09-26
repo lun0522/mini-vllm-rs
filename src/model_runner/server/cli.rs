@@ -2,6 +2,7 @@ use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
 use crate::model_runner::SchedulingPolicy;
+use crate::proto::inference_config::DraftModelRunnerConfig;
 use argh::FromArgs;
 use std::path::PathBuf;
 
@@ -11,12 +12,9 @@ pub(crate) struct ModelRunnerProcessArgs {
     /// target GGUF model path
     #[argh(option)]
     pub(super) model_path: PathBuf,
-    /// draft GGUF model path
+    /// textproto draft model runner configuration
     #[argh(option)]
-    pub(super) draft_model_path: Option<PathBuf>,
-    /// number of tokens proposed by the draft model per speculative decoding step
-    #[argh(option)]
-    pub(super) draft_token_count: usize,
+    pub(super) draft_model_runner_config: Option<DraftModelRunnerConfig>,
     /// device used for model inference
     #[argh(option)]
     pub(super) inference_device: InferenceDevice,
