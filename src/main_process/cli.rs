@@ -2,7 +2,10 @@ use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
 use crate::model_runner::SchedulingPolicy;
+use crate::proto::inference_config::draft_token_count_policy::Policy;
 use crate::proto::inference_config::DraftModelConfig;
+use crate::proto::inference_config::DraftTokenCountPolicy;
+use crate::proto::inference_config::FixedDraftTokenCountPolicy;
 use crate::proto::inference_config::ModelConfig;
 use argh::FromArgs;
 use log::warn;
@@ -11,6 +14,7 @@ use std::path::PathBuf;
 use thousands::Separable;
 
 const DEFAULT_TARGET_KV_CACHE_SIZE_BYTES: usize = 2 * 1024 * 1024 * 1024;
+const DEFAULT_DRAFT_TOKEN_COUNT: u64 = 4;
 const DEFAULT_MAX_BATCHED_TOKEN_COUNT: usize = 512;
 const DEFAULT_MAX_ACTIVE_REQUEST_COUNT: usize = 4;
 const DEFAULT_INPUT_PREPROCESSING_THREAD_COUNT: usize = 4;
@@ -45,7 +49,7 @@ impl DraftModelConfig {
             .ok_or_else(|| {
                 anyhow::anyhow!("draft model configuration is missing a token-count policy")
             })?
-            .draft_token_count()?;
+            .validate()?;
         Ok(())
     }
 }
@@ -228,6 +232,17 @@ fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
                 model.model_revision = "main".to_owned();
             }
         }
+        if draft_model.token_count_policy.is_none() {
+            warn!(
+                "Draft token-count policy is missing; using a fixed draft token count of \
+                 {DEFAULT_DRAFT_TOKEN_COUNT}"
+            );
+            draft_model.token_count_policy = Some(DraftTokenCountPolicy {
+                policy: Some(Policy::Fixed(FixedDraftTokenCountPolicy {
+                    draft_token_count: DEFAULT_DRAFT_TOKEN_COUNT,
+                })),
+            });
+        }
     }
     args
 }
@@ -324,9 +339,58 @@ mod tests {
                 .token_count_policy
                 .as_ref()
                 .unwrap()
-                .draft_token_count()
-                .unwrap(),
+                .draft_token_count(),
             6
+        );
+    }
+
+    #[test]
+    fn defaults_a_missing_draft_token_count_policy() {
+        let args = MainProcessArgs::from_args(
+            &["mini-vllm-rs"],
+            &[
+                "--draft-model",
+                "model { model_id: 'draft' model_filename: 'draft.gguf' tokenizer_id: 'tokenizer' }",
+            ],
+        )
+        .expect("draft model configuration should parse");
+        let args = normalize(args);
+        let policy = args
+            .draft_model
+            .as_ref()
+            .unwrap()
+            .token_count_policy
+            .as_ref()
+            .unwrap();
+
+        assert!(args.validate().is_ok());
+        assert_eq!(
+            policy.draft_token_count(),
+            DEFAULT_DRAFT_TOKEN_COUNT as usize
+        );
+    }
+
+    #[test]
+    fn parses_a_draft_model_with_an_acceptance_rate_policy() {
+        let args = MainProcessArgs::from_args(
+            &["mini-vllm-rs"],
+            &[
+                "--draft-model",
+                "model { model_id: 'draft' model_filename: 'draft.gguf' tokenizer_id: 'tokenizer' } token_count_policy { acceptance_rate { initial_draft_token_count: 4 decrease_threshold: 0.4 increase_threshold: 0.8 minimum_draft_token_count: 1 maximum_draft_token_count: 8 } }",
+            ],
+        )
+        .expect("draft model configuration should parse");
+        let args = normalize(args);
+        let draft_model = args.draft_model.as_ref().unwrap();
+
+        assert!(args.validate().is_ok());
+        assert_eq!(
+            draft_model
+                .token_count_policy
+                .as_ref()
+                .unwrap()
+                .draft_token_count(),
+            4
         );
     }
 }

@@ -4,10 +4,12 @@ use crate::model_runner::KvCacheType;
 use crate::models::loaded_model::LoadedModel;
 use crate::models::ModelInfo;
 use crate::models::ModelRole;
+use crate::proto::inference_config::DraftTokenCountPolicy;
 use crate::proto::model_runner::GenerateTextRequest;
 use crate::proto::model_runner::GetModelMetadataResponse;
 use anyhow::bail;
 use anyhow::Context;
+use anyhow::Error;
 use anyhow::Result;
 use candle_core::Device;
 use log::info;
@@ -25,16 +27,18 @@ pub(super) struct ModelRunnerMetadata {
 
 pub(super) struct DraftModelRunnerConfig {
     pub(super) model_path: PathBuf,
-    // TODO: This will not store a static number.
-    pub(super) draft_token_count: usize,
+    pub(super) token_count_policy: DraftTokenCountPolicy,
+}
+
+struct DraftModel {
+    model: ModelInstance,
+    token_count_policy: DraftTokenCountPolicy,
 }
 
 /// Owns the loaded models and executes requests on the inference thread.
 pub(super) struct ModelRunner {
     target: ModelInstance,
-    draft: Option<ModelInstance>,
-    // TODO: draft_token_count will not always be a fixed number.
-    draft_token_count: usize,
+    draft: Option<DraftModel>,
 }
 
 impl ModelRunner {
@@ -48,16 +52,14 @@ impl ModelRunner {
     ) -> Result<Self> {
         let device = Self::get_inference_device(inference_device)?;
         let loaded_model = LoadedModel::new(model_path, device, activation_dtype)?;
-        let draft_token_count = draft_model_config
-            .as_ref()
-            .map_or(0, |config| config.draft_token_count);
         let loaded_draft_model = draft_model_config
             .map(|config| {
-                LoadedModel::new(
+                let model = LoadedModel::new(
                     &config.model_path,
                     loaded_model.device().clone(),
                     activation_dtype,
-                )
+                )?;
+                Ok::<_, Error>((model, config.token_count_policy))
             })
             .transpose()?;
         info!(
@@ -72,7 +74,7 @@ impl ModelRunner {
         )?;
         let target_kv_cache_token_capacity = target_kv_cache.token_capacity();
         let draft = loaded_draft_model
-            .map(|model| {
+            .map(|(model, token_count_policy)| {
                 let draft_kv_cache_size_bytes =
                     compute_kv_cache_size_bytes(model.info(), target_kv_cache_token_capacity)?;
                 let kv_cache = create_kv_cache(
@@ -81,19 +83,24 @@ impl ModelRunner {
                     ModelRole::Draft,
                     draft_kv_cache_size_bytes,
                 )?;
-                Ok::<_, anyhow::Error>(ModelInstance::new(model, kv_cache))
+                Ok::<_, Error>(DraftModel {
+                    model: ModelInstance::new(model, kv_cache),
+                    token_count_policy,
+                })
             })
             .transpose()?;
         Ok(Self {
             target: ModelInstance::new(loaded_model, target_kv_cache),
             draft,
-            draft_token_count,
         })
     }
 
     pub(super) fn metadata(&self) -> ModelRunnerMetadata {
         let target_model = self.target.model_metadata();
-        let draft_model = self.draft.as_ref().map(ModelInstance::model_metadata);
+        let draft_model = self
+            .draft
+            .as_ref()
+            .map(|draft| draft.model.model_metadata());
         ModelRunnerMetadata {
             model_metadata: GetModelMetadataResponse {
                 target_model: Some(target_model),
@@ -128,12 +135,15 @@ impl ModelRunner {
                 draft: self
                     .draft
                     .as_mut()
-                    .map(|draft| draft.restore_cached_prefix(request_id, input_prefix))
+                    .map(|draft| draft.model.restore_cached_prefix(request_id, input_prefix))
                     .transpose()?,
             };
             text_generation::RequestExecutionState::new(
                 request,
-                self.draft_token_count,
+                self.draft
+                    .as_ref()
+                    .map(|draft| draft.token_count_policy.draft_token_count())
+                    .unwrap_or(0),
                 prefill_initial_positions,
             )
         })() {
@@ -153,7 +163,10 @@ impl ModelRunner {
         &mut self,
         execution_batch: &mut text_generation::RequestExecutionBatch,
     ) -> Result<Vec<text_generation::GenerationStep>> {
-        execution_batch.run_steps(&mut self.target, self.draft.as_mut())
+        execution_batch.run_steps(
+            &mut self.target,
+            self.draft.as_mut().map(|draft| &mut draft.model),
+        )
     }
 
     pub(super) fn finish_request(
@@ -190,7 +203,7 @@ impl ModelRunner {
         let draft_result = self
             .draft
             .as_mut()
-            .map(|draft| draft.abort_request(request_id))
+            .map(|draft| draft.model.abort_request(request_id))
             .transpose();
         target_result?;
         draft_result?;
@@ -200,7 +213,7 @@ impl ModelRunner {
     fn prepare_model_instances(&mut self, request_id: u64) -> Result<()> {
         self.target.start_request(request_id)?;
         if let Some(draft) = &mut self.draft {
-            if let Err(error) = draft.start_request(request_id) {
+            if let Err(error) = draft.model.start_request(request_id) {
                 self.target.abort_request(request_id)?;
                 return Err(error);
             }
@@ -213,7 +226,7 @@ impl ModelRunner {
         let draft_result = self
             .draft
             .as_mut()
-            .map(|draft| draft.finish_request(request_id, token_ids))
+            .map(|draft| draft.model.finish_request(request_id, token_ids))
             .transpose();
         target_result?;
         draft_result?;

@@ -258,9 +258,10 @@ fn create_draft_model_config(
     let token_count_policy = config.token_count_policy.as_ref().ok_or_else(|| {
         anyhow::anyhow!("draft model runner configuration requires a token-count policy")
     })?;
+    token_count_policy.validate()?;
     Ok(DraftModelRunnerConfig {
         model_path: config.model_path.clone().into(),
-        draft_token_count: token_count_policy.draft_token_count()?,
+        token_count_policy: *token_count_policy,
     })
 }
 

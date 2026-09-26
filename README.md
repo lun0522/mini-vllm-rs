@@ -65,8 +65,11 @@ cargo run --release
   defaults to `main`.
 - `--draft-model '<textproto>'` loads a tokenizer-compatible draft model and
   configures its speculative-decoding token-count policy. Set `model` to a
-  `ModelConfig` and `token_count_policy.fixed.draft_token_count` to the proposal
-  length.
+  `ModelConfig` and select either a fixed or acceptance-rate token-count policy.
+  The fixed policy uses `token_count_policy.fixed.draft_token_count`. The
+  acceptance-rate policy configures an initial count, lower and upper bounds,
+  and decrease/increase thresholds under `token_count_policy.acceptance_rate`.
+  When omitted, the policy defaults to a fixed proposal length of `4`.
 - `--inference-device <device>` selects `gpu`, `cpu`, or `mixed` and defaults to
   `gpu`. Mixed mode runs one CPU and one GPU backend concurrently.
 - `--activation-dtype <dtype>` selects `f16` or `f32` and defaults to `f16`. On

@@ -35,6 +35,8 @@ message DraftTokenCountPolicy {
   oneof policy {
     // Uses a constant proposal length.
     FixedDraftTokenCountPolicy fixed = 1;
+    // Adjusts the proposal length based on the draft-token acceptance rate.
+    AcceptanceRateDraftTokenCountPolicy acceptance_rate = 2;
   }
 }
 
@@ -42,4 +44,18 @@ message DraftTokenCountPolicy {
 message FixedDraftTokenCountPolicy {
   // Number of tokens proposed by the draft model per speculative decode step.
   uint64 draft_token_count = 1;
+}
+
+// Adjusts the draft proposal length when its acceptance rate crosses a threshold.
+message AcceptanceRateDraftTokenCountPolicy {
+  // Proposal length used when a generation request starts.
+  uint64 initial_draft_token_count = 1;
+  // Acceptance rates below this value reduce the proposal length by one.
+  float decrease_threshold = 2;
+  // Acceptance rates above this value increase the proposal length by one.
+  float increase_threshold = 3;
+  // Smallest proposal length allowed by the policy.
+  uint64 minimum_draft_token_count = 4;
+  // Largest proposal length allowed by the policy.
+  uint64 maximum_draft_token_count = 5;
 }
