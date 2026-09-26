@@ -2,6 +2,7 @@ use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::SchedulerConfig;
 use crate::proto::inference_config::DraftModelRunnerConfig as DraftModelRunnerConfigProto;
+use crate::proto::inference_config::DraftTokenCountPolicy as DraftTokenCountPolicyProto;
 use crate::proto::model_runner::model_runner_command;
 use crate::proto::model_runner::model_runner_service_server::ModelRunnerService;
 use crate::proto::model_runner::model_runner_service_server::ModelRunnerServiceServer;
@@ -29,6 +30,7 @@ use tonic::Response;
 use tonic::Status;
 
 mod cli;
+mod draft_token_count;
 mod inference_engine;
 mod kv_cache;
 mod model_instance;
@@ -38,6 +40,7 @@ mod scheduler;
 mod text_generation;
 
 pub(crate) use cli::ModelRunnerProcessArgs;
+use draft_token_count::DraftTokenCountPolicy;
 use inference_engine::InferenceEngine;
 use model_runner::DraftModelRunnerConfig;
 use model_runner::ModelRunner;
@@ -255,13 +258,13 @@ fn create_draft_model_config(
         !config.model_path.is_empty(),
         "draft model runner configuration requires a model path"
     );
-    let token_count_policy = config.token_count_policy.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("draft model runner configuration requires a token-count policy")
-    })?;
-    token_count_policy.validate()?;
+    let token_count_policy_proto: &DraftTokenCountPolicyProto =
+        config.token_count_policy.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("draft model runner configuration requires a token-count policy")
+        })?;
     Ok(DraftModelRunnerConfig {
         model_path: config.model_path.clone().into(),
-        token_count_policy: *token_count_policy,
+        token_count_policy: DraftTokenCountPolicy::try_from(token_count_policy_proto)?,
     })
 }
 

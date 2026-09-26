@@ -15,6 +15,7 @@ use std::fmt;
 use std::time::Duration;
 use std::time::Instant;
 
+use super::draft_token_count::DraftTokenCountController;
 use super::model_instance::ModelInstance;
 
 #[derive(Debug)]
@@ -162,12 +163,40 @@ pub(super) struct DraftGenerationStats {
     pub(super) proposed_token_count: usize,
 }
 
+struct DraftTokenCountState {
+    controller: DraftTokenCountController,
+    accepted_token_count: usize,
+    proposed_token_count: usize,
+}
+
+impl DraftTokenCountState {
+    fn new(controller: DraftTokenCountController) -> Self {
+        Self {
+            controller,
+            accepted_token_count: 0,
+            proposed_token_count: 0,
+        }
+    }
+
+    fn record_verification(
+        &mut self,
+        accepted_token_count: usize,
+        proposed_token_count: usize,
+    ) -> Result<()> {
+        self.controller
+            .update(accepted_token_count, proposed_token_count)?;
+        self.accepted_token_count += accepted_token_count;
+        self.proposed_token_count += proposed_token_count;
+        Ok(())
+    }
+}
+
 /// Owns the generation progress and sampling state for one resumable request.
 pub(super) struct RequestExecutionState {
     request_id: u64,
     tokens: Vec<u32>,
     input_token_count: usize,
-    draft_token_count: usize,
+    draft_token_count_state: Option<DraftTokenCountState>,
     max_new_token_count: usize,
     repeat_last_n: usize,
     repeat_penalty: f32,
@@ -180,8 +209,6 @@ pub(super) struct RequestExecutionState {
     pending_output_token_ids: Vec<u32>,
     prefill_duration: Duration,
     decode_duration: Duration,
-    accepted_draft_token_count: usize,
-    proposed_draft_token_count: usize,
 }
 
 impl RequestExecutionState {
@@ -195,7 +222,7 @@ impl RequestExecutionState {
 
     pub(super) fn new(
         request: GenerateTextRequest,
-        draft_token_count: usize,
+        draft_token_count_controller: Option<DraftTokenCountController>,
         prefill_initial_positions: PrefillStartPositions,
     ) -> Result<Self> {
         ensure!(
@@ -204,6 +231,11 @@ impl RequestExecutionState {
         );
         let input_token_count = request.input_token_ids.len();
         validate_prefill_start_positions(input_token_count, prefill_initial_positions)?;
+        ensure!(
+            draft_token_count_controller.is_some() == prefill_initial_positions.draft.is_some(),
+            "draft token-count controller and draft prefill position must both be present or absent"
+        );
+
         let generation_phase =
             determine_initial_phase(input_token_count, prefill_initial_positions);
         let max_new_token_count = usize::try_from(request.max_new_tokens)
@@ -212,7 +244,7 @@ impl RequestExecutionState {
             request_id: request.request_id,
             tokens: request.input_token_ids,
             input_token_count,
-            draft_token_count,
+            draft_token_count_state: draft_token_count_controller.map(DraftTokenCountState::new),
             max_new_token_count,
             repeat_last_n: usize::try_from(request.repeat_last_n)
                 .context("repeat_last_n does not fit in usize")?,
@@ -226,8 +258,6 @@ impl RequestExecutionState {
             pending_output_token_ids: Vec::new(),
             prefill_duration: Duration::ZERO,
             decode_duration: Duration::ZERO,
-            accepted_draft_token_count: 0,
-            proposed_draft_token_count: 0,
         })
     }
 
@@ -348,7 +378,13 @@ impl RequestExecutionState {
         PreparedSpeculativeDecode {
             generated_token_count,
             original_cached_token_count: self.tokens.len() - 1,
-            maximum_draft_token_count: self.draft_token_count.min(remaining_max_token_count),
+            maximum_draft_token_count: self
+                .draft_token_count_state
+                .as_ref()
+                .expect("speculative decoding requires draft token-count state")
+                .controller
+                .draft_token_count()
+                .min(remaining_max_token_count),
             started_at: Instant::now(),
         }
     }
@@ -459,12 +495,14 @@ impl RequestExecutionState {
                 .context("output token count does not fit in u64")?,
             target_cached_token_count: self.prefill_initial_positions.target,
             draft_stats: self
-                .prefill_initial_positions
-                .draft
-                .map(|cached_token_count| DraftGenerationStats {
-                    cached_token_count,
-                    accepted_token_count: self.accepted_draft_token_count,
-                    proposed_token_count: self.proposed_draft_token_count,
+                .draft_token_count_state
+                .map(|state| DraftGenerationStats {
+                    cached_token_count: self
+                        .prefill_initial_positions
+                        .draft
+                        .expect("draft token-count state requires a draft prefill position"),
+                    accepted_token_count: state.accepted_token_count,
+                    proposed_token_count: state.proposed_token_count,
                 }),
             prefill_duration: self.prefill_duration,
             decode_duration: self.decode_duration,
@@ -489,8 +527,10 @@ impl RequestExecutionState {
             accepted_token_count,
             maybe_replacement_token,
         } = self.verify_draft_tokens(draft_tokens, verification_logits)?;
-        self.accepted_draft_token_count += accepted_token_count;
-        self.proposed_draft_token_count += draft_tokens.len();
+        self.draft_token_count_state
+            .as_mut()
+            .expect("speculative decoding requires draft token-count state")
+            .record_verification(accepted_token_count, draft_tokens.len())?;
 
         // Discard cache entries derived from rejected proposals and retain exactly the verified
         // input prefix needed for the next decode iteration.
@@ -1106,6 +1146,7 @@ fn validate_prefill_start_positions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_runner::server::draft_token_count::DraftTokenCountPolicy;
     use crate::model_runner::server::kv_cache::create_kv_cache;
     use crate::model_runner::KvCacheType;
     use crate::models::loaded_model::LoadedModel;
@@ -1218,7 +1259,11 @@ mod tests {
             request_id: 1,
             tokens,
             input_token_count,
-            draft_token_count: 4,
+            draft_token_count_state: Some(DraftTokenCountState::new(
+                DraftTokenCountController::new(DraftTokenCountPolicy::Fixed {
+                    draft_token_count: 4,
+                }),
+            )),
             max_new_token_count: 16,
             repeat_last_n: 64,
             repeat_penalty: 1.0,
@@ -1239,8 +1284,6 @@ mod tests {
             pending_output_token_ids: Vec::new(),
             prefill_duration: Duration::ZERO,
             decode_duration: Duration::ZERO,
-            accepted_draft_token_count: 0,
-            proposed_draft_token_count: 0,
         }
     }
 
@@ -1253,7 +1296,7 @@ mod tests {
                 max_new_tokens: 1,
                 ..Default::default()
             },
-            4,
+            None,
             PrefillStartPositions {
                 target: 2,
                 draft: None,
@@ -1278,7 +1321,11 @@ mod tests {
                 max_new_tokens: 1,
                 ..Default::default()
             },
-            4,
+            Some(DraftTokenCountController::new(
+                DraftTokenCountPolicy::Fixed {
+                    draft_token_count: 4,
+                },
+            )),
             PrefillStartPositions {
                 target: 3,
                 draft: Some(1),
@@ -1555,7 +1602,7 @@ mod tests {
                 max_new_tokens: 1,
                 ..Default::default()
             },
-            4,
+            None,
             PrefillStartPositions {
                 target: 3,
                 draft: None,
@@ -1579,7 +1626,11 @@ mod tests {
                 max_new_tokens: 1,
                 ..Default::default()
             },
-            4,
+            Some(DraftTokenCountController::new(
+                DraftTokenCountPolicy::Fixed {
+                    draft_token_count: 4,
+                },
+            )),
             PrefillStartPositions {
                 target: 0,
                 draft: Some(3),

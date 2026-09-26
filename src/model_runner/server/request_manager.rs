@@ -488,7 +488,7 @@ mod tests {
         requests.start_execution(7, |generate_text| {
             RequestExecutionState::new(
                 generate_text,
-                4,
+                None,
                 PrefillStartPositions {
                     target: 0,
                     draft: None,

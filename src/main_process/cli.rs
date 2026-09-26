@@ -251,6 +251,20 @@ fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
 mod tests {
     use super::*;
 
+    fn fixed_draft_token_count(policy: &DraftTokenCountPolicy) -> u64 {
+        let Some(Policy::Fixed(policy)) = policy.policy.as_ref() else {
+            panic!("expected a fixed draft token-count policy")
+        };
+        policy.draft_token_count
+    }
+
+    fn initial_draft_token_count(policy: &DraftTokenCountPolicy) -> u64 {
+        let Some(Policy::AcceptanceRate(policy)) = policy.policy.as_ref() else {
+            panic!("expected an acceptance-rate draft token-count policy")
+        };
+        policy.initial_draft_token_count
+    }
+
     #[test]
     fn defaults_to_gpu_inference() {
         let args = MainProcessArgs::from_args(&["mini-vllm-rs"], &[])
@@ -335,11 +349,7 @@ mod tests {
         assert!(args.validate().is_ok());
         assert_eq!(draft_model.model.as_ref().unwrap().model_revision, "main");
         assert_eq!(
-            draft_model
-                .token_count_policy
-                .as_ref()
-                .unwrap()
-                .draft_token_count(),
+            fixed_draft_token_count(draft_model.token_count_policy.as_ref().unwrap()),
             6
         );
     }
@@ -364,10 +374,7 @@ mod tests {
             .unwrap();
 
         assert!(args.validate().is_ok());
-        assert_eq!(
-            policy.draft_token_count(),
-            DEFAULT_DRAFT_TOKEN_COUNT as usize
-        );
+        assert_eq!(fixed_draft_token_count(policy), DEFAULT_DRAFT_TOKEN_COUNT);
     }
 
     #[test]
@@ -385,11 +392,7 @@ mod tests {
 
         assert!(args.validate().is_ok());
         assert_eq!(
-            draft_model
-                .token_count_policy
-                .as_ref()
-                .unwrap()
-                .draft_token_count(),
+            initial_draft_token_count(draft_model.token_count_policy.as_ref().unwrap()),
             4
         );
     }

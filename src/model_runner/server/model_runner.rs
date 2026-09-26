@@ -4,7 +4,6 @@ use crate::model_runner::KvCacheType;
 use crate::models::loaded_model::LoadedModel;
 use crate::models::ModelInfo;
 use crate::models::ModelRole;
-use crate::proto::inference_config::DraftTokenCountPolicy;
 use crate::proto::model_runner::GenerateTextRequest;
 use crate::proto::model_runner::GetModelMetadataResponse;
 use anyhow::bail;
@@ -16,6 +15,8 @@ use log::info;
 use std::path::Path;
 use std::path::PathBuf;
 
+use super::draft_token_count::DraftTokenCountController;
+use super::draft_token_count::DraftTokenCountPolicy;
 use super::kv_cache::create_kv_cache;
 use super::model_instance::ModelInstance;
 use super::text_generation;
@@ -142,8 +143,7 @@ impl ModelRunner {
                 request,
                 self.draft
                     .as_ref()
-                    .map(|draft| draft.token_count_policy.draft_token_count())
-                    .unwrap_or(0),
+                    .map(|draft| DraftTokenCountController::new(draft.token_count_policy)),
                 prefill_initial_positions,
             )
         })() {
