@@ -9,9 +9,9 @@ use crate::proto::model_runner::model_runner_command::Command::Shutdown as Shutd
 use crate::proto::model_runner::model_runner_service_client::ModelRunnerServiceClient;
 use crate::proto::model_runner::ModelRunnerCommand;
 use crate::proto::model_runner::Shutdown;
+use crate::proto::textproto::format_textproto;
 use crate::utils::child_process::ChildProcess;
 use crate::utils::domain_socket;
-use crate::utils::textproto::format_textproto;
 use anyhow::Context;
 use anyhow::Result;
 use log::error;

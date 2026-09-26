@@ -19,53 +19,6 @@ const DEFAULT_MAX_BATCHED_TOKEN_COUNT: usize = 512;
 const DEFAULT_MAX_ACTIVE_REQUEST_COUNT: usize = 4;
 const DEFAULT_INPUT_PREPROCESSING_THREAD_COUNT: usize = 4;
 
-impl ModelConfig {
-    pub(crate) fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.model_id.is_empty(), "model_id must not be empty");
-        anyhow::ensure!(
-            !self.model_filename.is_empty(),
-            "model_filename must not be empty"
-        );
-        anyhow::ensure!(
-            !self.tokenizer_id.is_empty(),
-            "tokenizer_id must not be empty"
-        );
-        anyhow::ensure!(
-            self.model_filename.to_ascii_lowercase().ends_with(".gguf"),
-            "model filename must identify a .gguf file"
-        );
-        Ok(())
-    }
-}
-
-impl DraftModelConfig {
-    pub(crate) fn validate(&self) -> anyhow::Result<()> {
-        self.model
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("draft model configuration is missing a model"))?
-            .validate()?;
-        self.token_count_policy
-            .as_ref()
-            .ok_or_else(|| {
-                anyhow::anyhow!("draft model configuration is missing a token-count policy")
-            })?
-            .validate()?;
-        Ok(())
-    }
-}
-
-impl fmt::Display for DraftModelConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let model = self.model.as_ref().ok_or(fmt::Error)?;
-        let token_count_policy = self.token_count_policy.as_ref().ok_or(fmt::Error)?;
-        writeln!(formatter, "Draft model: {}", model.model_id)?;
-        writeln!(formatter, "Draft GGUF file: {}", model.model_filename)?;
-        writeln!(formatter, "Draft tokenizer: {}", model.tokenizer_id)?;
-        writeln!(formatter, "Draft revision: {}", model.model_revision)?;
-        writeln!(formatter, "Draft token count policy: {token_count_policy}")
-    }
-}
-
 /// Runs text generation with a model from Hugging Face.
 #[derive(FromArgs)]
 pub(crate) struct MainProcessArgs {

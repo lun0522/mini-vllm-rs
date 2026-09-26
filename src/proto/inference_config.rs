@@ -1,4 +1,4 @@
-use crate::utils::textproto::parse_textproto;
+use super::textproto::parse_textproto;
 use anyhow::Result as AnyhowResult;
 use std::fmt;
 use std::str::FromStr;
@@ -6,6 +6,25 @@ use std::str::FromStr;
 include!(concat!(env!("OUT_DIR"), "/inference_config.rs"));
 
 use draft_token_count_policy::Policy;
+
+impl ModelConfig {
+    pub(crate) fn validate(&self) -> AnyhowResult<()> {
+        anyhow::ensure!(!self.model_id.is_empty(), "model_id must not be empty");
+        anyhow::ensure!(
+            !self.model_filename.is_empty(),
+            "model_filename must not be empty"
+        );
+        anyhow::ensure!(
+            !self.tokenizer_id.is_empty(),
+            "tokenizer_id must not be empty"
+        );
+        anyhow::ensure!(
+            self.model_filename.to_ascii_lowercase().ends_with(".gguf"),
+            "model filename must identify a .gguf file"
+        );
+        Ok(())
+    }
+}
 
 impl FromStr for ModelConfig {
     type Err = String;
@@ -15,11 +34,54 @@ impl FromStr for ModelConfig {
     }
 }
 
+impl DraftModelConfig {
+    pub(crate) fn validate(&self) -> AnyhowResult<()> {
+        self.model
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("draft model configuration is missing a model"))?
+            .validate()?;
+        self.token_count_policy
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!("draft model configuration is missing a token-count policy")
+            })?
+            .validate()?;
+        Ok(())
+    }
+}
+
 impl FromStr for DraftModelConfig {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         parse_textproto(value, "inference_config.DraftModelConfig")
+    }
+}
+
+impl fmt::Display for DraftModelConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let model = self.model.as_ref().ok_or(fmt::Error)?;
+        let token_count_policy = self.token_count_policy.as_ref().ok_or(fmt::Error)?;
+        writeln!(formatter, "Draft model: {}", model.model_id)?;
+        writeln!(formatter, "Draft GGUF file: {}", model.model_filename)?;
+        writeln!(formatter, "Draft tokenizer: {}", model.tokenizer_id)?;
+        writeln!(formatter, "Draft revision: {}", model.model_revision)?;
+        writeln!(formatter, "Draft token count policy: {token_count_policy}")
+    }
+}
+
+impl DraftModelRunnerConfig {
+    pub(crate) fn validate(&self) -> AnyhowResult<()> {
+        anyhow::ensure!(
+            !self.model_path.is_empty(),
+            "draft model runner configuration requires a model path"
+        );
+        self.token_count_policy
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!("draft model runner configuration requires a token-count policy")
+            })?
+            .validate()
     }
 }
 

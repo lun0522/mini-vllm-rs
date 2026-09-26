@@ -1,7 +1,6 @@
 pub(crate) mod child_process;
 pub(crate) mod domain_socket;
 pub(crate) mod rpc_shutdown;
-pub(crate) mod textproto;
 
 pub(crate) fn environment_bool(name: &str, default: bool) -> bool {
     match std::env::var(name) {

@@ -254,14 +254,11 @@ fn create_inference_backend(
 fn create_draft_model_config(
     config: &DraftModelRunnerConfigProto,
 ) -> Result<DraftModelRunnerConfig> {
-    anyhow::ensure!(
-        !config.model_path.is_empty(),
-        "draft model runner configuration requires a model path"
-    );
-    let token_count_policy_proto: &DraftTokenCountPolicyProto =
-        config.token_count_policy.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("draft model runner configuration requires a token-count policy")
-        })?;
+    config.validate()?;
+    let token_count_policy_proto: &DraftTokenCountPolicyProto = config
+        .token_count_policy
+        .as_ref()
+        .expect("validated draft model runner configuration should contain a token-count policy");
     Ok(DraftModelRunnerConfig {
         model_path: config.model_path.clone().into(),
         token_count_policy: DraftTokenCountPolicy::try_from(token_count_policy_proto)?,

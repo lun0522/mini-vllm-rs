@@ -11,3 +11,4 @@ pub(crate) mod main_process {
 }
 
 pub(crate) mod inference_config;
+pub(crate) mod textproto;
