@@ -10,6 +10,7 @@ use candle_core::IndexOp;
 use candle_core::Tensor;
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::utils::apply_repeat_penalty;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::time::Duration;
@@ -161,12 +162,14 @@ pub(super) struct DraftGenerationStats {
     pub(super) cached_token_count: usize,
     pub(super) accepted_token_count: usize,
     pub(super) proposed_token_count: usize,
+    pub(super) selected_token_count_histogram: BTreeMap<usize, usize>,
 }
 
 struct DraftTokenCountState {
     controller: DraftTokenCountController,
     accepted_token_count: usize,
     proposed_token_count: usize,
+    selected_token_count_histogram: BTreeMap<usize, usize>,
 }
 
 impl DraftTokenCountState {
@@ -175,6 +178,7 @@ impl DraftTokenCountState {
             controller,
             accepted_token_count: 0,
             proposed_token_count: 0,
+            selected_token_count_histogram: BTreeMap::new(),
         }
     }
 
@@ -183,6 +187,11 @@ impl DraftTokenCountState {
         accepted_token_count: usize,
         proposed_token_count: usize,
     ) -> Result<()> {
+        let selected_token_count = self.controller.draft_token_count();
+        *self
+            .selected_token_count_histogram
+            .entry(selected_token_count)
+            .or_default() += 1;
         self.controller
             .update(accepted_token_count, proposed_token_count)?;
         self.accepted_token_count += accepted_token_count;
@@ -503,6 +512,7 @@ impl RequestExecutionState {
                         .expect("draft token-count state requires a draft prefill position"),
                     accepted_token_count: state.accepted_token_count,
                     proposed_token_count: state.proposed_token_count,
+                    selected_token_count_histogram: state.selected_token_count_histogram,
                 }),
             prefill_duration: self.prefill_duration,
             decode_duration: self.decode_duration,
@@ -1159,6 +1169,55 @@ mod tests {
     use candle_core::Device;
     use std::sync::Arc;
     use std::sync::Mutex;
+
+    fn acceptance_rate_controller() -> DraftTokenCountController {
+        DraftTokenCountController::new(DraftTokenCountPolicy::AcceptanceRate {
+            initial_draft_token_count: 4,
+            decrease_threshold: 0.4,
+            increase_threshold: 0.8,
+            minimum_draft_token_count: 1,
+            maximum_draft_token_count: 8,
+        })
+    }
+
+    #[test]
+    fn records_policy_selected_counts_before_output_caps() -> Result<()> {
+        let mut state = DraftTokenCountState::new(DraftTokenCountController::new(
+            DraftTokenCountPolicy::Fixed {
+                draft_token_count: 4,
+            },
+        ));
+
+        state.record_verification(2, 2)?;
+
+        assert_eq!(state.accepted_token_count, 2);
+        assert_eq!(state.proposed_token_count, 2);
+        assert_eq!(state.selected_token_count_histogram.len(), 1);
+        assert_eq!(state.selected_token_count_histogram.get(&4), Some(&1));
+        Ok(())
+    }
+
+    #[test]
+    fn records_sorted_adaptive_policy_histogram() -> Result<()> {
+        let mut state = DraftTokenCountState::new(acceptance_rate_controller());
+
+        state.record_verification(1, 4)?;
+        state.record_verification(3, 3)?;
+        state.record_verification(4, 4)?;
+
+        assert_eq!(state.controller.draft_token_count(), 5);
+        assert_eq!(state.accepted_token_count, 8);
+        assert_eq!(state.proposed_token_count, 11);
+        assert_eq!(
+            state
+                .selected_token_count_histogram
+                .iter()
+                .map(|(&count, &uses)| (count, uses))
+                .collect::<Vec<_>>(),
+            vec![(3, 1), (4, 2)]
+        );
+        Ok(())
+    }
 
     #[derive(Debug, PartialEq)]
     struct ForwardCall {

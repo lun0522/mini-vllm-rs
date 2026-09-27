@@ -69,8 +69,24 @@ message TextGenerationStats {
   uint64 output_token_count = 2;
   // Token latency measurements; absent when generation produced no output token.
   TokenGenerationLatency token_generation_latency = 3;
-  // Fraction of proposed draft tokens accepted during speculative decoding.
-  optional float draft_token_acceptance_rate = 4;
+  // Speculative-decoding statistics; absent when no draft model is configured.
+  DraftTokenStats draft_token_stats = 4;
+}
+
+message DraftTokenStats {
+  // Total number of draft tokens accepted by the target model.
+  uint64 accepted_token_count = 1;
+  // Total number of draft tokens proposed, including a final capped proposal.
+  uint64 proposed_token_count = 2;
+  // Number of verifications using each policy-selected draft-token count.
+  repeated DraftTokenCountHistogramBucket selected_token_count_histogram = 3;
+}
+
+message DraftTokenCountHistogramBucket {
+  // Draft-token count selected by the policy before any output-limit cap.
+  uint64 draft_token_count = 1;
+  // Number of verifications for which the policy selected this count.
+  uint64 usage_count = 2;
 }
 
 message TokenGenerationLatency {

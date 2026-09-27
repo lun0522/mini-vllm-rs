@@ -37,6 +37,8 @@ message DraftTokenCountPolicy {
     FixedDraftTokenCountPolicy fixed = 1;
     // Adjusts the proposal length based on the draft-token acceptance rate.
     AcceptanceRateDraftTokenCountPolicy acceptance_rate = 2;
+    // Selects the proposal length from a smoothed history of accepted lengths.
+    AcceptedLengthDraftTokenCountPolicy accepted_length = 3;
   }
 }
 
@@ -46,7 +48,12 @@ message FixedDraftTokenCountPolicy {
   uint64 draft_token_count = 1;
 }
 
-// Adjusts the draft proposal length when its acceptance rate crosses a threshold.
+// draft_token_count starts at initial_draft_token_count.
+// acceptance_rate = accepted_token_count / proposed_token_count
+// if acceptance_rate < decrease_threshold: draft_token_count -= 1
+// if acceptance_rate > increase_threshold: draft_token_count += 1
+// draft_token_count = clamp(draft_token_count, minimum_draft_token_count,
+//                           maximum_draft_token_count)
 message AcceptanceRateDraftTokenCountPolicy {
   // Proposal length used when a generation request starts.
   uint64 initial_draft_token_count = 1;
@@ -58,4 +65,22 @@ message AcceptanceRateDraftTokenCountPolicy {
   uint64 minimum_draft_token_count = 4;
   // Largest proposal length allowed by the policy.
   uint64 maximum_draft_token_count = 5;
+}
+
+// draft_token_count starts at initial_draft_token_count, and smoothed_length starts
+// at initial_draft_token_count - 1.
+// smoothed_length = smoothing_factor * accepted_token_count
+//                   + (1 - smoothing_factor) * previous_smoothed_length
+// draft_token_count = clamp(round(smoothed_length) + 1, minimum_draft_token_count,
+//                           maximum_draft_token_count)
+// The extra token tests whether the draft can extend beyond its recently accepted prefix.
+message AcceptedLengthDraftTokenCountPolicy {
+  // Proposal length used when a generation request starts.
+  uint64 initial_draft_token_count = 1;
+  // Weight assigned to the newest accepted length; must be greater than zero and at most one.
+  float smoothing_factor = 2;
+  // Smallest proposal length allowed by the policy.
+  uint64 minimum_draft_token_count = 3;
+  // Largest proposal length allowed by the policy.
+  uint64 maximum_draft_token_count = 4;
 }

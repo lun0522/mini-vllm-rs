@@ -102,6 +102,7 @@ impl DraftTokenCountPolicy {
         {
             Policy::Fixed(policy) => validate_draft_token_count(policy.draft_token_count),
             Policy::AcceptanceRate(policy) => validate_acceptance_rate_policy(policy),
+            Policy::AcceptedLength(policy) => validate_accepted_length_policy(policy),
         }
     }
 }
@@ -118,6 +119,14 @@ impl fmt::Display for DraftTokenCountPolicy {
                 policy.maximum_draft_token_count,
                 policy.decrease_threshold,
                 policy.increase_threshold,
+            ),
+            Policy::AcceptedLength(policy) => write!(
+                formatter,
+                "accepted length (initial: {}, bounds: [{}, {}], smoothing factor: {})",
+                policy.initial_draft_token_count,
+                policy.minimum_draft_token_count,
+                policy.maximum_draft_token_count,
+                policy.smoothing_factor,
             ),
         }
     }
@@ -136,28 +145,11 @@ fn validate_draft_token_count(count: u64) -> AnyhowResult<()> {
 fn validate_acceptance_rate_policy(
     policy: &AcceptanceRateDraftTokenCountPolicy,
 ) -> AnyhowResult<()> {
-    anyhow::ensure!(
-        policy.minimum_draft_token_count > 0,
-        "minimum draft token count {} must be greater than zero",
-        policy.minimum_draft_token_count
-    );
-    anyhow::ensure!(
-        policy.minimum_draft_token_count <= policy.initial_draft_token_count
-            && policy.initial_draft_token_count <= policy.maximum_draft_token_count,
-        "initial draft token count {} must be within bounds [{}, {}]",
+    validate_adaptive_draft_token_counts(
         policy.initial_draft_token_count,
         policy.minimum_draft_token_count,
-        policy.maximum_draft_token_count
-    );
-    for (name, count) in [
-        ("initial", policy.initial_draft_token_count),
-        ("minimum", policy.minimum_draft_token_count),
-        ("maximum", policy.maximum_draft_token_count),
-    ] {
-        usize::try_from(count).map_err(|_| {
-            anyhow::anyhow!("{name} draft token count {count} does not fit in usize")
-        })?;
-    }
+        policy.maximum_draft_token_count,
+    )?;
     anyhow::ensure!(
         policy.decrease_threshold.is_finite() && (0.0..=1.0).contains(&policy.decrease_threshold),
         "decrease threshold {} must be between zero and one",
@@ -174,6 +166,49 @@ fn validate_acceptance_rate_policy(
         policy.decrease_threshold,
         policy.increase_threshold
     );
+    Ok(())
+}
+
+fn validate_accepted_length_policy(
+    policy: &AcceptedLengthDraftTokenCountPolicy,
+) -> AnyhowResult<()> {
+    validate_adaptive_draft_token_counts(
+        policy.initial_draft_token_count,
+        policy.minimum_draft_token_count,
+        policy.maximum_draft_token_count,
+    )?;
+    anyhow::ensure!(
+        policy.smoothing_factor.is_finite()
+            && policy.smoothing_factor > 0.0
+            && policy.smoothing_factor <= 1.0,
+        "smoothing factor {} must be greater than zero and at most one",
+        policy.smoothing_factor
+    );
+    Ok(())
+}
+
+fn validate_adaptive_draft_token_counts(
+    initial: u64,
+    minimum: u64,
+    maximum: u64,
+) -> AnyhowResult<()> {
+    anyhow::ensure!(
+        minimum > 0,
+        "minimum draft token count {minimum} must be greater than zero"
+    );
+    anyhow::ensure!(
+        minimum <= initial && initial <= maximum,
+        "initial draft token count {initial} must be within bounds [{minimum}, {maximum}]"
+    );
+    for (name, count) in [
+        ("initial", initial),
+        ("minimum", minimum),
+        ("maximum", maximum),
+    ] {
+        usize::try_from(count).map_err(|_| {
+            anyhow::anyhow!("{name} draft token count {count} does not fit in usize")
+        })?;
+    }
     Ok(())
 }
 
@@ -249,6 +284,52 @@ mod tests {
         assert_eq!(
             policy.validate().unwrap_err().to_string(),
             "decrease threshold 0.9 must be less than increase threshold 0.8"
+        );
+    }
+
+    fn accepted_length_policy() -> DraftTokenCountPolicy {
+        DraftTokenCountPolicy {
+            policy: Some(Policy::AcceptedLength(
+                AcceptedLengthDraftTokenCountPolicy {
+                    initial_draft_token_count: 4,
+                    smoothing_factor: 0.2,
+                    minimum_draft_token_count: 1,
+                    maximum_draft_token_count: 12,
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn validates_an_accepted_length_policy() {
+        let policy = accepted_length_policy();
+        assert!(policy.validate().is_ok());
+        assert_eq!(
+            policy.to_string(),
+            "accepted length (initial: 4, bounds: [1, 12], smoothing factor: 0.2)"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_accepted_length_policies() {
+        let mut policy = accepted_length_policy();
+        let Policy::AcceptedLength(config) = policy.policy.as_mut().unwrap() else {
+            unreachable!()
+        };
+        config.smoothing_factor = 0.0;
+        assert_eq!(
+            policy.validate().unwrap_err().to_string(),
+            "smoothing factor 0 must be greater than zero and at most one"
+        );
+
+        let mut policy = accepted_length_policy();
+        let Policy::AcceptedLength(config) = policy.policy.as_mut().unwrap() else {
+            unreachable!()
+        };
+        config.maximum_draft_token_count = 3;
+        assert_eq!(
+            policy.validate().unwrap_err().to_string(),
+            "initial draft token count 4 must be within bounds [1, 3]"
         );
     }
 }

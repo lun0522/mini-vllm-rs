@@ -160,7 +160,7 @@ async fn validate_text_generation(channel: Channel) -> anyhow::Result<()> {
         "end-to-end latency was shorter than time to first token"
     );
     anyhow::ensure!(
-        stats.draft_token_acceptance_rate.is_none(),
+        stats.draft_token_stats.is_none(),
         "target-only generation returned draft-token statistics"
     );
     Ok(())

@@ -109,8 +109,9 @@ any rejected proposals.
 
 Without a draft model, requests use ordinary target-only prefill and decode.
 Both paths remain resumable between scheduling iterations and report
-request-level timing; speculative responses additionally report the draft-token
-acceptance rate.
+request-level timing. Speculative responses additionally report accepted and
+proposed draft-token totals, from which clients can derive the acceptance rate,
+and a histogram of the proposal lengths selected by the draft-token policy.
 
 ## KV-cache execution
 

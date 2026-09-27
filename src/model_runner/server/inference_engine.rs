@@ -1,10 +1,13 @@
 use crate::model_runner::SchedulerConfig;
+use crate::proto::model_runner::DraftTokenCountHistogramBucket;
+use crate::proto::model_runner::DraftTokenStats;
 use crate::proto::model_runner::TextGenerationStats;
 use crate::proto::model_runner::TokenGenerationLatency;
 use anyhow::Result;
 use log::error;
 use log::info;
 use log::warn;
+use std::collections::BTreeMap;
 use std::time::Duration;
 use std::time::Instant;
 use thousands::Separable;
@@ -192,7 +195,7 @@ impl InferenceEngine {
                     "Engine state (backend_id={}): request_id={} status=completed input_tokens={} \
                      output_tokens={} queue_us={} prefill_us={} ttft_us={} decode_us={} \
                      target_cached_tokens={} draft_cached_tokens={} draft_accepted={} \
-                     draft_proposed={}",
+                     draft_proposed={} draft_selected_histogram={}",
                     self.backend_id,
                     request_id,
                     result.stats.input_token_count,
@@ -213,6 +216,7 @@ impl InferenceEngine {
                     count_to_string(draft_stats.map(|stats| stats.cached_token_count)),
                     count_to_string(draft_stats.map(|stats| stats.accepted_token_count)),
                     count_to_string(draft_stats.map(|stats| stats.proposed_token_count)),
+                    draft_histogram_to_string(draft_stats),
                 );
                 request_outcome.context.send_stats(client_stats);
             }
@@ -265,12 +269,16 @@ fn create_client_facing_generation_stats(
     first_token_at: Option<Instant>,
     last_token_at: Option<Instant>,
 ) -> TextGenerationStats {
-    let draft_token_acceptance_rate = match stats.draft_stats.as_ref() {
-        Some(draft_stats) if draft_stats.proposed_token_count != 0 => {
-            Some(draft_stats.accepted_token_count as f32 / draft_stats.proposed_token_count as f32)
-        }
-        _ => None,
-    };
+    let draft_token_stats = stats
+        .draft_stats
+        .as_ref()
+        .map(|draft_stats| DraftTokenStats {
+            accepted_token_count: draft_stats.accepted_token_count as u64,
+            proposed_token_count: draft_stats.proposed_token_count as u64,
+            selected_token_count_histogram: create_draft_token_count_histogram(
+                &draft_stats.selected_token_count_histogram,
+            ),
+        });
     let token_generation_latency =
         first_token_at
             .zip(last_token_at)
@@ -286,8 +294,22 @@ fn create_client_facing_generation_stats(
         input_token_count: stats.input_token_count,
         output_token_count: stats.output_token_count,
         token_generation_latency,
-        draft_token_acceptance_rate,
+        draft_token_stats,
     }
+}
+
+fn create_draft_token_count_histogram(
+    histogram: &BTreeMap<usize, usize>,
+) -> Vec<DraftTokenCountHistogramBucket> {
+    histogram
+        .iter()
+        .map(
+            |(&draft_token_count, &usage_count)| DraftTokenCountHistogramBucket {
+                draft_token_count: draft_token_count as u64,
+                usage_count: usage_count as u64,
+            },
+        )
+        .collect()
 }
 
 fn elapsed_microseconds_string(started_at: Instant, finished_at: Option<Instant>) -> String {
@@ -310,9 +332,24 @@ fn count_to_string(count: Option<usize>) -> String {
     count.map_or_else(|| "none".to_owned(), |count| count.to_string())
 }
 
+fn draft_histogram_to_string(stats: Option<&text_generation::DraftGenerationStats>) -> String {
+    stats.map_or_else(
+        || "none".to_owned(),
+        |stats| {
+            stats
+                .selected_token_count_histogram
+                .iter()
+                .map(|(token_count, usage_count)| format!("{token_count}:{usage_count}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn reports_generation_cancellation_with_the_cancelled_status() {
@@ -321,5 +358,61 @@ mod tests {
 
         assert_eq!(status.code(), tonic::Code::Cancelled);
         assert_eq!(status.message(), "generation request was cancelled");
+    }
+
+    #[test]
+    fn omits_draft_stats_for_target_only_generation() {
+        let stats = text_generation::TextGenerationStats {
+            input_token_count: 3,
+            output_token_count: 2,
+            target_cached_token_count: 0,
+            draft_stats: None,
+            prefill_duration: Duration::ZERO,
+            decode_duration: Duration::ZERO,
+        };
+        let now = Instant::now();
+
+        let client_stats = create_client_facing_generation_stats(&stats, now, Some(now), Some(now));
+
+        assert!(client_stats.draft_token_stats.is_none());
+    }
+
+    #[test]
+    fn converts_draft_stats_with_a_sorted_histogram() {
+        let stats = text_generation::TextGenerationStats {
+            input_token_count: 3,
+            output_token_count: 2,
+            target_cached_token_count: 0,
+            draft_stats: Some(text_generation::DraftGenerationStats {
+                cached_token_count: 0,
+                accepted_token_count: 5,
+                proposed_token_count: 8,
+                selected_token_count_histogram: BTreeMap::from([(3, 2), (4, 1)]),
+            }),
+            prefill_duration: Duration::ZERO,
+            decode_duration: Duration::ZERO,
+        };
+        let now = Instant::now();
+
+        let client_stats = create_client_facing_generation_stats(&stats, now, Some(now), Some(now));
+        let draft_stats = client_stats.draft_token_stats.unwrap();
+
+        assert_eq!(draft_stats.accepted_token_count, 5);
+        assert_eq!(draft_stats.proposed_token_count, 8);
+        assert_eq!(draft_stats.selected_token_count_histogram.len(), 2);
+        assert_eq!(
+            draft_stats.selected_token_count_histogram[0],
+            DraftTokenCountHistogramBucket {
+                draft_token_count: 3,
+                usage_count: 2,
+            }
+        );
+        assert_eq!(
+            draft_stats.selected_token_count_histogram[1],
+            DraftTokenCountHistogramBucket {
+                draft_token_count: 4,
+                usage_count: 1,
+            }
+        );
     }
 }

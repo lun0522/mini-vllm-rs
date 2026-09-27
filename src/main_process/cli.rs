@@ -212,10 +212,11 @@ mod tests {
     }
 
     fn initial_draft_token_count(policy: &DraftTokenCountPolicy) -> u64 {
-        let Some(Policy::AcceptanceRate(policy)) = policy.policy.as_ref() else {
-            panic!("expected an acceptance-rate draft token-count policy")
-        };
-        policy.initial_draft_token_count
+        match policy.policy.as_ref() {
+            Some(Policy::AcceptanceRate(policy)) => policy.initial_draft_token_count,
+            Some(Policy::AcceptedLength(policy)) => policy.initial_draft_token_count,
+            _ => panic!("expected an adaptive draft token-count policy"),
+        }
     }
 
     #[test]
@@ -337,6 +338,26 @@ mod tests {
             &[
                 "--draft-model",
                 "model { model_id: 'draft' model_filename: 'draft.gguf' tokenizer_id: 'tokenizer' } token_count_policy { acceptance_rate { initial_draft_token_count: 4 decrease_threshold: 0.4 increase_threshold: 0.8 minimum_draft_token_count: 1 maximum_draft_token_count: 8 } }",
+            ],
+        )
+        .expect("draft model configuration should parse");
+        let args = normalize(args);
+        let draft_model = args.draft_model.as_ref().unwrap();
+
+        assert!(args.validate().is_ok());
+        assert_eq!(
+            initial_draft_token_count(draft_model.token_count_policy.as_ref().unwrap()),
+            4
+        );
+    }
+
+    #[test]
+    fn parses_a_draft_model_with_an_accepted_length_policy() {
+        let args = MainProcessArgs::from_args(
+            &["mini-vllm-rs"],
+            &[
+                "--draft-model",
+                "model { model_id: 'draft' model_filename: 'draft.gguf' tokenizer_id: 'tokenizer' } token_count_policy { accepted_length { initial_draft_token_count: 4 smoothing_factor: 0.2 minimum_draft_token_count: 1 maximum_draft_token_count: 12 } }",
             ],
         )
         .expect("draft model configuration should parse");
