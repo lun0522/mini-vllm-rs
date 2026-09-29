@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="400" viewBox="0 0 900 400" role="img" aria-labelledby="title description">
+  <title id="title">Selected draft-token counts for creative writing</title>
+  <desc id="description">Both policies favored short proposals. The acceptance-rate policy most often selected two tokens, while the accepted-length policy selected two tokens for most verifications.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
+    .title { font-size: 18px; font-weight: 600; }
+    .axis { font-size: 13px; fill: #57606a; }
+    .value { font-size: 11px; font-weight: 600; }
+    .grid { stroke: #d0d7de; stroke-width: 1; }
+  </style>
+  <rect width="900" height="400" fill="#ffffff"/>
+  <text x="450" y="28" text-anchor="middle" class="title">Creative writing: selected draft-token counts</text>
+
+  <line x1="105" y1="70" x2="825" y2="70" class="grid"/>
+  <line x1="105" y1="147" x2="825" y2="147" class="grid"/>
+  <line x1="105" y1="223" x2="825" y2="223" class="grid"/>
+  <line x1="105" y1="300" x2="825" y2="300" class="grid"/>
+  <text x="92" y="74" text-anchor="end" class="axis">300</text>
+  <text x="92" y="151" text-anchor="end" class="axis">200</text>
+  <text x="92" y="227" text-anchor="end" class="axis">100</text>
+  <text x="92" y="304" text-anchor="end" class="axis">0</text>
+  <text x="24" y="187" text-anchor="middle" class="axis" transform="rotate(-90 24 187)">Number of uses</text>
+
+  <!-- Acceptance-rate bars. -->
+  <rect x="126" y="233" width="28" height="67" rx="2" fill="#2563eb"/><text x="140" y="228" text-anchor="middle" class="value">87</text>
+  <rect x="216" y="192" width="28" height="108" rx="2" fill="#2563eb"/><text x="230" y="187" text-anchor="middle" class="value">141</text>
+  <rect x="306" y="241" width="28" height="59" rx="2" fill="#2563eb"/><text x="320" y="236" text-anchor="middle" class="value">77</text>
+  <rect x="396" y="285" width="28" height="15" rx="2" fill="#2563eb"/><text x="410" y="280" text-anchor="middle" class="value">20</text>
+  <rect x="486" y="295" width="28" height="5" rx="2" fill="#2563eb"/><text x="500" y="290" text-anchor="middle" class="value">6</text>
+
+  <!-- Accepted-length bars. -->
+  <rect x="154" y="269" width="28" height="31" rx="2" fill="#16a34a"/><text x="168" y="264" text-anchor="middle" class="value">41</text>
+  <rect x="244" y="82" width="28" height="218" rx="2" fill="#16a34a"/><text x="258" y="77" text-anchor="middle" class="value">285</text>
+  <rect x="334" y="291" width="28" height="9" rx="2" fill="#16a34a"/><text x="348" y="286" text-anchor="middle" class="value">12</text>
+  <rect x="424" y="298" width="28" height="2" rx="2" fill="#16a34a"/><text x="438" y="293" text-anchor="middle" class="value">3</text>
+
+  <text x="153" y="322" text-anchor="middle" class="axis">1</text><text x="243" y="322" text-anchor="middle" class="axis">2</text>
+  <text x="333" y="322" text-anchor="middle" class="axis">3</text><text x="423" y="322" text-anchor="middle" class="axis">4</text>
+  <text x="513" y="322" text-anchor="middle" class="axis">5</text><text x="603" y="322" text-anchor="middle" class="axis">6</text>
+  <text x="693" y="322" text-anchor="middle" class="axis">7</text><text x="783" y="322" text-anchor="middle" class="axis">8</text>
+  <text x="468" y="345" text-anchor="middle" class="axis">Selected draft-token count</text>
+  <rect x="300" y="370" width="14" height="10" rx="2" fill="#2563eb"/><text x="322" y="379" class="axis">Acceptance rate</text>
+  <rect x="480" y="370" width="14" height="10" rx="2" fill="#16a34a"/><text x="502" y="379" class="axis">Accepted length</text>
+</svg>

@@ -47,6 +47,8 @@ order:
 4. [CPU paged attention with F16 activations](benchmarks/cpu_paged_attention_f16.md)
    revisits the earlier attention choices under the new activation dtype and
    verifies whether the best F32 implementation remains the best F16 default.
+5. [Speculative decoding policies](benchmarks/speculative_decoding.md) compares
+   fixed and dynamic draft-token counts across Qwen and Llama model pairs.
 
 ## Run
 
@@ -69,6 +71,8 @@ cargo run --release
     count of `4`.
   - `acceptance_rate`: Adjusts the count by one after each verification when
     the acceptance rate crosses its thresholds, clamped to its bounds.
+  - `accepted_length`: Selects one more than the rounded moving average of
+    recently accepted lengths, clamped to its bounds.
 - `--inference-device <device>` selects `gpu`, `cpu`, or `mixed` and defaults to
   `gpu`. Mixed mode runs one CPU and one GPU backend concurrently.
 - `--activation-dtype <dtype>` selects `f16` or `f32` and defaults to `f16`. On
