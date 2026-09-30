@@ -2,19 +2,17 @@
 
 *What continuous batching, KV-cache ownership, speculative decoding, and performance regressions taught me about AI-assisted systems engineering.*
 
+## TL;DR
+
+This post is about what systems engineering looks like when AI makes implementation much cheaper, but understanding the system, choosing the right abstractions, and reasoning about performance remain hard. It is also about how I learned to use AI beyond code generation—as a partner for exploring unfamiliar designs, investigating surprising behavior, and building more reliable engineering workflows.
+
+## Introduction
+
 I spent about a month building [mini-vllm-rs](https://github.com/lun0522/mini-vllm-rs), a small LLM inference engine in Rust, with AI writing a substantial fraction of the implementation.
 
 I started the project because I had already spent time learning how modern LLM inference systems work and wanted to implement the mechanisms myself. I understood ideas such as continuous batching, PagedAttention, prefix caching, and speculative decoding conceptually, but I wanted to see what engineering complexity was hiding underneath them.
 
 AI made that exploration much faster. It could propose designs, implement large changes, inspect unfamiliar framework internals, run experiments, and analyze traces. What surprised me was that implementation speed quickly stopped being the main constraint. The harder part became understanding the system well enough to decide whether a generated design was actually the design I wanted, and whether a plausible optimization was really an optimization.
-
-## TL;DR
-
-AI wrote a lot of the code in this project. The interesting parts were where that was not enough: choosing ownership boundaries, keeping generated changes small enough to understand, simplifying designs that worked but felt unnecessarily complicated, and explaining performance results that contradicted reasonable intuition.
-
-I also ended up writing tooling for the agent itself, moving repetitive benchmark and trace analysis into deterministic scripts so that model reasoning could focus on questions that actually required judgment.
-
-If you are interested in what systems engineering looks like when implementation becomes cheap—but understanding, architecture, and performance still require careful reasoning—that is what this post is about.
 
 ## Starting with the smallest thing that could work
 
@@ -80,7 +78,27 @@ One of the first inference features I wanted to explore was paged KV caching. In
 
 While reading Candle's model implementations, I noticed that KV state lived inside model layers and was cleared between requests. That is a reasonable abstraction for a general-purpose ML framework, but it becomes restrictive once the inference engine needs to decide which request owns which cache pages, when those pages can be reused, and what happens during cancellation or prefix reuse.
 
-I therefore moved request-specific KV state out of the model and into the inference engine. Model execution received externally owned cache state rather than implicitly owning it.
+I therefore moved request-specific KV state out of the model and into the inference engine. Instead of the model implicitly owning its cache, the engine now owned the request state and passed the relevant KV cache into model execution.
+
+```mermaid
+flowchart LR
+    subgraph Before["Before: model-owned KV cache"]
+        E1["Inference Engine"] --> M1["Model"]
+        M1 --> K1["Internal KV Cache"]
+    end
+
+    subgraph After["After: engine-owned KV cache"]
+        E2["Inference Engine"]
+        K2["Request KV State"]
+        M2["Model"]
+
+        E2 --> K2
+        E2 --> M2
+        K2 -->|"passed into forward()"| M2
+    end
+```
+
+This was a relatively small structural change, but it put ownership at the layer that would eventually need to make serving decisions. Later features could reason about KV state independently of the model that happened to consume it.
 
 I stopped short of writing a true paged-attention kernel. The cache could use paged allocation while attention still reconstructed contiguous K and V tensors. A custom kernel would have been a much larger optimization effort while basic serving features were still missing.
 
@@ -88,13 +106,15 @@ That distinction became useful throughout the project: I was willing to make rel
 
 ## Prefix caching was really a memory-lifetime problem
 
-Prefix caching initially sounds like a lookup problem: find the longest cached prefix, restore its KV pages, and avoid recomputing them. The more interesting issue was what should happen to those pages when no active request was using them.
+Prefix caching initially sounded like a lookup problem to me: identify the longest cached prefix, restore its KV pages, and skip the corresponding prefill work. Once I started implementing it, however, the harder question became what should happen to those pages after the request using them had finished.
 
-A page can be actively referenced, retained because it contains a reusable prefix, temporarily idle, reused by a later request, or evicted when memory becomes scarce. An idle cached page should not return to the free pool immediately, because retaining it for a likely future request is exactly the point of the cache.
+The initial design, largely proposed by AI, used conventional reference counting. Active requests held references to the physical pages they were using, while the prefix index could retain references to completed pages. This seemed reasonable at first, and I was mostly trying to understand the design rather than replace it.
 
-The initial implementation used conventional reference counting. As the policy evolved, however, one reference-count value effectively began to mean “cached but currently unused.” At that point the number was no longer just a count; it was carrying domain semantics.
+While reviewing the lifecycle, though, I started questioning what should happen when the last active request released a cached page. If there was no memory pressure, why free a page containing a reusable prefix? Keeping it around was the point of prefix caching. It should remain available for a future request, while still being reclaimable when memory was actually needed.
 
-I replaced that with explicit page states:
+That meant “no active request is using this page” and “this page is free” were different states. Reference counting could still encode the distinction—for example, by retaining a reference on behalf of the prefix cache—but then the count was no longer just a count. A particular value also implicitly meant “cached but idle, and eligible for eviction.” I found that harder to reason about than representing the lifecycle directly.
+
+I asked the agent to replace the refcount-based representation with an explicit state machine:
 
 ```mermaid
 stateDiagram-v2
@@ -107,9 +127,9 @@ stateDiagram-v2
     WrittenNotInUse --> Unallocated: evict under pressure
 ```
 
-Only `PendingWrite` is mutable. A written page cannot silently become writable again, and an idle cached page is represented directly instead of through a magic counter value.
+Now the important invariants were visible in the representation itself. Only `PendingWrite` is mutable; an idle cached page remains reusable as `WrittenNotInUse`, but can be evicted under memory pressure.
 
-Much of the original prefix-cache design came from AI. This was typical of the project: the agent could give me a plausible implementation of a mechanism I was still learning, and I would gradually internalize it through review. Once I understood the lifecycle well enough, I could then disagree with the representation and ask for something that made the invariant more obvious in code.
+This was also one of the places where my interaction with AI changed as I learned the domain. The agent had given me a plausible design for a mechanism I did not yet understand deeply. Reviewing it helped me build the mental model needed to challenge the abstraction and ask for a representation whose invariants were clearer to me.
 
 ## Continuous batching forced generation to become resumable
 
@@ -199,9 +219,9 @@ Later I also removed much of the word `batch` from the model interfaces. Batchin
 
 ## Clean backend ownership made heterogeneous execution surprisingly cheap
 
-I later added independent CPU and GPU inference backends. On a larger system, each backend might justify its own process and distributed lifecycle machinery. On one Apple Silicon machine, that would have solved problems I did not have.
+I later added independent CPU and GPU inference backends. Mature inference systems often have much heavier abstractions around workers and devices, but on a single Apple Silicon machine I did not need to solve problems such as distributed coordination or accelerator fault isolation. I mainly needed a clean way for two execution backends to coexist.
 
-Instead, each backend runs on its own thread and owns its scheduler, model instances, and KV caches. Whole requests are currently assigned round-robin rather than split across devices.
+The design ended up being simple: each backend runs on its own thread and owns its scheduler, model instances, and KV caches. Whole requests are assigned round-robin rather than split across devices.
 
 ```mermaid
 flowchart LR
@@ -218,9 +238,11 @@ flowchart LR
     Router --> GPU
 ```
 
-What interested me was that this feature required relatively little restructuring. Because backend state already had a clear owner, adding another independent owner was straightforward.
+What surprised me was how little restructuring this required. By this point, the scheduler, model state, and KV state already had clear owners. Supporting another backend mostly meant creating another independent owner of the same set of resources and routing requests between them. I had not designed those earlier boundaries specifically for heterogeneous execution, but this was a useful test of whether they composed beyond the features that originally motivated them.
 
-I considered more ambitious designs such as GPU prefill followed by CPU decode. Apple Silicon's unified memory makes that conceptually attractive, but Candle tensors remain device-bound and cross-device KV ownership would require much deeper changes. I left that as a possible future experiment rather than forcing it into the project.
+I did consider a more interesting design: using the GPU for prefill and the CPU for decode. Apple Silicon's unified memory makes that idea especially tempting, since CPU and GPU physically share memory, and some of my CPU experiments had made CPU decode look promising. But the software abstractions were not unified in the same way. Candle tensors are still associated with a device, so moving a request between backends would also mean dealing with cross-device tensor and KV-cache ownership.
+
+At that point, the feature would no longer have been a small extension of the existing architecture; it would have required much deeper changes, potentially including changes in Candle itself. I left that as a future experiment and kept the implemented version deliberately simpler: independent CPU and GPU backends, with whole requests assigned between them.
 
 ## Performance repeatedly disagreed with my intuition
 
@@ -264,7 +286,7 @@ Part of the idea was that small page-sized operations might also fit caches bett
 
 I kept contiguous attention with grouped Q as the CPU default. Paged storage still matters for allocation and prefix reuse; it does not require every downstream computation to operate page by page. The CPU attention reports contain the detailed [F32](https://github.com/lun0522/mini-vllm-rs/blob/main/benchmarks/cpu_paged_attention_f32.md) and [F16](https://github.com/lun0522/mini-vllm-rs/blob/main/benchmarks/cpu_paged_attention_f16.md) results.
 
-That experiment made me more cautious about treating “zero copy” as a goal by itself. Copies are costs, but they can still be cheaper than giving up an efficient larger operation.
+That experiment made me more cautious about treating “zero copy” as a goal by itself. Copies have a cost, but they can still be cheaper than giving up an efficient larger operation.
 
 ## The agent workflow became part of the codebase
 
@@ -298,7 +320,7 @@ At that point, `mini-vllm-eval` was no longer just a benchmark harness. Part of 
 
 ## What AI changed about how I build systems
 
-AI wrote at least half of many commits in this project, and often substantially more. I do not think hiding that contribution would make the work more meaningful. What interested me was how the engineering process changed once implementation itself became much cheaper.
+AI wrote at least half of the code in many commits, and often substantially more. I do not think hiding that contribution would make the work more meaningful. What interested me was how the engineering process changed once implementation itself became much cheaper.
 
 The agent was especially valuable in areas where I was initially less familiar. It could explain mechanisms, propose designs, implement them, inspect Candle internals, create experiments, and analyze structured traces. That let me move through a new domain unusually quickly.
 
