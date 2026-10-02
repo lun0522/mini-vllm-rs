@@ -116,3 +116,8 @@ single generic GEMM kernel.
 
 Based on these findings, we set the default value of
 `MINI_VLLM_METAL_GEMV_MAX_ROWS` to **4**.
+
+The later [V2.0 investigation](metal_gemv_numerical_differences.md) examines a
+separate consequence of this threshold: switching between GEMV and GEMM can
+slightly change logits and, near a close greedy decision, change generated
+text and speculative-acceptance statistics.

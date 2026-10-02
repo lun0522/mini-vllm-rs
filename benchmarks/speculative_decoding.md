@@ -42,7 +42,10 @@ draft tokens.
 Generated text was not required to match across configurations. Different
 target execution shapes can produce small numerical differences and therefore
 slightly different wording or formatting, despite identical prompts and output
-limits.
+limits. A later [Metal GEMV/GEMM investigation](metal_gemv_numerical_differences.md)
+confirmed that packed shapes can select different quantized matmul kernels;
+small logit differences can then flip a near-tied greedy choice and cascade
+through the remainder of the response.
 
 ## Implementation
 

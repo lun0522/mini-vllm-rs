@@ -36,7 +36,11 @@ with short and long prefills that cannot fit in one scheduling decision.
 
 Generated text was not required to match across active request limits. The
 2-request workload also produced different draft statistics across those
-limits; the cause is left to follow-up investigation.
+limits. A later [Metal GEMV/GEMM investigation](metal_gemv_numerical_differences.md)
+found that batching changed the packed tensor shapes and selected a different
+quantized matmul kernel. The resulting small logit differences changed a
+near-tied greedy token choice, after which the output and draft acceptance
+diverged.
 
 ## Workloads
 
@@ -92,13 +96,14 @@ increased from 32.9% to 37.1%: accepted/proposed totals changed from 619/1,883
 to 664/1,788.
 
 These totals were identical across all 3 runs, so the shift is specific to the
-execution configuration rather than measurement noise. This benchmark did not
-isolate whether batching changed the target output, the draft proposals, or
-both. Different tensor shapes can introduce small numerical differences, but a
-batching-specific cache, indexing, or statistics defect would need to be ruled
-out before attributing the shift to numerical sensitivity. The 4-request
-workload showed no comparable shift (41.2% to 41.9%), so higher acceptance was
-not a general effect of continuous batching.
+execution configuration rather than measurement noise. A later
+[targeted investigation](metal_gemv_numerical_differences.md) found that target
+verification diverged first: packed execution crossed the Metal GEMV threshold,
+and small GEMV/GEMM numerical differences flipped a near-tied greedy token
+choice. Per-verification totals matched the final statistics, and forcing both
+cases through GEMV restored identical output and acceptance totals. The
+4-request workload showed no comparable shift (41.2% to 41.9%), so higher
+acceptance was not a general effect of continuous batching.
 
 The shift cannot plausibly explain follower TTFT falling from 63.227 to 1.564
 seconds, but it may contribute to throughput. Proposed draft tokens fell by

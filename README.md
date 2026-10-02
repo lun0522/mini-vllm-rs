@@ -37,19 +37,22 @@ order:
 1. [Metal GEMV threshold](benchmarks/metal_gemv_threshold.md) starts with GPU
    inference, measuring the initial continuous-batching implementation and
    when Metal's GEMV path should replace quantized matmul.
-2. [CPU paged attention with F32 activations](benchmarks/cpu_paged_attention_f32.md)
+2. [Metal GEMV threshold V2.0](benchmarks/metal_gemv_numerical_differences.md)
+   revisits that threshold as a numerical question, showing how GEMV/GEMM
+   differences can change greedy output and speculative acceptance.
+3. [CPU paged attention with F32 activations](benchmarks/cpu_paged_attention_f32.md)
    then establishes the CPU attention baseline, comparing contiguous and paged
    attention, repeated KV, grouped Q, and page-wise V matmul.
-3. [CPU activation dtype](benchmarks/cpu_activation_dtype.md) introduces F16 to
+4. [CPU activation dtype](benchmarks/cpu_activation_dtype.md) introduces F16 to
    reduce activation and KV-cache memory, diagnoses Candle's slow native F16
    quantized matmul, and recovers approximately F32 performance by routing it
    through the optimized F32 path.
-4. [CPU paged attention with F16 activations](benchmarks/cpu_paged_attention_f16.md)
+5. [CPU paged attention with F16 activations](benchmarks/cpu_paged_attention_f16.md)
    revisits the earlier attention choices under the new activation dtype and
    verifies whether the best F32 implementation remains the best F16 default.
-5. [Speculative decoding policies](benchmarks/speculative_decoding.md) compares
+6. [Speculative decoding policies](benchmarks/speculative_decoding.md) compares
    fixed and dynamic draft-token counts across Qwen and Llama model pairs.
-6. [Continuous batching](benchmarks/continuous_batching.md) measures queued-
+7. [Continuous batching](benchmarks/continuous_batching.md) measures queued-
    request TTFT, aggregate throughput, and anchor latency with 2-request and
    heterogeneous 4-request workloads.
 
