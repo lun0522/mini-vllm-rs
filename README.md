@@ -49,6 +49,9 @@ order:
    verifies whether the best F32 implementation remains the best F16 default.
 5. [Speculative decoding policies](benchmarks/speculative_decoding.md) compares
    fixed and dynamic draft-token counts across Qwen and Llama model pairs.
+6. [Continuous batching](benchmarks/continuous_batching.md) measures queued-
+   request TTFT, aggregate throughput, and anchor latency with 2-request and
+   heterogeneous 4-request workloads.
 
 ## Run
 
