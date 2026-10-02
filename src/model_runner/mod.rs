@@ -52,8 +52,15 @@ impl FromStr for ActivationDType {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SchedulingPolicy {
+    /// Admits requests in arrival order, schedules all available decode work first, then lets
+    /// active prefills consume the remaining token budget in admission order.
     FirstComeFirstServed,
+    /// Admits shorter prefills first, schedules all available decode work first, then gives the
+    /// remaining token budget to active prefills with the fewest tokens left.
     ShortestPrefillFirst,
+    /// Admits requests in arrival order, schedules all available decode work first, then rotates
+    /// which active prefill receives the remaining token budget first across iterations.
+    RoundRobin,
 }
 
 impl SchedulingPolicy {
@@ -61,6 +68,7 @@ impl SchedulingPolicy {
         match self {
             Self::FirstComeFirstServed => "first-come-first-served",
             Self::ShortestPrefillFirst => "shortest-prefill-first",
+            Self::RoundRobin => "round-robin",
         }
     }
 }
@@ -78,6 +86,7 @@ impl FromStr for SchedulingPolicy {
         match value {
             "first-come-first-served" => Ok(Self::FirstComeFirstServed),
             "shortest-prefill-first" => Ok(Self::ShortestPrefillFirst),
+            "round-robin" => Ok(Self::RoundRobin),
             unsupported => Err(format!("unsupported scheduling policy: {unsupported}")),
         }
     }
@@ -240,6 +249,7 @@ mod tests {
             "shortest-prefill-first".parse(),
             Ok(SchedulingPolicy::ShortestPrefillFirst)
         );
+        assert_eq!("round-robin".parse(), Ok(SchedulingPolicy::RoundRobin));
         assert!("unknown".parse::<SchedulingPolicy>().is_err());
     }
 

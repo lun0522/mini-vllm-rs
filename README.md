@@ -23,6 +23,10 @@ If you are interested in the project's design, see the
 design, CPU and GPU inference backends, and how the project differs from
 mistral.rs, vLLM, and SGLang.
 
+I also wrote a retrospective blog post on what I learned while building this
+project:
+[Building an LLM Inference Engine with AI: The Code Was the Easy Part](https://lun0522.github.io/building-an-llm-inference-engine/).
+
 ## Benchmarks
 
 Benchmarking is driven by the Python-based
@@ -99,8 +103,9 @@ cargo run --release
 - `--max-active-request-count <count>` limits the number of requests holding
   active inference state and defaults to `4`. Contiguous KV-cache storage
   limits this to `1`.
-- `--scheduling-policy <policy>` selects `first-come-first-served` or
-  `shortest-prefill-first` and defaults to `first-come-first-served`.
+- `--scheduling-policy <policy>` selects `first-come-first-served`,
+  `shortest-prefill-first`, or `round-robin` and defaults to
+  `first-come-first-served`.
 - `--input-preprocessing-thread-count <count>` sets the request-handler
   preprocessing pool size and defaults to `4`.
 - `--request-socket <path>` changes the public request-handler Unix socket and

@@ -84,7 +84,8 @@ impl InferenceEngine {
                 self.finalize_request_abort(request_id, error)?;
             }
         }
-        self.process_scheduling_decision(self.scheduler.create_scheduling_decision())?;
+        let scheduling_decision = self.scheduler.create_scheduling_decision();
+        self.process_scheduling_decision(scheduling_decision)?;
         Ok(())
     }
 
