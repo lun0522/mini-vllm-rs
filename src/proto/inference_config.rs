@@ -140,6 +140,7 @@ impl fmt::Display for DraftTokenCountPolicy {
 impl KvCacheType {
     fn cli_value(self) -> &'static str {
         match self {
+            Self::Unspecified => "unspecified",
             Self::Contiguous => "contiguous",
             Self::Paged => "paged",
             Self::PagedPrefix => "paged-prefix",
@@ -165,6 +166,10 @@ impl KvCacheConfig {
             .map_err(|_| anyhow::anyhow!("target KV-cache size does not fit in usize"))?;
         let kv_cache_type = KvCacheType::try_from(self.kv_cache_type)
             .map_err(|_| anyhow::anyhow!("unsupported KV-cache type {}", self.kv_cache_type))?;
+        anyhow::ensure!(
+            kv_cache_type != KvCacheType::Unspecified,
+            "KV-cache type must be specified"
+        );
         if kv_cache_type != KvCacheType::Contiguous {
             anyhow::ensure!(
                 self.per_page_token_count > 0,
@@ -210,6 +215,7 @@ impl fmt::Display for KvCacheConfig {
 impl SchedulingPolicy {
     fn cli_value(self) -> &'static str {
         match self {
+            Self::Unspecified => "unspecified",
             Self::FirstComeFirstServed => "first-come-first-served",
             Self::ShortestPrefillFirst => "shortest-prefill-first",
             Self::RoundRobin => "round-robin",
@@ -222,6 +228,28 @@ impl FromStr for SchedulerConfig {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         parse_textproto(value, "inference_config.SchedulerConfig")
+    }
+}
+
+impl SchedulerConfig {
+    pub(crate) fn validate(&self) -> AnyhowResult<()> {
+        anyhow::ensure!(
+            self.max_batched_token_count > 0,
+            "maximum batched token count must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.max_active_request_count > 0,
+            "maximum active request count must be greater than zero"
+        );
+        let scheduling_policy =
+            SchedulingPolicy::try_from(self.scheduling_policy).map_err(|_| {
+                anyhow::anyhow!("unsupported scheduling policy {}", self.scheduling_policy)
+            })?;
+        anyhow::ensure!(
+            scheduling_policy != SchedulingPolicy::Unspecified,
+            "scheduling policy must be specified"
+        );
+        Ok(())
     }
 }
 
@@ -238,7 +266,7 @@ impl fmt::Display for SchedulerConfig {
             self.max_active_request_count.separate_with_commas()
         )?;
         let scheduling_policy =
-            SchedulingPolicy::try_from(self.scheduling_policy).unwrap_or(DEFAULT_SCHEDULING_POLICY);
+            SchedulingPolicy::try_from(self.scheduling_policy).map_err(|_| fmt::Error)?;
         writeln!(
             formatter,
             "Scheduling policy: {}",

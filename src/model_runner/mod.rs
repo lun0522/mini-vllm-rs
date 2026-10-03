@@ -8,7 +8,6 @@ use crate::proto::inference_config::KvCacheConfig as KvCacheConfigProto;
 use crate::proto::inference_config::KvCacheType as KvCacheTypeProto;
 use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
 use crate::proto::inference_config::SchedulingPolicy as SchedulingPolicyProto;
-use crate::proto::inference_config::DEFAULT_SCHEDULING_POLICY;
 use candle_core::DType;
 
 pub(crate) const DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT: usize = 16;
@@ -25,6 +24,9 @@ impl From<KvCacheConfigProto> for KvCacheConfig {
         let kv_cache_type = match KvCacheTypeProto::try_from(config.kv_cache_type)
             .expect("validated KV-cache configuration should contain a supported cache type")
         {
+            KvCacheTypeProto::Unspecified => {
+                unreachable!("validated KV-cache configuration should specify a cache type")
+            }
             KvCacheTypeProto::Contiguous => KvCacheType::Contiguous,
             KvCacheTypeProto::Paged => KvCacheType::Paged {
                 per_page_token_count: config.per_page_token_count as usize,
@@ -178,8 +180,11 @@ pub(crate) struct SchedulerConfig {
 impl From<SchedulerConfigProto> for SchedulerConfig {
     fn from(config: SchedulerConfigProto) -> Self {
         let scheduling_policy = match SchedulingPolicyProto::try_from(config.scheduling_policy)
-            .unwrap_or(DEFAULT_SCHEDULING_POLICY)
+            .expect("validated scheduler configuration should contain a supported policy")
         {
+            SchedulingPolicyProto::Unspecified => {
+                unreachable!("validated scheduler configuration should specify a policy")
+            }
             SchedulingPolicyProto::FirstComeFirstServed => SchedulingPolicy::FirstComeFirstServed,
             SchedulingPolicyProto::ShortestPrefillFirst => SchedulingPolicy::ShortestPrefillFirst,
             SchedulingPolicyProto::RoundRobin => SchedulingPolicy::RoundRobin,

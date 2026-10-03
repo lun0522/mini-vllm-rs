@@ -9,6 +9,7 @@ use crate::proto::inference_config::KvCacheConfig as KvCacheConfigProto;
 use crate::proto::inference_config::KvCacheType as KvCacheTypeProto;
 use crate::proto::inference_config::ModelConfig;
 use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
+use crate::proto::inference_config::SchedulingPolicy as SchedulingPolicyProto;
 use crate::proto::inference_config::DEFAULT_KV_CACHE_TYPE;
 use crate::proto::inference_config::DEFAULT_SCHEDULING_POLICY;
 use argh::FromArgs;
@@ -107,6 +108,7 @@ impl MainProcessArgs {
             draft_model.validate()?;
         }
         self.kv_cache_config.validate()?;
+        self.scheduler_config.validate()?;
         Ok(())
     }
 }
@@ -150,7 +152,7 @@ fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
     normalize_scheduler_config(&mut args.scheduler_config);
     if args.input_preprocessing_thread_count == 0 {
         warn!(
-            "Invalid input preprocessing thread count 0; using default value \
+            "Input preprocessing thread count is 0; using default value \
              {DEFAULT_INPUT_PREPROCESSING_THREAD_COUNT}"
         );
         args.input_preprocessing_thread_count = DEFAULT_INPUT_PREPROCESSING_THREAD_COUNT;
@@ -182,18 +184,23 @@ fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
 fn normalize_kv_cache_config(config: &mut KvCacheConfigProto) {
     if config.target_kv_cache_size_bytes == 0 {
         warn!(
-            "Invalid target KV-cache size {}; using default value \
-             {}",
-            config.target_kv_cache_size_bytes.separate_with_commas(),
+            "Target KV-cache size is 0; using default value {}",
             DEFAULT_TARGET_KV_CACHE_SIZE_BYTES.separate_with_commas()
         );
         config.target_kv_cache_size_bytes = DEFAULT_TARGET_KV_CACHE_SIZE_BYTES as u64;
     }
-    let kv_cache_type =
-        KvCacheTypeProto::try_from(config.kv_cache_type).unwrap_or(DEFAULT_KV_CACHE_TYPE);
+    let kv_cache_type = match KvCacheTypeProto::try_from(config.kv_cache_type) {
+        Ok(KvCacheTypeProto::Unspecified) => {
+            warn!("KV-cache type is unspecified; using default value contiguous");
+            config.kv_cache_type = DEFAULT_KV_CACHE_TYPE.into();
+            DEFAULT_KV_CACHE_TYPE
+        }
+        Ok(kv_cache_type) => kv_cache_type,
+        Err(_) => return,
+    };
     if kv_cache_type != KvCacheTypeProto::Contiguous && config.per_page_token_count == 0 {
         warn!(
-            "Invalid KV-cache page token count 0; using default value \
+            "KV-cache page token count is 0; using default value \
              {DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT}"
         );
         config.per_page_token_count = DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT as u32;
@@ -203,22 +210,27 @@ fn normalize_kv_cache_config(config: &mut KvCacheConfigProto) {
 fn normalize_scheduler_config(config: &mut SchedulerConfigProto) {
     if config.max_batched_token_count == 0 {
         warn!(
-            "Invalid maximum batched token count 0; using default value {DEFAULT_MAX_BATCHED_TOKEN_COUNT}"
+            "Maximum batched token count is 0; using default value {DEFAULT_MAX_BATCHED_TOKEN_COUNT}"
         );
         config.max_batched_token_count = DEFAULT_MAX_BATCHED_TOKEN_COUNT as u32;
     }
     if config.max_active_request_count == 0 {
         warn!(
-            "Invalid maximum active request count 0; using default value {DEFAULT_MAX_ACTIVE_REQUEST_COUNT}"
+            "Maximum active request count is 0; using default value {DEFAULT_MAX_ACTIVE_REQUEST_COUNT}"
         );
         config.max_active_request_count = DEFAULT_MAX_ACTIVE_REQUEST_COUNT as u32;
+    }
+    if let Ok(SchedulingPolicyProto::Unspecified) =
+        SchedulingPolicyProto::try_from(config.scheduling_policy)
+    {
+        warn!("Scheduling policy is unspecified; using default value first-come-first-served");
+        config.scheduling_policy = DEFAULT_SCHEDULING_POLICY.into();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::inference_config::SchedulingPolicy as SchedulingPolicyProto;
 
     fn fixed_draft_token_count(policy: &DraftTokenCountPolicy) -> u64 {
         let Some(Policy::Fixed(policy)) = policy.policy.as_ref() else {
@@ -332,6 +344,41 @@ mod tests {
             DEFAULT_TARGET_KV_CACHE_SIZE_BYTES as u64
         );
         assert_eq!(args.kv_cache_config.draft_kv_cache_size_bytes, 0);
+    }
+
+    #[test]
+    fn normalizes_an_empty_kv_cache_configuration() {
+        let mut config = KvCacheConfigProto::default();
+
+        normalize_kv_cache_config(&mut config);
+
+        assert_eq!(config.kv_cache_type, KvCacheTypeProto::Contiguous as i32);
+        assert_eq!(
+            config.target_kv_cache_size_bytes,
+            DEFAULT_TARGET_KV_CACHE_SIZE_BYTES as u64
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn normalizes_an_empty_scheduler_configuration() {
+        let mut config = SchedulerConfigProto::default();
+
+        normalize_scheduler_config(&mut config);
+
+        assert_eq!(
+            config.max_batched_token_count,
+            DEFAULT_MAX_BATCHED_TOKEN_COUNT as u32
+        );
+        assert_eq!(
+            config.max_active_request_count,
+            DEFAULT_MAX_ACTIVE_REQUEST_COUNT as u32
+        );
+        assert_eq!(
+            config.scheduling_policy,
+            SchedulingPolicyProto::FirstComeFirstServed as i32
+        );
+        assert!(config.validate().is_ok());
     }
 
     #[test]

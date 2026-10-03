@@ -100,9 +100,10 @@ message KvCacheConfig {
 
 // Selects the KV-cache storage implementation.
 enum KvCacheType {
-  KV_CACHE_TYPE_CONTIGUOUS = 0;
-  KV_CACHE_TYPE_PAGED = 1;
-  KV_CACHE_TYPE_PAGED_PREFIX = 2;
+  KV_CACHE_TYPE_UNSPECIFIED = 0;
+  KV_CACHE_TYPE_CONTIGUOUS = 1;
+  KV_CACHE_TYPE_PAGED = 2;
+  KV_CACHE_TYPE_PAGED_PREFIX = 3;
 }
 
 // Configures request admission and model-batch construction.
@@ -117,7 +118,8 @@ message SchedulerConfig {
 
 // Selects the order in which requests are admitted and prefills are scheduled.
 enum SchedulingPolicy {
-  SCHEDULING_POLICY_FIRST_COME_FIRST_SERVED = 0;
-  SCHEDULING_POLICY_SHORTEST_PREFILL_FIRST = 1;
-  SCHEDULING_POLICY_ROUND_ROBIN = 2;
+  SCHEDULING_POLICY_UNSPECIFIED = 0;
+  SCHEDULING_POLICY_FIRST_COME_FIRST_SERVED = 1;
+  SCHEDULING_POLICY_SHORTEST_PREFILL_FIRST = 2;
+  SCHEDULING_POLICY_ROUND_ROBIN = 3;
 }
