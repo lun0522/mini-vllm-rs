@@ -1,6 +1,7 @@
 use crate::model_runner::SchedulerConfig;
 use crate::proto::model_runner::DraftTokenCountHistogramBucket;
 use crate::proto::model_runner::DraftTokenStats;
+use crate::proto::model_runner::TextGenerationFinishReason;
 use crate::proto::model_runner::TextGenerationStats;
 use crate::proto::model_runner::TokenGenerationLatency;
 use anyhow::Result;
@@ -142,7 +143,7 @@ impl InferenceEngine {
         phase: text_generation::GenerationPhase,
     ) -> Result<()> {
         self.scheduler.update_request_state(request_id, phase)?;
-        if !matches!(phase, text_generation::GenerationPhase::Finished) {
+        if !matches!(phase, text_generation::GenerationPhase::Finished { .. }) {
             return Ok(());
         }
 
@@ -193,12 +194,13 @@ impl InferenceEngine {
                 );
                 let draft_stats = result.stats.draft_stats.as_ref();
                 info!(
-                    "Engine state (backend_id={}): request_id={} status=completed input_tokens={} \
-                     output_tokens={} queue_us={} prefill_us={} ttft_us={} decode_us={} \
+                    "Engine state (backend_id={}): request_id={} status=completed finish_reason={} \
+                     input_tokens={} output_tokens={} queue_us={} prefill_us={} ttft_us={} decode_us={} \
                      target_cached_tokens={} draft_cached_tokens={} draft_accepted={} \
                      draft_proposed={} draft_selected_histogram={}",
                     self.backend_id,
                     request_id,
+                    result.stats.finish_reason,
                     result.stats.input_token_count,
                     result.stats.output_token_count,
                     queue_duration.as_micros().separate_with_commas(),
@@ -292,6 +294,7 @@ fn create_client_facing_generation_stats(
                 ),
             });
     TextGenerationStats {
+        finish_reason: TextGenerationFinishReason::from(stats.finish_reason) as i32,
         input_token_count: stats.input_token_count,
         output_token_count: stats.output_token_count,
         token_generation_latency,
@@ -364,6 +367,7 @@ mod tests {
     #[test]
     fn omits_draft_stats_for_target_only_generation() {
         let stats = text_generation::TextGenerationStats {
+            finish_reason: text_generation::GenerationFinishReason::EndOfSequenceToken,
             input_token_count: 3,
             output_token_count: 2,
             target_cached_token_count: 0,
@@ -375,12 +379,17 @@ mod tests {
 
         let client_stats = create_client_facing_generation_stats(&stats, now, Some(now), Some(now));
 
+        assert_eq!(
+            client_stats.finish_reason,
+            TextGenerationFinishReason::EndOfSequenceToken as i32
+        );
         assert!(client_stats.draft_token_stats.is_none());
     }
 
     #[test]
     fn converts_draft_stats_with_a_sorted_histogram() {
         let stats = text_generation::TextGenerationStats {
+            finish_reason: text_generation::GenerationFinishReason::MaxNewTokensReached,
             input_token_count: 3,
             output_token_count: 2,
             target_cached_token_count: 0,
@@ -398,6 +407,10 @@ mod tests {
         let client_stats = create_client_facing_generation_stats(&stats, now, Some(now), Some(now));
         let draft_stats = client_stats.draft_token_stats.unwrap();
 
+        assert_eq!(
+            client_stats.finish_reason,
+            TextGenerationFinishReason::MaxNewTokensReached as i32
+        );
         assert_eq!(draft_stats.accepted_token_count, 5);
         assert_eq!(draft_stats.proposed_token_count, 8);
         assert_eq!(draft_stats.selected_token_count_histogram.len(), 2);

@@ -13,6 +13,7 @@ use crate::proto::model_runner::GetModelMetadataRequest;
 use crate::proto::model_runner::GetModelMetadataResponse;
 use crate::proto::model_runner::ModelRunnerCommand;
 use crate::utils::rpc_shutdown::RpcShutdown;
+use anyhow::ensure;
 use anyhow::Context;
 use anyhow::Result;
 use log::info;
@@ -151,7 +152,7 @@ impl ModelRunnerService for ModelRunnerRpcService {
             self.metadata.kv_cache_token_capacity,
             model_context_length,
         )
-        .map_err(Status::invalid_argument)?;
+        .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let request_id = request.request_id;
         let queued_at = Instant::now();
         // TODO: Use a smarter way to choose inference backend.
@@ -287,35 +288,35 @@ fn normalize_generate_text_request(
     request: &mut GenerateTextRequest,
     kv_cache_token_capacity: usize,
     model_context_length: usize,
-) -> Result<(), String> {
-    if request.input_token_ids.is_empty() {
-        return Err("input token IDs must not be empty".to_owned());
-    }
+) -> Result<()> {
+    ensure!(
+        !request.input_token_ids.is_empty(),
+        "input token IDs must not be empty"
+    );
     let input_token_count = request.input_token_ids.len();
-    if input_token_count > kv_cache_token_capacity {
-        return Err(format!(
-            "request input contains {input_token_count} tokens but the configured KV-cache \
-             capacity is {kv_cache_token_capacity}"
-        ));
-    }
-    if input_token_count >= model_context_length {
-        return Err(format!(
-            "request input contains {input_token_count} tokens but the effective model context limit \
-             is {model_context_length}; at least one output token must fit within the context"
-        ));
-    }
-    if request.max_new_tokens == 0 {
-        return Err("max_new_tokens must be greater than zero".to_owned());
-    }
+    ensure!(
+        input_token_count <= kv_cache_token_capacity,
+        "request input contains {input_token_count} tokens but the configured KV-cache \
+         capacity is {kv_cache_token_capacity}"
+    );
+    ensure!(
+        input_token_count < model_context_length,
+        "request input contains {input_token_count} tokens but the effective model context limit \
+         is {model_context_length}; at least one output token must fit within the context"
+    );
+    ensure!(
+        request.max_new_tokens > 0,
+        "max_new_tokens must be greater than zero"
+    );
 
     // The final generated token remains pending rather than being written to the cache, so one
     // output token can be generated even when the input already fills the cache.
     let maximum_new_token_count = (kv_cache_token_capacity - input_token_count)
         .checked_add(1)
-        .ok_or_else(|| "maximum new token count does not fit in usize".to_owned())?
+        .context("maximum new token count does not fit in usize")?
         .min(model_context_length - input_token_count);
     let maximum_new_token_count = u64::try_from(maximum_new_token_count)
-        .map_err(|_| "maximum new token count does not fit in u64".to_owned())?;
+        .context("maximum new token count does not fit in u64")?;
     if request.max_new_tokens > maximum_new_token_count {
         warn!(
             "Requested {} new tokens for {input_token_count} input tokens with KV-cache capacity \
@@ -388,7 +389,7 @@ mod tests {
 
         let error = normalize_generate_text_request(&mut request, 16, 32).unwrap_err();
 
-        assert_eq!(error, "input token IDs must not be empty");
+        assert_eq!(error.to_string(), "input token IDs must not be empty");
     }
 
     #[test]
@@ -401,7 +402,10 @@ mod tests {
 
         let error = normalize_generate_text_request(&mut request, 16, 32).unwrap_err();
 
-        assert_eq!(error, "max_new_tokens must be greater than zero");
+        assert_eq!(
+            error.to_string(),
+            "max_new_tokens must be greater than zero"
+        );
     }
 
     #[test]
@@ -414,7 +418,7 @@ mod tests {
 
         let error = normalize_generate_text_request(&mut request, 16, 32).unwrap_err();
 
-        assert!(error.contains("input contains 17 tokens"));
+        assert!(error.to_string().contains("input contains 17 tokens"));
     }
 
     #[test]
@@ -467,7 +471,9 @@ mod tests {
                 get_effective_context_length(&metadata(target, draft)).unwrap(),
             )
             .unwrap_err();
-            assert!(error.contains("effective model context limit is 3"));
+            assert!(error
+                .to_string()
+                .contains("effective model context limit is 3"));
         }
     }
 }

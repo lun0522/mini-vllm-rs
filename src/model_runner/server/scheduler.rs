@@ -109,7 +109,7 @@ impl Scheduler {
             .with_context(|| format!("active request {request_id} does not exist"))?;
         let scheduling_phase = self.active_requests[request_index].phase;
         let next_scheduling_phase = match (generation_phase, scheduling_phase) {
-            (GenerationPhase::Finished, _) => {
+            (GenerationPhase::Finished { .. }, _) => {
                 self.active_requests.remove(request_index);
                 return Ok(());
             }
@@ -287,6 +287,8 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_runner::server::text_generation::GenerationFinishReason;
+
     fn scheduler_with_token_budget(
         max_batched_token_count: usize,
         max_active_request_count: usize,
@@ -344,7 +346,12 @@ mod tests {
         assert_eq!(scheduler.active_requests.len(), 2);
         assert_eq!(scheduler.queued_requests.len(), 1);
         scheduler
-            .update_request_state(1, GenerationPhase::Finished)
+            .update_request_state(
+                1,
+                GenerationPhase::Finished {
+                    finish_reason: GenerationFinishReason::MaxNewTokensReached,
+                },
+            )
             .unwrap();
 
         let admitted_request_ids = scheduler.admit_queued_requests();

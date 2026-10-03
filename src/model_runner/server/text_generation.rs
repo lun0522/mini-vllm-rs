@@ -1,6 +1,7 @@
 use crate::models::ForwardInput;
 use crate::models::ModelRole;
 use crate::proto::model_runner::GenerateTextRequest;
+use crate::proto::model_runner::TextGenerationFinishReason;
 use anyhow::bail;
 use anyhow::ensure;
 use anyhow::Context;
@@ -30,11 +31,41 @@ impl fmt::Display for GenerationCancelled {
 
 impl Error for GenerationCancelled {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GenerationFinishReason {
+    EndOfSequenceToken,
+    MaxNewTokensReached,
+}
+
+impl From<GenerationFinishReason> for TextGenerationFinishReason {
+    fn from(finish_reason: GenerationFinishReason) -> Self {
+        match finish_reason {
+            GenerationFinishReason::EndOfSequenceToken => Self::EndOfSequenceToken,
+            GenerationFinishReason::MaxNewTokensReached => Self::MaxNewTokensReached,
+        }
+    }
+}
+
+impl fmt::Display for GenerationFinishReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EndOfSequenceToken => formatter.write_str("end_of_sequence_token"),
+            Self::MaxNewTokensReached => formatter.write_str("max_new_tokens_reached"),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum GenerationPhase {
-    Prefill { remaining_token_count: usize },
-    Decode { generated_token_count: usize },
-    Finished,
+    Prefill {
+        remaining_token_count: usize,
+    },
+    Decode {
+        generated_token_count: usize,
+    },
+    Finished {
+        finish_reason: GenerationFinishReason,
+    },
 }
 
 impl fmt::Display for GenerationPhase {
@@ -52,7 +83,9 @@ impl fmt::Display for GenerationPhase {
                 formatter,
                 "decode(generated_tokens={generated_token_count})"
             ),
-            Self::Finished => formatter.write_str("finished"),
+            Self::Finished { finish_reason } => {
+                write!(formatter, "finished(reason={finish_reason})")
+            }
         }
     }
 }
@@ -150,6 +183,7 @@ pub(super) struct CompletedGeneration {
 }
 
 pub(super) struct TextGenerationStats {
+    pub(super) finish_reason: GenerationFinishReason,
     pub(super) input_token_count: u64,
     pub(super) output_token_count: u64,
     pub(super) target_cached_token_count: usize,
@@ -294,7 +328,7 @@ impl RequestExecutionState {
             } => Ok(PreparedForward::SpeculativeDecode(
                 self.prepare_speculative_decode(generated_token_count),
             )),
-            GenerationPhase::Finished => {
+            GenerationPhase::Finished { .. } => {
                 bail!("cannot prepare a finished request (speculative decoding)")
             }
         }
@@ -334,7 +368,7 @@ impl RequestExecutionState {
                     },
                 )
             }
-            GenerationPhase::Finished => {
+            GenerationPhase::Finished { .. } => {
                 bail!("cannot prepare a finished request (target-only)")
             }
         };
@@ -492,12 +526,12 @@ impl RequestExecutionState {
     }
 
     pub(super) fn into_completed_generation(self) -> Result<CompletedGeneration> {
-        ensure!(
-            matches!(self.generation_phase, GenerationPhase::Finished),
-            "generation request is not finished"
-        );
+        let GenerationPhase::Finished { finish_reason } = self.generation_phase else {
+            bail!("generation request is not finished")
+        };
         let output_token_count = self.tokens.len() - self.input_token_count;
         let stats = TextGenerationStats {
+            finish_reason,
             input_token_count: u64::try_from(self.input_token_count)
                 .context("input token count does not fit in u64")?,
             output_token_count: u64::try_from(output_token_count)
@@ -663,12 +697,18 @@ impl RequestExecutionState {
         generated_token_count: usize,
         should_continue: bool,
     ) -> GenerationPhase {
-        if should_continue && generated_token_count < self.max_new_token_count {
+        if !should_continue {
+            GenerationPhase::Finished {
+                finish_reason: GenerationFinishReason::EndOfSequenceToken,
+            }
+        } else if generated_token_count < self.max_new_token_count {
             GenerationPhase::Decode {
                 generated_token_count,
             }
         } else {
-            GenerationPhase::Finished
+            GenerationPhase::Finished {
+                finish_reason: GenerationFinishReason::MaxNewTokensReached,
+            }
         }
     }
 }
@@ -1646,11 +1686,15 @@ mod tests {
         ));
         assert!(matches!(
             execution_state.determine_decode_phase(2, true),
-            GenerationPhase::Finished
+            GenerationPhase::Finished {
+                finish_reason: GenerationFinishReason::MaxNewTokensReached
+            }
         ));
         assert!(matches!(
             execution_state.determine_decode_phase(1, false),
-            GenerationPhase::Finished
+            GenerationPhase::Finished {
+                finish_reason: GenerationFinishReason::EndOfSequenceToken
+            }
         ));
     }
 
@@ -1753,9 +1797,32 @@ mod tests {
 
         assert_eq!(result.committed_token_count, 1);
         assert!(!result.should_continue);
+        assert!(matches!(
+            execution_state
+                .determine_decode_phase(result.committed_token_count, result.should_continue),
+            GenerationPhase::Finished {
+                finish_reason: GenerationFinishReason::EndOfSequenceToken
+            }
+        ));
         assert_eq!(execution_state.tokens, vec![1, 2]);
         assert_eq!(execution_state.pending_output_token_ids, vec![2]);
         Ok(())
+    }
+
+    #[test]
+    fn completed_generation_records_the_finish_reason() {
+        for finish_reason in [
+            GenerationFinishReason::EndOfSequenceToken,
+            GenerationFinishReason::MaxNewTokensReached,
+        ] {
+            let mut execution_state = create_test_execution_state(vec![1], vec![]);
+            execution_state.draft_token_count_state = None;
+            execution_state.generation_phase = GenerationPhase::Finished { finish_reason };
+
+            let completed = execution_state.into_completed_generation().unwrap();
+
+            assert_eq!(completed.stats.finish_reason, finish_reason);
+        }
     }
 
     #[test]

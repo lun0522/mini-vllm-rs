@@ -148,6 +148,11 @@ async fn validate_text_generation(channel: Channel) -> anyhow::Result<()> {
         "expected 4 output tokens, received {}",
         stats.output_token_count
     );
+    anyhow::ensure!(
+        stats.finish_reason == model_runner::TextGenerationFinishReason::MaxNewTokensReached as i32,
+        "expected maximum-new-token-count finish reason, received {}",
+        stats.finish_reason
+    );
     let latency = stats
         .token_generation_latency
         .ok_or_else(|| anyhow::anyhow!("generation returned no latency statistics"))?;

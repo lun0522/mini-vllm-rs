@@ -126,6 +126,10 @@ complete blocks for reuse across requests. See the
 [KV-cache architecture](server/kv_cache/README.md) for allocation, prefix
 indexing, eviction, and page ownership details.
 
-A successful request ends with a `TextGenerationStats` event. Cancellation or
-execution failure aborts the request, releases its model and cache state, and
+A successful request ends with a `TextGenerationStats` event. Its finish reason
+reports whether generation sampled an end-of-sequence token or reached the
+effective maximum new-token count. A `MAX_NEW_TOKENS_REACHED` result
+with fewer output tokens than the client originally requested indicates that
+the model context or KV-cache capacity reduced the requested limit. Cancellation
+or execution failure aborts the request, releases its model and cache state, and
 returns a gRPC error.

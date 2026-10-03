@@ -87,6 +87,7 @@ fn stats_event(stats: TextGenerationStats) -> GenerateTextEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::model_runner::TextGenerationFinishReason;
     use crate::proto::model_runner::TextGenerationStats;
     use tokenizers::Tokenizer;
 
@@ -107,7 +108,10 @@ mod tests {
     fn stats_event() -> ModelRunnerGenerateTextEvent {
         ModelRunnerGenerateTextEvent {
             event: Some(model_runner_generate_text_event::Event::Stats(
-                TextGenerationStats::default(),
+                TextGenerationStats {
+                    finish_reason: TextGenerationFinishReason::EndOfSequenceToken as i32,
+                    ..Default::default()
+                },
             )),
         }
     }
@@ -136,7 +140,10 @@ mod tests {
         assert_eq!(final_events.events.len(), 1);
         assert!(matches!(
             final_events.events[0].event,
-            Some(generate_text_event::Event::Stats(_))
+            Some(generate_text_event::Event::Stats(TextGenerationStats {
+                finish_reason,
+                ..
+            })) if finish_reason == TextGenerationFinishReason::EndOfSequenceToken as i32
         ));
         assert!(final_events.finished);
     }

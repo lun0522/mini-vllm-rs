@@ -64,14 +64,22 @@ message GenerateTextEvent {
 }
 
 message TextGenerationStats {
+  // Observable reason that successful generation finished.
+  TextGenerationFinishReason finish_reason = 1;
   // Number of tokens in the encoded, formatted input prompt.
-  uint64 input_token_count = 1;
+  uint64 input_token_count = 2;
   // Number of generated tokens, excluding the terminal end-of-sequence token.
-  uint64 output_token_count = 2;
+  uint64 output_token_count = 3;
   // Token latency measurements; absent when generation produced no output token.
-  TokenGenerationLatency token_generation_latency = 3;
+  TokenGenerationLatency token_generation_latency = 4;
   // Speculative-decoding statistics; absent when no draft model is configured.
-  DraftTokenStats draft_token_stats = 4;
+  DraftTokenStats draft_token_stats = 5;
+}
+
+enum TextGenerationFinishReason {
+  TEXT_GENERATION_FINISH_REASON_UNSPECIFIED = 0;
+  END_OF_SEQUENCE_TOKEN = 1;
+  MAX_NEW_TOKENS_REACHED = 2;
 }
 
 message DraftTokenStats {

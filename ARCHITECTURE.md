@@ -142,13 +142,11 @@ remain in native Rust and avoid Python interpreter overhead.
 
 ## Future directions
 
-1. Validate requests against the model's context limit as well as KV-cache
-   capacity.
-2. Make scheduler admission aware of available paged KV-cache capacity.
-3. Add seeded temperature and top-p sampling for target-only generation.
-4. Improve overload and cancellation handling, including early removal of
+1. Make scheduler admission aware of available paged KV-cache capacity.
+2. Add seeded temperature and top-p sampling for target-only generation.
+3. Improve overload and cancellation handling, including early removal of
    cancelled queued requests and explicit capacity errors.
-5. Support and verify CUDA inference on Linux with NVIDIA GPUs.
-6. Add GPU paged attention, potentially using `candle-flash-attn`.
-7. Extend stochastic sampling to speculative decoding with a
+4. Support and verify CUDA inference on Linux with NVIDIA GPUs.
+5. Add GPU paged attention, potentially using `candle-flash-attn`.
+6. Extend stochastic sampling to speculative decoding with a
    distribution-correct acceptance algorithm.

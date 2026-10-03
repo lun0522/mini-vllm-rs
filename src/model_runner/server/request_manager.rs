@@ -516,7 +516,9 @@ mod tests {
             assert_eq!(execution_batch.len(), 1);
             Ok(vec![GenerationStep {
                 output_token_ids: Vec::new(),
-                generation_phase: GenerationPhase::Finished,
+                generation_phase: GenerationPhase::Finished {
+                    finish_reason: text_generation::GenerationFinishReason::MaxNewTokensReached,
+                },
             }])
         });
 
@@ -531,7 +533,10 @@ mod tests {
         };
         assert_eq!(error.to_string(), "inference request 9 is not executing");
         assert_eq!(results[2].request_id, 7);
-        assert!(matches!(&results[2].result, Ok(GenerationPhase::Finished)));
+        assert!(matches!(
+            &results[2].result,
+            Ok(GenerationPhase::Finished { .. })
+        ));
         Ok(())
     }
 }
