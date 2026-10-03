@@ -1,8 +1,8 @@
 use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
-use crate::model_runner::SchedulingPolicy;
 use crate::proto::inference_config::DraftModelRunnerConfig;
+use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
 use argh::FromArgs;
 use std::path::PathBuf;
 
@@ -27,15 +27,9 @@ pub(crate) struct ModelRunnerProcessArgs {
     /// total KV-cache size in bytes for the target model
     #[argh(option)]
     pub(super) target_kv_cache_size_bytes: usize,
-    /// maximum number of tokens processed in one model batch
+    /// textproto scheduler configuration
     #[argh(option)]
-    pub(super) max_batched_token_count: usize,
-    /// maximum number of requests that may hold active inference state
-    #[argh(option)]
-    pub(super) max_active_request_count: usize,
-    /// policy used to choose requests for the next model batch
-    #[argh(option)]
-    pub(super) scheduling_policy: SchedulingPolicy,
+    pub(super) scheduler_config: SchedulerConfigProto,
     /// directory where a Chrome trace is written
     #[argh(option)]
     pub(crate) trace_directory: Option<PathBuf>,

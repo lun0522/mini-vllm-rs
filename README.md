@@ -100,15 +100,15 @@ cargo run --release
 - `--target-kv-cache-size-bytes <bytes>` sets the target model's total KV-cache
   allocation and defaults to 2 GiB. A draft model is allocated enough KV-cache
   memory to hold the same number of tokens.
-- `--max-batched-token-count <count>` sets the scheduling work budget and
-  defaults to `512`. See
-  [Scheduling work budget](ARCHITECTURE.md#scheduling-work-budget).
-- `--max-active-request-count <count>` limits the number of requests holding
-  active inference state and defaults to `4`. Contiguous KV-cache storage
-  limits this to `1`.
-- `--scheduling-policy <policy>` selects `first-come-first-served`,
-  `shortest-prefill-first`, or `round-robin` and defaults to
-  `first-come-first-served`.
+- `--scheduler-config '<textproto>'` configures scheduling:
+  - `max_batched_token_count`: Sets the scheduling work budget and defaults to
+    `512`; see [Scheduling work budget](ARCHITECTURE.md#scheduling-work-budget).
+  - `max_active_request_count`: Limits the requests holding active inference
+    state and defaults to `4`; contiguous KV-cache storage limits it to `1`.
+  - `scheduling_policy`: Accepts
+    `SCHEDULING_POLICY_FIRST_COME_FIRST_SERVED`,
+    `SCHEDULING_POLICY_SHORTEST_PREFILL_FIRST`, or
+    `SCHEDULING_POLICY_ROUND_ROBIN`, and defaults to the first option.
 - `--input-preprocessing-thread-count <count>` sets the request-handler
   preprocessing pool size and defaults to `4`.
 - `--request-socket <path>` changes the public request-handler Unix socket and

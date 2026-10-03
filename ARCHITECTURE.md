@@ -44,7 +44,8 @@ generation iteration.
 
 ## Scheduling work budget
 
-`max_batched_token_count` limits the work selected in one scheduling iteration:
+The `SchedulerConfig.max_batched_token_count` protobuf field, supplied through
+`--scheduler-config`, limits the work selected in one scheduling iteration:
 
 - Each prefill token costs one unit.
 - Each decode iteration costs one unit.

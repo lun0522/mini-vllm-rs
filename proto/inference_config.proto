@@ -84,3 +84,20 @@ message AcceptedLengthDraftTokenCountPolicy {
   // Largest proposal length allowed by the policy.
   uint64 maximum_draft_token_count = 4;
 }
+
+// Configures request admission and model-batch construction.
+message SchedulerConfig {
+  // Maximum number of tokens processed in one model batch.
+  uint32 max_batched_token_count = 1;
+  // Maximum number of requests that may hold active inference state.
+  uint32 max_active_request_count = 2;
+  // Policy used to choose requests for the next model batch.
+  SchedulingPolicy scheduling_policy = 3;
+}
+
+// Selects the order in which requests are admitted and prefills are scheduled.
+enum SchedulingPolicy {
+  SCHEDULING_POLICY_FIRST_COME_FIRST_SERVED = 0;
+  SCHEDULING_POLICY_SHORTEST_PREFILL_FIRST = 1;
+  SCHEDULING_POLICY_ROUND_ROBIN = 2;
+}

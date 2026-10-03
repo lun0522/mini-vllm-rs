@@ -1,12 +1,13 @@
 use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheType;
-use crate::model_runner::SchedulingPolicy;
 use crate::proto::inference_config::draft_token_count_policy::Policy;
 use crate::proto::inference_config::DraftModelConfig;
 use crate::proto::inference_config::DraftTokenCountPolicy;
 use crate::proto::inference_config::FixedDraftTokenCountPolicy;
 use crate::proto::inference_config::ModelConfig;
+use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
+use crate::proto::inference_config::DEFAULT_SCHEDULING_POLICY;
 use argh::FromArgs;
 use log::warn;
 use std::fmt;
@@ -40,15 +41,9 @@ pub(crate) struct MainProcessArgs {
     /// total KV-cache size in bytes for the target model
     #[argh(option, default = "DEFAULT_TARGET_KV_CACHE_SIZE_BYTES")]
     pub(crate) target_kv_cache_size_bytes: usize,
-    /// maximum number of tokens processed in one model batch
-    #[argh(option, default = "DEFAULT_MAX_BATCHED_TOKEN_COUNT")]
-    pub(crate) max_batched_token_count: usize,
-    /// maximum number of requests that may hold active inference state
-    #[argh(option, default = "DEFAULT_MAX_ACTIVE_REQUEST_COUNT")]
-    pub(crate) max_active_request_count: usize,
-    /// policy used to choose requests for the next model batch
-    #[argh(option, default = "SchedulingPolicy::FirstComeFirstServed")]
-    pub(crate) scheduling_policy: SchedulingPolicy,
+    /// textproto scheduler configuration
+    #[argh(option, default = "default_scheduler_config()")]
+    pub(crate) scheduler_config: SchedulerConfigProto,
     /// number of request-handler threads used for concurrent input preprocessing
     #[argh(option, default = "DEFAULT_INPUT_PREPROCESSING_THREAD_COUNT")]
     pub(crate) input_preprocessing_thread_count: usize,
@@ -82,17 +77,7 @@ impl fmt::Display for MainProcessArgs {
             "Target KV cache size: {} bytes",
             self.target_kv_cache_size_bytes.separate_with_commas()
         )?;
-        writeln!(
-            formatter,
-            "Maximum batched token count: {}",
-            self.max_batched_token_count.separate_with_commas()
-        )?;
-        writeln!(
-            formatter,
-            "Maximum active request count: {}",
-            self.max_active_request_count.separate_with_commas()
-        )?;
-        writeln!(formatter, "Scheduling policy: {}", self.scheduling_policy)?;
+        write!(formatter, "{}", self.scheduler_config)?;
         writeln!(
             formatter,
             "Input preprocessing thread count: {}",
@@ -139,6 +124,14 @@ fn default_model_config() -> ModelConfig {
     }
 }
 
+fn default_scheduler_config() -> SchedulerConfigProto {
+    SchedulerConfigProto {
+        max_batched_token_count: DEFAULT_MAX_BATCHED_TOKEN_COUNT as u32,
+        max_active_request_count: DEFAULT_MAX_ACTIVE_REQUEST_COUNT as u32,
+        scheduling_policy: DEFAULT_SCHEDULING_POLICY.into(),
+    }
+}
+
 fn default_request_socket() -> PathBuf {
     PathBuf::from("/tmp/mini-vllm-request-handler.sock")
 }
@@ -157,17 +150,17 @@ fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
         );
         args.target_kv_cache_size_bytes = DEFAULT_TARGET_KV_CACHE_SIZE_BYTES;
     }
-    if args.max_batched_token_count == 0 {
+    if args.scheduler_config.max_batched_token_count == 0 {
         warn!(
             "Invalid maximum batched token count 0; using default value {DEFAULT_MAX_BATCHED_TOKEN_COUNT}"
         );
-        args.max_batched_token_count = DEFAULT_MAX_BATCHED_TOKEN_COUNT;
+        args.scheduler_config.max_batched_token_count = DEFAULT_MAX_BATCHED_TOKEN_COUNT as u32;
     }
-    if args.max_active_request_count == 0 {
+    if args.scheduler_config.max_active_request_count == 0 {
         warn!(
             "Invalid maximum active request count 0; using default value {DEFAULT_MAX_ACTIVE_REQUEST_COUNT}"
         );
-        args.max_active_request_count = DEFAULT_MAX_ACTIVE_REQUEST_COUNT;
+        args.scheduler_config.max_active_request_count = DEFAULT_MAX_ACTIVE_REQUEST_COUNT as u32;
     }
     if args.input_preprocessing_thread_count == 0 {
         warn!(
@@ -203,6 +196,7 @@ fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::inference_config::SchedulingPolicy as SchedulingPolicyProto;
 
     fn fixed_draft_token_count(policy: &DraftTokenCountPolicy) -> u64 {
         let Some(Policy::Fixed(policy)) = policy.policy.as_ref() else {
@@ -261,21 +255,17 @@ mod tests {
         let args = MainProcessArgs::from_args(
             &["mini-vllm-rs"],
             &[
-                "--max-batched-token-count",
-                "1024",
-                "--max-active-request-count",
-                "8",
-                "--scheduling-policy",
-                "shortest-prefill-first",
+                "--scheduler-config",
+                "max_batched_token_count: 1024 max_active_request_count: 8 scheduling_policy: SCHEDULING_POLICY_SHORTEST_PREFILL_FIRST",
             ],
         )
         .expect("scheduler arguments should parse");
 
-        assert_eq!(args.max_batched_token_count, 1024);
-        assert_eq!(args.max_active_request_count, 8);
+        assert_eq!(args.scheduler_config.max_batched_token_count, 1024);
+        assert_eq!(args.scheduler_config.max_active_request_count, 8);
         assert_eq!(
-            args.scheduling_policy,
-            SchedulingPolicy::ShortestPrefillFirst
+            args.scheduler_config.scheduling_policy,
+            SchedulingPolicyProto::ShortestPrefillFirst as i32
         );
     }
 

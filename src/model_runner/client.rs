@@ -5,6 +5,7 @@ use crate::model_runner::KvCacheType;
 use crate::model_runner::SchedulerConfig;
 use crate::models::model_downloader::ModelArtifacts;
 use crate::proto::inference_config::DraftModelRunnerConfig;
+use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
 use crate::proto::model_runner::model_runner_command::Command::Shutdown as ShutdownCommand;
 use crate::proto::model_runner::model_runner_service_client::ModelRunnerServiceClient;
 use crate::proto::model_runner::ModelRunnerCommand;
@@ -123,12 +124,14 @@ fn spawn(
         .arg(config.kv_cache_type.to_string())
         .arg("--target-kv-cache-size-bytes")
         .arg(config.target_kv_cache_size_bytes.to_string())
-        .arg("--max-batched-token-count")
-        .arg(config.scheduler_config.max_batched_token_count.to_string())
-        .arg("--max-active-request-count")
-        .arg(config.scheduler_config.max_active_request_count.to_string())
-        .arg("--scheduling-policy")
-        .arg(config.scheduler_config.scheduling_policy.to_string());
+        .arg("--scheduler-config")
+        .arg(
+            format_textproto(
+                &SchedulerConfigProto::from(config.scheduler_config),
+                "inference_config.SchedulerConfig",
+            )
+            .map_err(anyhow::Error::msg)?,
+        );
     if let Some(trace_directory) = &config.trace_directory {
         command.arg("--trace-directory").arg(trace_directory);
     }

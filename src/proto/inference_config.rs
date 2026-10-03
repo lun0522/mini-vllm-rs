@@ -2,10 +2,14 @@ use super::textproto::parse_textproto;
 use anyhow::Result as AnyhowResult;
 use std::fmt;
 use std::str::FromStr;
+use thousands::Separable;
 
 include!(concat!(env!("OUT_DIR"), "/inference_config.rs"));
 
 use draft_token_count_policy::Policy;
+
+pub(crate) const DEFAULT_SCHEDULING_POLICY: SchedulingPolicy =
+    SchedulingPolicy::FirstComeFirstServed;
 
 impl ModelConfig {
     pub(crate) fn validate(&self) -> AnyhowResult<()> {
@@ -132,6 +136,46 @@ impl fmt::Display for DraftTokenCountPolicy {
     }
 }
 
+impl SchedulingPolicy {
+    fn cli_value(self) -> &'static str {
+        match self {
+            Self::FirstComeFirstServed => "first-come-first-served",
+            Self::ShortestPrefillFirst => "shortest-prefill-first",
+            Self::RoundRobin => "round-robin",
+        }
+    }
+}
+
+impl FromStr for SchedulerConfig {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_textproto(value, "inference_config.SchedulerConfig")
+    }
+}
+
+impl fmt::Display for SchedulerConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            formatter,
+            "Maximum batched token count: {}",
+            self.max_batched_token_count.separate_with_commas()
+        )?;
+        writeln!(
+            formatter,
+            "Maximum active request count: {}",
+            self.max_active_request_count.separate_with_commas()
+        )?;
+        let scheduling_policy =
+            SchedulingPolicy::try_from(self.scheduling_policy).unwrap_or(DEFAULT_SCHEDULING_POLICY);
+        writeln!(
+            formatter,
+            "Scheduling policy: {}",
+            scheduling_policy.cli_value()
+        )
+    }
+}
+
 fn validate_draft_token_count(count: u64) -> AnyhowResult<()> {
     anyhow::ensure!(
         count > 0,
@@ -215,6 +259,22 @@ fn validate_adaptive_draft_token_counts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn displays_scheduler_configuration() {
+        let config = SchedulerConfig {
+            max_batched_token_count: 1_024,
+            max_active_request_count: 8,
+            scheduling_policy: SchedulingPolicy::ShortestPrefillFirst.into(),
+        };
+
+        assert_eq!(
+            config.to_string(),
+            "Maximum batched token count: 1,024\n\
+             Maximum active request count: 8\n\
+             Scheduling policy: shortest-prefill-first\n"
+        );
+    }
 
     fn fixed_policy(draft_token_count: u64) -> DraftTokenCountPolicy {
         DraftTokenCountPolicy {

@@ -4,6 +4,9 @@ pub(crate) mod server;
 use std::fmt;
 use std::str::FromStr;
 
+use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
+use crate::proto::inference_config::SchedulingPolicy as SchedulingPolicyProto;
+use crate::proto::inference_config::DEFAULT_SCHEDULING_POLICY;
 use candle_core::DType;
 
 pub(crate) const DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT: usize = 16;
@@ -97,6 +100,38 @@ pub(crate) struct SchedulerConfig {
     pub(crate) max_batched_token_count: usize,
     pub(crate) max_active_request_count: usize,
     pub(crate) scheduling_policy: SchedulingPolicy,
+}
+
+impl From<SchedulerConfigProto> for SchedulerConfig {
+    fn from(config: SchedulerConfigProto) -> Self {
+        let scheduling_policy = match SchedulingPolicyProto::try_from(config.scheduling_policy)
+            .unwrap_or(DEFAULT_SCHEDULING_POLICY)
+        {
+            SchedulingPolicyProto::FirstComeFirstServed => SchedulingPolicy::FirstComeFirstServed,
+            SchedulingPolicyProto::ShortestPrefillFirst => SchedulingPolicy::ShortestPrefillFirst,
+            SchedulingPolicyProto::RoundRobin => SchedulingPolicy::RoundRobin,
+        };
+        Self {
+            max_batched_token_count: config.max_batched_token_count as usize,
+            max_active_request_count: config.max_active_request_count as usize,
+            scheduling_policy,
+        }
+    }
+}
+
+impl From<SchedulerConfig> for SchedulerConfigProto {
+    fn from(config: SchedulerConfig) -> Self {
+        let scheduling_policy = match config.scheduling_policy {
+            SchedulingPolicy::FirstComeFirstServed => SchedulingPolicyProto::FirstComeFirstServed,
+            SchedulingPolicy::ShortestPrefillFirst => SchedulingPolicyProto::ShortestPrefillFirst,
+            SchedulingPolicy::RoundRobin => SchedulingPolicyProto::RoundRobin,
+        };
+        Self {
+            max_batched_token_count: config.max_batched_token_count as u32,
+            max_active_request_count: config.max_active_request_count as u32,
+            scheduling_policy: scheduling_policy.into(),
+        }
+    }
 }
 
 impl fmt::Display for SchedulerConfig {
@@ -264,6 +299,20 @@ mod tests {
         assert_eq!(
             config.to_string(),
             "max_batched_tokens=512 max_active_requests=4 scheduling_policy=first-come-first-served"
+        );
+    }
+
+    #[test]
+    fn round_trips_scheduler_configuration_through_proto() {
+        let config = SchedulerConfig {
+            max_batched_token_count: 1_024,
+            max_active_request_count: 8,
+            scheduling_policy: SchedulingPolicy::ShortestPrefillFirst,
+        };
+
+        assert_eq!(
+            SchedulerConfig::from(SchedulerConfigProto::from(config)),
+            config
         );
     }
 

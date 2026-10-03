@@ -238,11 +238,7 @@ fn create_inference_backend(
     )?;
     let metadata = model_runner.metadata();
     let (request_sender, request_receiver) = mpsc::channel(INFERENCE_QUEUE_CAPACITY);
-    let scheduler_config = SchedulerConfig {
-        max_batched_token_count: args.max_batched_token_count,
-        max_active_request_count: args.max_active_request_count,
-        scheduling_policy: args.scheduling_policy,
-    };
+    let scheduler_config = SchedulerConfig::from(args.scheduler_config);
     let thread = std::thread::Builder::new()
         .name(format!("inference-worker-{backend_id}"))
         .spawn(move || {

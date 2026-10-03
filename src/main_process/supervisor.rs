@@ -31,9 +31,7 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
         activation_dtype,
         kv_cache_type,
         target_kv_cache_size_bytes,
-        max_batched_token_count,
-        max_active_request_count,
-        scheduling_policy,
+        scheduler_config,
         input_preprocessing_thread_count,
         trace_directory,
         request_socket,
@@ -49,11 +47,7 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
         .prefix("mini-vllm-")
         .tempdir_in("/tmp")
         .context("failed to create the server runtime directory")?;
-    let scheduler_config = SchedulerConfig {
-        max_batched_token_count,
-        max_active_request_count,
-        scheduling_policy,
-    };
+    let scheduler_config = SchedulerConfig::from(scheduler_config);
     let model_runner_process = ModelRunnerProcess::start(
         &model_artifacts,
         runtime_directory.path().join("model-runner.sock"),
