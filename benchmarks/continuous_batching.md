@@ -62,10 +62,11 @@ span multiple scheduling decisions while the anchor continues decoding.
 
 ## Results
 
-Wall time runs from anchor submission until every measured request completes.
-Aggregate output throughput is total output tokens divided by wall time, while
-case-level draft acceptance is total accepted draft tokens divided by total
-proposed draft tokens across requests.
+- **Wall time:** Time from anchor submission until every measured request
+  completes.
+- **Aggregate output throughput:** Total output tokens divided by wall time.
+- **Case-level draft acceptance:** Total accepted draft tokens divided by total
+  proposed draft tokens across requests.
 
 ### 2-Request Handoff
 

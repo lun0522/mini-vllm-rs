@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="380" viewBox="0 0 900 380" role="img" aria-labelledby="title description">
+  <title id="title">Long-follower time to first token by scheduling policy and request</title>
+  <desc id="description">FCFS and SPF stagger first-token times across the three long followers. Round robin clusters all three later and more closely together.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
+    .title { font-size: 18px; font-weight: 600; }
+    .subtitle { font-size: 12px; fill: #57606a; }
+    .label { font-size: 14px; }
+    .tick { font-size: 12px; fill: #57606a; }
+    .value { font-size: 12px; font-weight: 600; }
+    .grid { stroke: #d0d7de; stroke-width: 1; }
+    .range { stroke: #8c959f; stroke-width: 5; stroke-linecap: round; }
+  </style>
+
+  <rect width="900" height="380" fill="#ffffff"/>
+  <text x="450" y="27" text-anchor="middle" class="title">Long-follower TTFT distribution</text>
+  <text x="450" y="46" text-anchor="middle" class="subtitle">Lower is better; line spans earliest to latest follower, mean of 3 runs</text>
+
+  <!-- Plot: x=190..736 maps 0..26 seconds. -->
+  <line x1="190" y1="65" x2="190" y2="292" class="grid"/>
+  <line x1="295" y1="65" x2="295" y2="292" class="grid"/>
+  <line x1="400" y1="65" x2="400" y2="292" class="grid"/>
+  <line x1="505" y1="65" x2="505" y2="292" class="grid"/>
+  <line x1="610" y1="65" x2="610" y2="292" class="grid"/>
+  <line x1="715" y1="65" x2="715" y2="292" class="grid"/>
+
+  <text x="170" y="105" text-anchor="end" class="label">FCFS</text>
+  <line x1="363" y1="100" x2="706" y2="100" class="range"/>
+  <circle cx="363" cy="100" r="7" fill="#2563eb"/>
+  <circle cx="527" cy="100" r="7" fill="#16a34a"/>
+  <circle cx="706" cy="100" r="7" fill="#f59e0b"/>
+  <text x="363" y="82" text-anchor="middle" class="value">8.238</text>
+  <text x="527" y="82" text-anchor="middle" class="value">16.063</text>
+  <text x="706" y="82" text-anchor="middle" class="value">24.565</text>
+
+  <text x="170" y="185" text-anchor="end" class="label">SPF</text>
+  <line x1="363" y1="180" x2="707" y2="180" class="range"/>
+  <circle cx="363" cy="180" r="7" fill="#2563eb"/>
+  <circle cx="528" cy="180" r="7" fill="#16a34a"/>
+  <circle cx="707" cy="180" r="7" fill="#f59e0b"/>
+  <text x="363" y="162" text-anchor="middle" class="value">8.244</text>
+  <text x="528" y="162" text-anchor="middle" class="value">16.082</text>
+  <text x="707" y="162" text-anchor="middle" class="value">24.598</text>
+
+  <text x="170" y="265" text-anchor="end" class="label">RR</text>
+  <line x1="615" y1="260" x2="700" y2="260" class="range"/>
+  <circle cx="615" cy="260" r="7" fill="#2563eb"/>
+  <circle cx="700" cy="260" r="7" fill="#16a34a"/>
+  <circle cx="700" cy="260" r="4" fill="#f59e0b" stroke="#ffffff" stroke-width="1"/>
+  <text x="615" y="242" text-anchor="middle" class="value">20.211</text>
+  <text x="700" y="242" text-anchor="middle" class="value">24.285 / 24.270</text>
+
+  <text x="190" y="314" text-anchor="middle" class="tick">0</text>
+  <text x="295" y="314" text-anchor="middle" class="tick">5</text>
+  <text x="400" y="314" text-anchor="middle" class="tick">10</text>
+  <text x="505" y="314" text-anchor="middle" class="tick">15</text>
+  <text x="610" y="314" text-anchor="middle" class="tick">20</text>
+  <text x="715" y="314" text-anchor="middle" class="tick">25 s</text>
+
+  <circle cx="270" cy="349" r="6" fill="#2563eb"/>
+  <text x="283" y="353" class="tick">Oldest follower</text>
+  <circle cx="430" cy="349" r="6" fill="#16a34a"/>
+  <text x="443" y="353" class="tick">Long peer 1</text>
+  <circle cx="570" cy="349" r="6" fill="#f59e0b"/>
+  <text x="583" y="353" class="tick">Long peer 2</text>
+</svg>

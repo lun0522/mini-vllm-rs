@@ -59,6 +59,9 @@ order:
 7. [Continuous batching](benchmarks/continuous_batching.md) measures queued-
    request TTFT, aggregate throughput, and anchor latency with 2-request and
    heterogeneous 4-request workloads.
+8. [Prefill scheduling policies](benchmarks/scheduling_policies.md) compares
+   FCFS, shortest-prefill-first, and round-robin allocation with short and long
+   competing prefills.
 
 ## Run
 
