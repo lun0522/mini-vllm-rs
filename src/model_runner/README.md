@@ -83,9 +83,10 @@ sequenceDiagram
     end
 ```
 
-The RPC server rejects empty inputs or inputs larger than the target KV-cache
-capacity. If the requested output would exceed the remaining capacity, it
-reduces `max_new_tokens` before queueing the request.
+The RPC server rejects empty inputs or inputs larger than the effective
+KV-cache capacity: the target capacity without speculative decoding, or the
+smaller target/draft capacity with it. If the requested output would exceed the
+remaining capacity, it reduces `max_new_tokens` before queueing the request.
 
 ## Scheduling
 
@@ -116,8 +117,9 @@ and a histogram of the proposal lengths selected by the draft-token policy.
 ## KV-cache execution
 
 Each model instance owns a separate cache manager. The target cache uses the
-configured byte budget, while the optional draft cache is sized for the same
-token capacity.
+configured byte budget. The optional draft cache uses its configured byte
+budget when present; otherwise, its budget is inferred to provide the same
+token capacity as the target cache.
 
 Paged storage works on CPU and GPU backends. Direct paged attention is currently
 CPU-only and opt-in; other execution paths reconstruct contiguous key/value

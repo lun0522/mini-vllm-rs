@@ -1,12 +1,15 @@
 use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
-use crate::model_runner::KvCacheType;
+use crate::model_runner::DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT;
 use crate::proto::inference_config::draft_token_count_policy::Policy;
 use crate::proto::inference_config::DraftModelConfig;
 use crate::proto::inference_config::DraftTokenCountPolicy;
 use crate::proto::inference_config::FixedDraftTokenCountPolicy;
+use crate::proto::inference_config::KvCacheConfig as KvCacheConfigProto;
+use crate::proto::inference_config::KvCacheType as KvCacheTypeProto;
 use crate::proto::inference_config::ModelConfig;
 use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
+use crate::proto::inference_config::DEFAULT_KV_CACHE_TYPE;
 use crate::proto::inference_config::DEFAULT_SCHEDULING_POLICY;
 use argh::FromArgs;
 use log::warn;
@@ -35,12 +38,9 @@ pub(crate) struct MainProcessArgs {
     /// data type used for model activations and KV caches
     #[argh(option, default = "ActivationDType::F16")]
     pub(crate) activation_dtype: ActivationDType,
-    /// KV cache implementation used for model inference
-    #[argh(option, default = "KvCacheType::Contiguous")]
-    pub(crate) kv_cache_type: KvCacheType,
-    /// total KV-cache size in bytes for the target model
-    #[argh(option, default = "DEFAULT_TARGET_KV_CACHE_SIZE_BYTES")]
-    pub(crate) target_kv_cache_size_bytes: usize,
+    /// textproto KV-cache configuration
+    #[argh(option, default = "default_kv_cache_config()")]
+    pub(crate) kv_cache_config: KvCacheConfigProto,
     /// textproto scheduler configuration
     #[argh(option, default = "default_scheduler_config()")]
     pub(crate) scheduler_config: SchedulerConfigProto,
@@ -71,12 +71,7 @@ impl fmt::Display for MainProcessArgs {
         }
         writeln!(formatter, "Inference device: {}", self.inference_device)?;
         writeln!(formatter, "Activation dtype: {}", self.activation_dtype)?;
-        writeln!(formatter, "KV cache type: {}", self.kv_cache_type)?;
-        writeln!(
-            formatter,
-            "Target KV cache size: {} bytes",
-            self.target_kv_cache_size_bytes.separate_with_commas()
-        )?;
+        write!(formatter, "{}", self.kv_cache_config)?;
         write!(formatter, "{}", self.scheduler_config)?;
         writeln!(
             formatter,
@@ -111,6 +106,7 @@ impl MainProcessArgs {
         if let Some(draft_model) = &self.draft_model {
             draft_model.validate()?;
         }
+        self.kv_cache_config.validate()?;
         Ok(())
     }
 }
@@ -132,6 +128,15 @@ fn default_scheduler_config() -> SchedulerConfigProto {
     }
 }
 
+fn default_kv_cache_config() -> KvCacheConfigProto {
+    KvCacheConfigProto {
+        kv_cache_type: DEFAULT_KV_CACHE_TYPE.into(),
+        per_page_token_count: 0,
+        target_kv_cache_size_bytes: DEFAULT_TARGET_KV_CACHE_SIZE_BYTES as u64,
+        draft_kv_cache_size_bytes: 0,
+    }
+}
+
 fn default_request_socket() -> PathBuf {
     PathBuf::from("/tmp/mini-vllm-request-handler.sock")
 }
@@ -141,27 +146,8 @@ fn default_control_socket() -> PathBuf {
 }
 
 fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
-    if args.target_kv_cache_size_bytes == 0 {
-        warn!(
-            "Invalid target KV-cache size {}; using default value \
-             {}",
-            args.target_kv_cache_size_bytes.separate_with_commas(),
-            DEFAULT_TARGET_KV_CACHE_SIZE_BYTES.separate_with_commas()
-        );
-        args.target_kv_cache_size_bytes = DEFAULT_TARGET_KV_CACHE_SIZE_BYTES;
-    }
-    if args.scheduler_config.max_batched_token_count == 0 {
-        warn!(
-            "Invalid maximum batched token count 0; using default value {DEFAULT_MAX_BATCHED_TOKEN_COUNT}"
-        );
-        args.scheduler_config.max_batched_token_count = DEFAULT_MAX_BATCHED_TOKEN_COUNT as u32;
-    }
-    if args.scheduler_config.max_active_request_count == 0 {
-        warn!(
-            "Invalid maximum active request count 0; using default value {DEFAULT_MAX_ACTIVE_REQUEST_COUNT}"
-        );
-        args.scheduler_config.max_active_request_count = DEFAULT_MAX_ACTIVE_REQUEST_COUNT as u32;
-    }
+    normalize_kv_cache_config(&mut args.kv_cache_config);
+    normalize_scheduler_config(&mut args.scheduler_config);
     if args.input_preprocessing_thread_count == 0 {
         warn!(
             "Invalid input preprocessing thread count 0; using default value \
@@ -191,6 +177,42 @@ fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
         }
     }
     args
+}
+
+fn normalize_kv_cache_config(config: &mut KvCacheConfigProto) {
+    if config.target_kv_cache_size_bytes == 0 {
+        warn!(
+            "Invalid target KV-cache size {}; using default value \
+             {}",
+            config.target_kv_cache_size_bytes.separate_with_commas(),
+            DEFAULT_TARGET_KV_CACHE_SIZE_BYTES.separate_with_commas()
+        );
+        config.target_kv_cache_size_bytes = DEFAULT_TARGET_KV_CACHE_SIZE_BYTES as u64;
+    }
+    let kv_cache_type =
+        KvCacheTypeProto::try_from(config.kv_cache_type).unwrap_or(DEFAULT_KV_CACHE_TYPE);
+    if kv_cache_type != KvCacheTypeProto::Contiguous && config.per_page_token_count == 0 {
+        warn!(
+            "Invalid KV-cache page token count 0; using default value \
+             {DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT}"
+        );
+        config.per_page_token_count = DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT as u32;
+    }
+}
+
+fn normalize_scheduler_config(config: &mut SchedulerConfigProto) {
+    if config.max_batched_token_count == 0 {
+        warn!(
+            "Invalid maximum batched token count 0; using default value {DEFAULT_MAX_BATCHED_TOKEN_COUNT}"
+        );
+        config.max_batched_token_count = DEFAULT_MAX_BATCHED_TOKEN_COUNT as u32;
+    }
+    if config.max_active_request_count == 0 {
+        warn!(
+            "Invalid maximum active request count 0; using default value {DEFAULT_MAX_ACTIVE_REQUEST_COUNT}"
+        );
+        config.max_active_request_count = DEFAULT_MAX_ACTIVE_REQUEST_COUNT as u32;
+    }
 }
 
 #[cfg(test)]
@@ -267,6 +289,49 @@ mod tests {
             args.scheduler_config.scheduling_policy,
             SchedulingPolicyProto::ShortestPrefillFirst as i32
         );
+    }
+
+    #[test]
+    fn parses_kv_cache_configuration() {
+        let args = MainProcessArgs::from_args(
+            &["mini-vllm-rs"],
+            &[
+                "--kv-cache-config",
+                "kv_cache_type: KV_CACHE_TYPE_PAGED_PREFIX per_page_token_count: 32 target_kv_cache_size_bytes: 1073741824 draft_kv_cache_size_bytes: 268435456",
+            ],
+        )
+        .expect("KV-cache arguments should parse");
+
+        assert_eq!(
+            args.kv_cache_config.kv_cache_type,
+            KvCacheTypeProto::PagedPrefix as i32
+        );
+        assert_eq!(args.kv_cache_config.per_page_token_count, 32);
+        assert_eq!(
+            args.kv_cache_config.target_kv_cache_size_bytes,
+            1_073_741_824
+        );
+        assert_eq!(args.kv_cache_config.draft_kv_cache_size_bytes, 268_435_456);
+    }
+
+    #[test]
+    fn defaults_omitted_kv_cache_configuration_fields() {
+        let args = MainProcessArgs::from_args(
+            &["mini-vllm-rs"],
+            &["--kv-cache-config", "kv_cache_type: KV_CACHE_TYPE_PAGED"],
+        )
+        .expect("KV-cache arguments should parse");
+        let args = normalize(args);
+
+        assert_eq!(
+            args.kv_cache_config.per_page_token_count,
+            DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT as u32
+        );
+        assert_eq!(
+            args.kv_cache_config.target_kv_cache_size_bytes,
+            DEFAULT_TARGET_KV_CACHE_SIZE_BYTES as u64
+        );
+        assert_eq!(args.kv_cache_config.draft_kv_cache_size_bytes, 0);
     }
 
     #[test]

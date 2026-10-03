@@ -85,6 +85,26 @@ message AcceptedLengthDraftTokenCountPolicy {
   uint64 maximum_draft_token_count = 4;
 }
 
+// Configures KV-cache storage and memory budgets.
+message KvCacheConfig {
+  // KV-cache storage implementation.
+  KvCacheType kv_cache_type = 1;
+  // Number of tokens stored in each page; ignored for contiguous storage.
+  uint32 per_page_token_count = 2;
+  // Total KV-cache allocation in bytes for the target model.
+  uint64 target_kv_cache_size_bytes = 3;
+  // Total KV-cache allocation in bytes for the draft model. A value of zero
+  // infers an allocation that gives the draft cache the target cache's token capacity.
+  uint64 draft_kv_cache_size_bytes = 4;
+}
+
+// Selects the KV-cache storage implementation.
+enum KvCacheType {
+  KV_CACHE_TYPE_CONTIGUOUS = 0;
+  KV_CACHE_TYPE_PAGED = 1;
+  KV_CACHE_TYPE_PAGED_PREFIX = 2;
+}
+
 // Configures request admission and model-batch construction.
 message SchedulerConfig {
   // Maximum number of tokens processed in one model batch.

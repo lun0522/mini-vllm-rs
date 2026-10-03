@@ -92,14 +92,19 @@ cargo run --release
   macOS, Candle's Metal quantized matmul does not support F16 activations, so
   GPU inference falls back to `f32` with a warning. In mixed mode on macOS, an
   `f16` request uses `f16` on the CPU backend and `f32` on the Metal backend.
-- `--kv-cache-type <type>` selects `contiguous`, `paged[:tokens-per-page]`, or
-  `paged-prefix[:tokens-per-page]` KV-cache storage and defaults to
-  `contiguous`. Paged caches contain 16 tokens per page when the count is
-  omitted. `paged-prefix` retains and restores complete shared prefixes and
-  evicts least-recently-used inactive prefixes when more pages are needed.
-- `--target-kv-cache-size-bytes <bytes>` sets the target model's total KV-cache
-  allocation and defaults to 2 GiB. A draft model is allocated enough KV-cache
-  memory to hold the same number of tokens.
+- `--kv-cache-config '<textproto>'` configures KV-cache storage and allocation:
+  - `kv_cache_type`: Accepts `KV_CACHE_TYPE_CONTIGUOUS`,
+    `KV_CACHE_TYPE_PAGED`, or `KV_CACHE_TYPE_PAGED_PREFIX`, and defaults to the
+    first option. Prefix-enabled storage retains and restores complete shared
+    prefixes and evicts least-recently-used inactive prefixes when more pages
+    are needed.
+  - `per_page_token_count`: Sets the number of tokens per page for either paged
+    implementation and defaults to `16` when omitted.
+  - `target_kv_cache_size_bytes`: Sets the target model's total KV-cache
+    allocation and defaults to 2 GiB.
+  - `draft_kv_cache_size_bytes`: Sets the draft model's total KV-cache
+    allocation. When omitted or set to `0`, it is inferred so the draft cache
+    holds the same number of tokens as the target cache.
 - `--scheduler-config '<textproto>'` configures scheduling:
   - `max_batched_token_count`: Sets the scheduling work budget and defaults to
     `512`; see [Scheduling work budget](ARCHITECTURE.md#scheduling-work-budget).
@@ -132,7 +137,7 @@ acceptance-rate token-count policy, and 32-token KV-cache pages:
 
 ```shell
 cargo run --release -- \
-  --kv-cache-type paged:32 \
+  --kv-cache-config 'kv_cache_type: KV_CACHE_TYPE_PAGED per_page_token_count: 32' \
   --model 'model_id: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF" model_filename: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"' \
   --draft-model 'model { model_id: "bartowski/Llama-3.2-1B-Instruct-GGUF" model_filename: "Llama-3.2-1B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct" } token_count_policy { acceptance_rate { initial_draft_token_count: 4 decrease_threshold: 0.4 increase_threshold: 0.8 minimum_draft_token_count: 1 maximum_draft_token_count: 8 } }'
 ```
@@ -192,7 +197,8 @@ For example:
 ```shell
 MINI_VLLM_ENABLE_CPU_PAGED_ATTENTION=false \
 MINI_VLLM_ENABLE_CPU_GROUPED_QUERY_MATMUL=false \
-cargo run --release -- --inference-device cpu --kv-cache-type paged:16
+cargo run --release -- --inference-device cpu \
+  --kv-cache-config 'kv_cache_type: KV_CACHE_TYPE_PAGED per_page_token_count: 16'
 ```
 
 #### CPU F16

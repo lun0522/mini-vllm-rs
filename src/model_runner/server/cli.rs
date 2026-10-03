@@ -1,7 +1,7 @@
 use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
-use crate::model_runner::KvCacheType;
 use crate::proto::inference_config::DraftModelRunnerConfig;
+use crate::proto::inference_config::KvCacheConfig as KvCacheConfigProto;
 use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
 use argh::FromArgs;
 use std::path::PathBuf;
@@ -21,12 +21,9 @@ pub(crate) struct ModelRunnerProcessArgs {
     /// data type used for model activations and KV caches
     #[argh(option)]
     pub(super) activation_dtype: ActivationDType,
-    /// KV cache implementation used for model inference
+    /// textproto KV-cache configuration
     #[argh(option)]
-    pub(super) kv_cache_type: KvCacheType,
-    /// total KV-cache size in bytes for the target model
-    #[argh(option)]
-    pub(super) target_kv_cache_size_bytes: usize,
+    pub(super) kv_cache_config: KvCacheConfigProto,
     /// textproto scheduler configuration
     #[argh(option)]
     pub(super) scheduler_config: SchedulerConfigProto,

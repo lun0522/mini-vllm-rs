@@ -4,12 +4,85 @@ pub(crate) mod server;
 use std::fmt;
 use std::str::FromStr;
 
+use crate::proto::inference_config::KvCacheConfig as KvCacheConfigProto;
+use crate::proto::inference_config::KvCacheType as KvCacheTypeProto;
 use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
 use crate::proto::inference_config::SchedulingPolicy as SchedulingPolicyProto;
 use crate::proto::inference_config::DEFAULT_SCHEDULING_POLICY;
 use candle_core::DType;
 
 pub(crate) const DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT: usize = 16;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct KvCacheConfig {
+    pub(crate) kv_cache_type: KvCacheType,
+    pub(crate) target_kv_cache_size_bytes: usize,
+    pub(crate) draft_kv_cache_size_bytes: Option<usize>,
+}
+
+impl From<KvCacheConfigProto> for KvCacheConfig {
+    fn from(config: KvCacheConfigProto) -> Self {
+        let kv_cache_type = match KvCacheTypeProto::try_from(config.kv_cache_type)
+            .expect("validated KV-cache configuration should contain a supported cache type")
+        {
+            KvCacheTypeProto::Contiguous => KvCacheType::Contiguous,
+            KvCacheTypeProto::Paged => KvCacheType::Paged {
+                per_page_token_count: config.per_page_token_count as usize,
+                enable_prefix_caching: false,
+            },
+            KvCacheTypeProto::PagedPrefix => KvCacheType::Paged {
+                per_page_token_count: config.per_page_token_count as usize,
+                enable_prefix_caching: true,
+            },
+        };
+        Self {
+            kv_cache_type,
+            target_kv_cache_size_bytes: config.target_kv_cache_size_bytes as usize,
+            draft_kv_cache_size_bytes: (config.draft_kv_cache_size_bytes != 0)
+                .then_some(config.draft_kv_cache_size_bytes as usize),
+        }
+    }
+}
+
+impl From<KvCacheConfig> for KvCacheConfigProto {
+    fn from(config: KvCacheConfig) -> Self {
+        let (kv_cache_type, per_page_token_count) = match config.kv_cache_type {
+            KvCacheType::Contiguous => (KvCacheTypeProto::Contiguous, 0),
+            KvCacheType::Paged {
+                per_page_token_count,
+                enable_prefix_caching: false,
+            } => (KvCacheTypeProto::Paged, per_page_token_count as u32),
+            KvCacheType::Paged {
+                per_page_token_count,
+                enable_prefix_caching: true,
+            } => (KvCacheTypeProto::PagedPrefix, per_page_token_count as u32),
+        };
+        Self {
+            kv_cache_type: kv_cache_type.into(),
+            per_page_token_count,
+            target_kv_cache_size_bytes: config.target_kv_cache_size_bytes as u64,
+            draft_kv_cache_size_bytes: config
+                .draft_kv_cache_size_bytes
+                .map(|size| size as u64)
+                .unwrap_or(0),
+        }
+    }
+}
+
+impl fmt::Display for KvCacheConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "kv_cache_type={} target_kv_cache_size_bytes={}",
+            self.kv_cache_type, self.target_kv_cache_size_bytes
+        )?;
+        if let Some(size_bytes) = self.draft_kv_cache_size_bytes {
+            write!(formatter, " draft_kv_cache_size_bytes={size_bytes}")
+        } else {
+            formatter.write_str(" draft_kv_cache_size_bytes=inferred")
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ActivationDType {
@@ -313,6 +386,38 @@ mod tests {
         assert_eq!(
             SchedulerConfig::from(SchedulerConfigProto::from(config)),
             config
+        );
+    }
+
+    #[test]
+    fn round_trips_kv_cache_configuration_through_proto() {
+        let config = KvCacheConfig {
+            kv_cache_type: KvCacheType::Paged {
+                per_page_token_count: 32,
+                enable_prefix_caching: true,
+            },
+            target_kv_cache_size_bytes: 2 * 1024 * 1024 * 1024,
+            draft_kv_cache_size_bytes: Some(512 * 1024 * 1024),
+        };
+
+        assert_eq!(
+            KvCacheConfig::from(KvCacheConfigProto::from(config)),
+            config
+        );
+    }
+
+    #[test]
+    fn displays_kv_cache_configuration() {
+        let config = KvCacheConfig {
+            kv_cache_type: KvCacheType::Contiguous,
+            target_kv_cache_size_bytes: 2 * 1024 * 1024 * 1024,
+            draft_kv_cache_size_bytes: None,
+        };
+
+        assert_eq!(
+            config.to_string(),
+            "kv_cache_type=contiguous target_kv_cache_size_bytes=2147483648 \
+             draft_kv_cache_size_bytes=inferred"
         );
     }
 

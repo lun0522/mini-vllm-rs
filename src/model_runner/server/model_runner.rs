@@ -1,6 +1,6 @@
 use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
-use crate::model_runner::KvCacheType;
+use crate::model_runner::KvCacheConfig;
 use crate::models::loaded_model::LoadedModel;
 use crate::models::ModelInfo;
 use crate::models::ModelRole;
@@ -23,6 +23,8 @@ use super::text_generation;
 
 pub(super) struct ModelRunnerMetadata {
     pub model_metadata: GetModelMetadataResponse,
+    /// Minimum target/draft KV-cache token capacity. Request validation uses this
+    /// shared limit because speculative generation must keep every sequence in both caches.
     pub kv_cache_token_capacity: usize,
 }
 
@@ -48,8 +50,7 @@ impl ModelRunner {
         draft_model_config: Option<DraftModelRunnerConfig>,
         inference_device: InferenceDevice,
         activation_dtype: ActivationDType,
-        kv_cache_type: KvCacheType,
-        target_kv_cache_size_bytes: usize,
+        kv_cache_config: KvCacheConfig,
     ) -> Result<Self> {
         let device = Self::get_inference_device(inference_device)?;
         let loaded_model = LoadedModel::new(model_path, device, activation_dtype)?;
@@ -68,18 +69,21 @@ impl ModelRunner {
             loaded_model.device()
         );
         let target_kv_cache = create_kv_cache(
-            kv_cache_type,
+            kv_cache_config.kv_cache_type,
             &loaded_model,
             ModelRole::Target,
-            target_kv_cache_size_bytes,
+            kv_cache_config.target_kv_cache_size_bytes,
         )?;
         let target_kv_cache_token_capacity = target_kv_cache.token_capacity();
         let draft = loaded_draft_model
             .map(|(model, token_count_policy)| {
-                let draft_kv_cache_size_bytes =
-                    compute_kv_cache_size_bytes(model.info(), target_kv_cache_token_capacity)?;
+                let draft_kv_cache_size_bytes = resolve_draft_kv_cache_size_bytes(
+                    kv_cache_config.draft_kv_cache_size_bytes,
+                    model.info(),
+                    target_kv_cache_token_capacity,
+                )?;
                 let kv_cache = create_kv_cache(
-                    kv_cache_type,
+                    kv_cache_config.kv_cache_type,
                     &model,
                     ModelRole::Draft,
                     draft_kv_cache_size_bytes,
@@ -102,12 +106,21 @@ impl ModelRunner {
             .draft
             .as_ref()
             .map(|draft| draft.model.model_metadata());
+        let kv_cache_token_capacity = self
+            .draft
+            .as_ref()
+            .map(|draft| {
+                self.target
+                    .token_capacity()
+                    .min(draft.model.token_capacity())
+            })
+            .unwrap_or_else(|| self.target.token_capacity());
         ModelRunnerMetadata {
             model_metadata: GetModelMetadataResponse {
                 target_model: Some(target_model),
                 draft_model,
             },
-            kv_cache_token_capacity: self.target.token_capacity(),
+            kv_cache_token_capacity,
         }
     }
 
@@ -250,16 +263,20 @@ impl ModelRunner {
     }
 }
 
-fn compute_kv_cache_size_bytes(
+fn resolve_draft_kv_cache_size_bytes(
+    configured_size_bytes: Option<usize>,
     model_info: &ModelInfo,
-    kv_cache_token_capacity: usize,
+    target_kv_cache_token_capacity: usize,
 ) -> Result<usize> {
-    model_info
-        .kv_cache_bytes_per_token()
-        .checked_mul(model_info.layer_count)
-        .and_then(|size| size.checked_mul(kv_cache_token_capacity))
-        .and_then(|size| size.checked_mul(2))
-        .context("KV-cache size exceeds usize")
+    match configured_size_bytes {
+        Some(size_bytes) => Ok(size_bytes),
+        None => model_info
+            .kv_cache_bytes_per_token()
+            .checked_mul(model_info.layer_count)
+            .and_then(|size| size.checked_mul(target_kv_cache_token_capacity))
+            .and_then(|size| size.checked_mul(2))
+            .context("KV-cache size exceeds usize"),
+    }
 }
 
 #[cfg(test)]
@@ -278,8 +295,11 @@ mod tests {
         };
         let target_kv_cache_token_capacity = 128;
 
-        let size_bytes =
-            compute_kv_cache_size_bytes(&draft_model_info, target_kv_cache_token_capacity)?;
+        let size_bytes = resolve_draft_kv_cache_size_bytes(
+            None,
+            &draft_model_info,
+            target_kv_cache_token_capacity,
+        )?;
 
         let derived_kv_cache_token_capacity = size_bytes
             / 2
@@ -288,6 +308,23 @@ mod tests {
         assert_eq!(
             derived_kv_cache_token_capacity,
             target_kv_cache_token_capacity
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn respects_configured_draft_cache_size() -> Result<()> {
+        let draft_model_info = ModelInfo {
+            layer_count: 4,
+            num_kv_heads: 2,
+            head_dim: 8,
+            activation_dtype: DType::F32,
+            context_length: 128,
+        };
+
+        assert_eq!(
+            resolve_draft_kv_cache_size_bytes(Some(1024), &draft_model_info, 128)?,
+            1024
         );
         Ok(())
     }

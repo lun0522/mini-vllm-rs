@@ -10,6 +10,7 @@ use draft_token_count_policy::Policy;
 
 pub(crate) const DEFAULT_SCHEDULING_POLICY: SchedulingPolicy =
     SchedulingPolicy::FirstComeFirstServed;
+pub(crate) const DEFAULT_KV_CACHE_TYPE: KvCacheType = KvCacheType::Contiguous;
 
 impl ModelConfig {
     pub(crate) fn validate(&self) -> AnyhowResult<()> {
@@ -131,6 +132,76 @@ impl fmt::Display for DraftTokenCountPolicy {
                 policy.minimum_draft_token_count,
                 policy.maximum_draft_token_count,
                 policy.smoothing_factor,
+            ),
+        }
+    }
+}
+
+impl KvCacheType {
+    fn cli_value(self) -> &'static str {
+        match self {
+            Self::Contiguous => "contiguous",
+            Self::Paged => "paged",
+            Self::PagedPrefix => "paged-prefix",
+        }
+    }
+}
+
+impl FromStr for KvCacheConfig {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_textproto(value, "inference_config.KvCacheConfig")
+    }
+}
+
+impl KvCacheConfig {
+    pub(crate) fn validate(&self) -> AnyhowResult<()> {
+        anyhow::ensure!(
+            self.target_kv_cache_size_bytes > 0,
+            "target KV-cache size must be greater than zero"
+        );
+        usize::try_from(self.target_kv_cache_size_bytes)
+            .map_err(|_| anyhow::anyhow!("target KV-cache size does not fit in usize"))?;
+        let kv_cache_type = KvCacheType::try_from(self.kv_cache_type)
+            .map_err(|_| anyhow::anyhow!("unsupported KV-cache type {}", self.kv_cache_type))?;
+        if kv_cache_type != KvCacheType::Contiguous {
+            anyhow::ensure!(
+                self.per_page_token_count > 0,
+                "KV-cache page token count must be greater than zero"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for KvCacheConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kv_cache_type = KvCacheType::try_from(self.kv_cache_type).map_err(|_| fmt::Error)?;
+        if kv_cache_type == KvCacheType::Contiguous {
+            writeln!(formatter, "KV cache type: {}", kv_cache_type.cli_value())?;
+        } else {
+            writeln!(
+                formatter,
+                "KV cache type: {}:{}",
+                kv_cache_type.cli_value(),
+                self.per_page_token_count
+            )?;
+        }
+        writeln!(
+            formatter,
+            "Target KV cache size: {} bytes",
+            self.target_kv_cache_size_bytes.separate_with_commas()
+        )?;
+        match self.draft_kv_cache_size_bytes {
+            0 => writeln!(
+                formatter,
+                "Draft KV cache size: inferred from target token capacity"
+            ),
+            size_bytes => writeln!(
+                formatter,
+                "Draft KV cache size: {} bytes",
+                size_bytes.separate_with_commas()
             ),
         }
     }
@@ -273,6 +344,53 @@ mod tests {
             "Maximum batched token count: 1,024\n\
              Maximum active request count: 8\n\
              Scheduling policy: shortest-prefill-first\n"
+        );
+    }
+
+    #[test]
+    fn displays_kv_cache_configuration() {
+        let config = KvCacheConfig {
+            kv_cache_type: KvCacheType::PagedPrefix.into(),
+            per_page_token_count: 32,
+            target_kv_cache_size_bytes: 2_147_483_648,
+            draft_kv_cache_size_bytes: 536_870_912,
+        };
+
+        assert_eq!(
+            config.to_string(),
+            "KV cache type: paged-prefix:32\n\
+             Target KV cache size: 2,147,483,648 bytes\n\
+             Draft KV cache size: 536,870,912 bytes\n"
+        );
+    }
+
+    #[test]
+    fn treats_zero_draft_kv_cache_size_as_unspecified() {
+        let config = KvCacheConfig {
+            kv_cache_type: KvCacheType::Contiguous.into(),
+            per_page_token_count: 0,
+            target_kv_cache_size_bytes: 1024,
+            draft_kv_cache_size_bytes: 0,
+        };
+
+        assert!(config.validate().is_ok());
+        assert!(config
+            .to_string()
+            .contains("Draft KV cache size: inferred from target token capacity"));
+    }
+
+    #[test]
+    fn rejects_an_unnormalized_paged_kv_cache_configuration() {
+        let config = KvCacheConfig {
+            kv_cache_type: KvCacheType::Paged.into(),
+            per_page_token_count: 0,
+            target_kv_cache_size_bytes: 1024,
+            draft_kv_cache_size_bytes: 0,
+        };
+
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            "KV-cache page token count must be greater than zero"
         );
     }
 

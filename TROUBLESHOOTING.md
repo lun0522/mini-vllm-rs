@@ -52,6 +52,7 @@ omitting the draft model or using smaller target and draft models. You can also
 open macOS Activity Monitor, select the Memory tab, and watch the Memory
 Pressure graph and Swap Used while loading the models and generating text. A
 yellow or red graph, or rapidly increasing swap usage, supports the
-memory-pressure diagnosis. Lowering `--target-kv-cache-size-bytes` can confirm
-the diagnosis. Changing the number of tokens per page does not materially
-reduce the requested KV-cache budget.
+memory-pressure diagnosis. Lowering `target_kv_cache_size_bytes` and, when set,
+`draft_kv_cache_size_bytes` in `--kv-cache-config` can confirm the diagnosis.
+Changing the number of tokens per page does not materially reduce the requested
+KV-cache budget.

@@ -1,5 +1,6 @@
 use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
+use crate::model_runner::KvCacheConfig;
 use crate::model_runner::SchedulerConfig;
 use crate::proto::inference_config::DraftModelRunnerConfig as DraftModelRunnerConfigProto;
 use crate::proto::inference_config::DraftTokenCountPolicy as DraftTokenCountPolicyProto;
@@ -233,8 +234,7 @@ fn create_inference_backend(
         draft_model_config,
         inference_device,
         activation_dtype,
-        args.kv_cache_type,
-        args.target_kv_cache_size_bytes,
+        KvCacheConfig::from(args.kv_cache_config),
     )?;
     let metadata = model_runner.metadata();
     let (request_sender, request_receiver) = mpsc::channel(INFERENCE_QUEUE_CAPACITY);
