@@ -1296,6 +1296,7 @@ mod tests {
                 num_kv_heads: 1,
                 head_dim: 1,
                 activation_dtype: DType::F32,
+                context_length: 128,
             },
             next_token,
             forward_calls: Arc::clone(&forward_calls),

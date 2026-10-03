@@ -200,6 +200,7 @@ mod tests {
             num_kv_heads: 1,
             head_dim: 1,
             activation_dtype: DType::U32,
+            context_length: 1,
         };
         let cache = super::super::paged_cache::PagedKvCache::new(
             &model_info,
@@ -218,6 +219,7 @@ mod tests {
             num_kv_heads: 1,
             head_dim: 1,
             activation_dtype: DType::U32,
+            context_length: 1,
         };
         let cache = super::super::contiguous_cache::ContiguousKvCache::new(
             &model_info,

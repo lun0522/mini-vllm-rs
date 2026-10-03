@@ -23,7 +23,7 @@ use super::text_generation;
 
 pub(super) struct ModelRunnerMetadata {
     pub model_metadata: GetModelMetadataResponse,
-    pub token_capacity: usize,
+    pub kv_cache_token_capacity: usize,
 }
 
 pub(super) struct DraftModelRunnerConfig {
@@ -107,7 +107,7 @@ impl ModelRunner {
                 target_model: Some(target_model),
                 draft_model,
             },
-            token_capacity: self.target.token_capacity(),
+            kv_cache_token_capacity: self.target.token_capacity(),
         }
     }
 
@@ -250,11 +250,14 @@ impl ModelRunner {
     }
 }
 
-fn compute_kv_cache_size_bytes(model_info: &ModelInfo, token_capacity: usize) -> Result<usize> {
+fn compute_kv_cache_size_bytes(
+    model_info: &ModelInfo,
+    kv_cache_token_capacity: usize,
+) -> Result<usize> {
     model_info
         .kv_cache_bytes_per_token()
         .checked_mul(model_info.layer_count)
-        .and_then(|size| size.checked_mul(token_capacity))
+        .and_then(|size| size.checked_mul(kv_cache_token_capacity))
         .and_then(|size| size.checked_mul(2))
         .context("KV-cache size exceeds usize")
 }
@@ -271,16 +274,21 @@ mod tests {
             num_kv_heads: 2,
             head_dim: 8,
             activation_dtype: DType::F32,
+            context_length: 128,
         };
-        let target_token_capacity = 128;
+        let target_kv_cache_token_capacity = 128;
 
-        let size_bytes = compute_kv_cache_size_bytes(&draft_model_info, target_token_capacity)?;
+        let size_bytes =
+            compute_kv_cache_size_bytes(&draft_model_info, target_kv_cache_token_capacity)?;
 
-        let derived_token_capacity = size_bytes
+        let derived_kv_cache_token_capacity = size_bytes
             / 2
             / draft_model_info.layer_count
             / draft_model_info.kv_cache_bytes_per_token();
-        assert_eq!(derived_token_capacity, target_token_capacity);
+        assert_eq!(
+            derived_kv_cache_token_capacity,
+            target_kv_cache_token_capacity
+        );
         Ok(())
     }
 }

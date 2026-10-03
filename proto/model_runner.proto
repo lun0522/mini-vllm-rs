@@ -23,6 +23,7 @@ message ModelMetadata {
   ModelArchitecture architecture = 1;
   uint64 input_vocabulary_size = 2;
   uint64 output_vocabulary_size = 3;
+  uint64 context_length = 4;
 }
 
 message GetModelMetadataResponse {

@@ -41,6 +41,8 @@ impl LoadedModel {
             output_vocabulary_size,
         } = load_model_backend(gguf_path, &device, activation_dtype)?;
         let metadata = ModelMetadata {
+            context_length: u64::try_from(model.info().context_length)
+                .context("model context length does not fit in u64")?,
             architecture: architecture.into(),
             input_vocabulary_size: u64::try_from(input_vocabulary_size)
                 .context("model input vocabulary size does not fit in u64")?,

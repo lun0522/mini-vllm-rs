@@ -104,6 +104,7 @@ pub(crate) struct ModelInfo {
     pub(crate) num_kv_heads: usize,
     pub(crate) head_dim: usize,
     pub(crate) activation_dtype: DType,
+    pub(crate) context_length: usize,
 }
 
 impl ModelInfo {

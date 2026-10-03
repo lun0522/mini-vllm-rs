@@ -23,7 +23,7 @@ compatibility checks belong to the
 | Type | Responsibility |
 | --- | --- |
 | `CausalLanguageModel` | Runs regular generation and speculative verification through a common backend interface. |
-| `ModelInfo` | Reports layer count, KV-head geometry, head dimension, and activation dtype for cache allocation. |
+| `ModelInfo` | Reports the context limit, layer count, KV-head geometry, head dimension, and activation dtype. |
 | `ForwardInput` and `ForwardOutput` | Associate packed model inputs with requests and separate final-position generation logits from per-position verification logits. |
 | `KvCache` | Gives model layers request-aware access to contiguous cache tensors or paged cache layouts during a forward pass. |
 

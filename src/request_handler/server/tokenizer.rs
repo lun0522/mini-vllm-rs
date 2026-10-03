@@ -383,6 +383,7 @@ mod tests {
             architecture: 0,
             input_vocabulary_size: 3,
             output_vocabulary_size: 3,
+            context_length: 4096,
         };
         assert!(validate_model_vocabulary(&tokenizer, &metadata, ModelRole::Target).is_ok());
 

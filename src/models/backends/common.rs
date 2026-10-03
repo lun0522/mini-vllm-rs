@@ -458,6 +458,7 @@ pub(super) struct TransformerModelWeights {
     layers: Vec<TransformerBlock>,
     output_norm: RmsNorm,
     output_proj: QMatMul,
+    context_length: usize,
 }
 
 impl TransformerModelWeights {
@@ -466,12 +467,14 @@ impl TransformerModelWeights {
         layers: Vec<TransformerBlock>,
         output_norm: RmsNorm,
         output_proj: QMatMul,
+        context_length: usize,
     ) -> Self {
         Self {
             token_embeddings,
             layers,
             output_norm,
             output_proj,
+            context_length,
         }
     }
 
@@ -482,6 +485,7 @@ impl TransformerModelWeights {
             num_kv_heads: attention.num_kv_heads,
             head_dim: attention.head_dim,
             activation_dtype: self.token_embeddings.embeddings().dtype(),
+            context_length: self.context_length,
         }
     }
 

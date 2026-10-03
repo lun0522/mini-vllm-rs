@@ -201,6 +201,7 @@ mod tests {
             num_kv_heads: 1,
             head_dim: 1,
             activation_dtype: DType::U32,
+            context_length: 1,
         }
     }
 

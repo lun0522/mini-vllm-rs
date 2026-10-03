@@ -144,8 +144,14 @@ impl ModelRunnerService for ModelRunnerRpcService {
         request: Request<GenerateTextRequest>,
     ) -> Result<Response<Self::GenerateTextStream>, Status> {
         let mut request = request.into_inner();
-        normalize_generate_text_request(&mut request, self.metadata.token_capacity)
-            .map_err(Status::invalid_argument)?;
+        let model_context_length = get_effective_context_length(&self.metadata.model_metadata)
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        normalize_generate_text_request(
+            &mut request,
+            self.metadata.kv_cache_token_capacity,
+            model_context_length,
+        )
+        .map_err(Status::invalid_argument)?;
         let request_id = request.request_id;
         let queued_at = Instant::now();
         // TODO: Use a smarter way to choose inference backend.
@@ -193,9 +199,9 @@ fn create_inference_backends(
         if let Some(metadata) = maybe_metadata.as_mut() {
             // TODO: Track capacity per inference backend so mixed mode can use the CPU backend's
             // additional F16 cache capacity instead of advertising only the shared minimum.
-            metadata.token_capacity = metadata
-                .token_capacity
-                .min(inference_backend.metadata.token_capacity);
+            metadata.kv_cache_token_capacity = metadata
+                .kv_cache_token_capacity
+                .min(inference_backend.metadata.kv_cache_token_capacity);
         } else {
             maybe_metadata = Some(inference_backend.metadata);
         }
@@ -265,18 +271,37 @@ fn create_draft_model_config(
     })
 }
 
+fn get_effective_context_length(model_metadata: &GetModelMetadataResponse) -> Result<usize> {
+    let target = model_metadata
+        .target_model
+        .as_ref()
+        .context("target model context metadata is missing")?;
+    let mut context_length = target.context_length;
+    if let Some(draft) = &model_metadata.draft_model {
+        context_length = context_length.min(draft.context_length);
+    }
+    usize::try_from(context_length).context("effective model context length does not fit in usize")
+}
+
 fn normalize_generate_text_request(
     request: &mut GenerateTextRequest,
-    token_capacity: usize,
+    kv_cache_token_capacity: usize,
+    model_context_length: usize,
 ) -> Result<(), String> {
     if request.input_token_ids.is_empty() {
         return Err("input token IDs must not be empty".to_owned());
     }
     let input_token_count = request.input_token_ids.len();
-    if input_token_count > token_capacity {
+    if input_token_count > kv_cache_token_capacity {
         return Err(format!(
             "request input contains {input_token_count} tokens but the configured KV-cache \
-             capacity is {token_capacity}"
+             capacity is {kv_cache_token_capacity}"
+        ));
+    }
+    if input_token_count >= model_context_length {
+        return Err(format!(
+            "request input contains {input_token_count} tokens but the effective model context limit \
+             is {model_context_length}; at least one output token must fit within the context"
         ));
     }
     if request.max_new_tokens == 0 {
@@ -285,13 +310,18 @@ fn normalize_generate_text_request(
 
     // The final generated token remains pending rather than being written to the cache, so one
     // output token can be generated even when the input already fills the cache.
-    let maximum_new_token_count = u64::try_from(token_capacity - input_token_count + 1)
+    let maximum_new_token_count = (kv_cache_token_capacity - input_token_count)
+        .checked_add(1)
+        .ok_or_else(|| "maximum new token count does not fit in usize".to_owned())?
+        .min(model_context_length - input_token_count);
+    let maximum_new_token_count = u64::try_from(maximum_new_token_count)
         .map_err(|_| "maximum new token count does not fit in u64".to_owned())?;
     if request.max_new_tokens > maximum_new_token_count {
         warn!(
-            "Requested {} new tokens, but the KV cache can hold at most {} for this input; \
+            "Requested {} new tokens for {input_token_count} input tokens with KV-cache capacity \
+             {kv_cache_token_capacity} and effective context limit {model_context_length}; \
              reducing max_new_tokens to {}",
-            request.max_new_tokens, maximum_new_token_count, maximum_new_token_count,
+            request.max_new_tokens, maximum_new_token_count,
         );
         request.max_new_tokens = maximum_new_token_count;
     }
@@ -317,8 +347,27 @@ fn normalize_activation_dtype(
 
 #[cfg(test)]
 mod tests {
+    use super::get_effective_context_length;
     use super::normalize_generate_text_request;
     use crate::proto::model_runner::GenerateTextRequest;
+    use crate::proto::model_runner::GetModelMetadataResponse;
+    use crate::proto::model_runner::ModelMetadata;
+
+    fn metadata(
+        context_length: u64,
+        draft_context_length: Option<u64>,
+    ) -> GetModelMetadataResponse {
+        GetModelMetadataResponse {
+            target_model: Some(ModelMetadata {
+                context_length,
+                ..Default::default()
+            }),
+            draft_model: draft_context_length.map(|context_length| ModelMetadata {
+                context_length,
+                ..Default::default()
+            }),
+        }
+    }
 
     #[test]
     fn limits_generation_to_the_available_cache_capacity() {
@@ -328,7 +377,7 @@ mod tests {
             ..Default::default()
         };
 
-        normalize_generate_text_request(&mut request, 4).unwrap();
+        normalize_generate_text_request(&mut request, 4, 32).unwrap();
 
         assert_eq!(request.max_new_tokens, 2);
     }
@@ -337,7 +386,7 @@ mod tests {
     fn rejects_empty_model_input() {
         let mut request = GenerateTextRequest::default();
 
-        let error = normalize_generate_text_request(&mut request, 16).unwrap_err();
+        let error = normalize_generate_text_request(&mut request, 16, 32).unwrap_err();
 
         assert_eq!(error, "input token IDs must not be empty");
     }
@@ -350,7 +399,7 @@ mod tests {
             ..Default::default()
         };
 
-        let error = normalize_generate_text_request(&mut request, 16).unwrap_err();
+        let error = normalize_generate_text_request(&mut request, 16, 32).unwrap_err();
 
         assert_eq!(error, "max_new_tokens must be greater than zero");
     }
@@ -363,7 +412,7 @@ mod tests {
             ..Default::default()
         };
 
-        let error = normalize_generate_text_request(&mut request, 16).unwrap_err();
+        let error = normalize_generate_text_request(&mut request, 16, 32).unwrap_err();
 
         assert!(error.contains("input contains 17 tokens"));
     }
@@ -376,8 +425,49 @@ mod tests {
             ..Default::default()
         };
 
-        normalize_generate_text_request(&mut request, 16).unwrap();
+        normalize_generate_text_request(&mut request, 16, 32).unwrap();
 
         assert_eq!(request.max_new_tokens, 1);
+    }
+
+    #[test]
+    fn limits_complete_sequences_to_target_and_draft_contexts() {
+        for (target, draft, requested, expected) in [
+            (5, None, u64::MAX, 2),
+            (32, Some(4), 8, 1),
+            (5, None, 2, 2),
+            (5, None, 1, 1),
+        ] {
+            let mut request = GenerateTextRequest {
+                input_token_ids: vec![1; 3],
+                max_new_tokens: requested,
+                ..Default::default()
+            };
+            normalize_generate_text_request(
+                &mut request,
+                16,
+                get_effective_context_length(&metadata(target, draft)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(request.max_new_tokens, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_prompts_without_context_room_for_output() {
+        for (target, draft, count) in [(3, None, 3), (3, None, 4), (32, Some(3), 3)] {
+            let mut request = GenerateTextRequest {
+                input_token_ids: vec![1; count],
+                max_new_tokens: 1,
+                ..Default::default()
+            };
+            let error = normalize_generate_text_request(
+                &mut request,
+                16,
+                get_effective_context_length(&metadata(target, draft)).unwrap(),
+            )
+            .unwrap_err();
+            assert!(error.contains("effective model context limit is 3"));
+        }
     }
 }

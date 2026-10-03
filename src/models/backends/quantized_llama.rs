@@ -90,6 +90,9 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
     let block_count = md_get("llama.block_count")?.to_u32()? as usize;
     let embedding_length = md_get("llama.embedding_length")?.to_u32()? as usize;
     let context_length = md_get("llama.context_length")?.to_u32()? as usize;
+    if context_length == 0 {
+        candle::bail!("llama.context_length must be greater than zero");
+    }
     let rope_dim = md_get("llama.rope.dimension_count")?.to_u32()? as usize;
     // Strangely this value is generally 1e-6 in GGUF file but used to be 1e-5 by default.
     let rms_norm_eps = md_get("llama.attention.layer_norm_rms_epsilon")?.to_f32()? as f64;
@@ -176,5 +179,6 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
         layers,
         output_norm,
         QMatMul::from_qtensor(output, "output")?,
+        context_length,
     ))
 }

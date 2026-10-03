@@ -86,6 +86,9 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
     let head_count_kv = md_get("qwen2.attention.head_count_kv")?.to_u32()? as usize;
     let embedding_length = md_get("qwen2.embedding_length")?.to_u32()? as usize;
     let context_length = md_get("qwen2.context_length")?.to_u32()? as usize;
+    if context_length == 0 {
+        candle::bail!("qwen2.context_length must be greater than zero");
+    }
     let block_count = md_get("qwen2.block_count")?.to_u32()? as usize;
     let rms_norm_eps = md_get("qwen2.attention.layer_norm_rms_epsilon")?.to_f32()? as f64;
     let rope_freq_base = md_get("qwen2.rope.freq_base")
@@ -189,5 +192,6 @@ fn load_model_weights_from_gguf<R: std::io::Seek + std::io::Read>(
         layers,
         output_norm,
         QMatMul::from_qtensor(output, "output")?,
+        context_length,
     ))
 }
