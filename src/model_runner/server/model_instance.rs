@@ -6,6 +6,7 @@ use anyhow::Result;
 use candle_core::Tensor;
 
 use super::kv_cache::KvCacheBackend;
+use super::kv_cache::KvCacheGeometry;
 use super::kv_cache::KvCacheManager;
 
 /// Owns one loaded model and the runtime KV-cache state used by that model instance.
@@ -30,6 +31,10 @@ impl ModelInstance {
         self.kv_cache_manager.supports_multiple_active_requests()
     }
 
+    pub(super) fn kv_cache_geometry(&self) -> KvCacheGeometry {
+        self.kv_cache_manager.geometry()
+    }
+
     pub(super) fn forward(&mut self, inputs: &[ForwardInput]) -> Result<Vec<Tensor>> {
         self.model
             .model()
@@ -50,10 +55,6 @@ impl ModelInstance {
 
     pub(super) fn model_metadata(&self) -> ModelMetadata {
         self.model.metadata()
-    }
-
-    pub(super) fn token_capacity(&self) -> usize {
-        self.kv_cache_manager.token_capacity()
     }
 
     pub(super) fn create_input_tensor(&self, token_ids: &[u32]) -> candle_core::Result<Tensor> {

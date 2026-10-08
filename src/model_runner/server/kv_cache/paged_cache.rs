@@ -80,6 +80,10 @@ impl PagedKvCache {
         self.token_capacity
     }
 
+    pub(super) fn per_page_token_count(&self) -> usize {
+        self.physical_page_pool.per_page_token_count
+    }
+
     pub(super) fn layer_count(&self) -> usize {
         self.layer_count
     }

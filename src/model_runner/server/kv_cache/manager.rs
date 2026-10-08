@@ -1,6 +1,7 @@
 use super::contiguous_cache::RequestContiguousCacheState;
 use super::paged_cache::RequestPagedCacheState;
 use super::KvCacheBackend;
+use super::KvCacheGeometry;
 use crate::models::ContiguousCacheTensors;
 use crate::models::KvCache;
 use crate::models::PagedCacheLayout;
@@ -57,8 +58,8 @@ impl KvCacheManager {
         self.backend.supports_multiple_active_requests()
     }
 
-    pub fn token_capacity(&self) -> usize {
-        self.backend.token_capacity()
+    pub fn geometry(&self) -> KvCacheGeometry {
+        self.backend.geometry()
     }
 
     /// Restores reusable prefix pages and returns the number of restored tokens.
@@ -241,6 +242,34 @@ mod tests {
                 1,
             ))?,
         )
+    }
+
+    #[test]
+    fn reports_cache_geometry() -> Result<()> {
+        let paged_geometry = paged_manager()?.geometry();
+        assert_eq!(
+            paged_geometry,
+            KvCacheGeometry {
+                token_capacity: 6,
+                page_token_count: 2,
+            }
+        );
+        assert_eq!(paged_geometry.page_capacity(), 3);
+        assert_eq!(paged_geometry.get_required_page_count(1), 1);
+        assert_eq!(paged_geometry.get_required_page_count(2), 1);
+        assert_eq!(paged_geometry.get_required_page_count(3), 2);
+
+        let contiguous_geometry = contiguous_manager()?.geometry();
+        assert_eq!(
+            contiguous_geometry,
+            KvCacheGeometry {
+                token_capacity: 2,
+                page_token_count: 1,
+            }
+        );
+        assert_eq!(contiguous_geometry.page_capacity(), 2);
+        assert_eq!(contiguous_geometry.get_required_page_count(2), 2);
+        Ok(())
     }
 
     #[test]

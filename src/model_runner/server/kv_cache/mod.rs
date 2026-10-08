@@ -16,6 +16,27 @@ mod utils;
 
 pub(super) use manager::KvCacheManager;
 
+/// Describes the static layout of a model instance's KV cache.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct KvCacheGeometry {
+    pub(super) token_capacity: usize,
+    pub(super) page_token_count: usize,
+}
+
+#[allow(
+    dead_code,
+    reason = "used by capacity-aware scheduler admission in the next change"
+)]
+impl KvCacheGeometry {
+    pub(super) fn page_capacity(self) -> usize {
+        self.token_capacity / self.page_token_count
+    }
+
+    pub(super) fn get_required_page_count(self, token_count: usize) -> usize {
+        token_count.div_ceil(self.page_token_count)
+    }
+}
+
 trait LayerCache {
     fn cached_token_count(&self) -> usize;
 }
@@ -27,6 +48,21 @@ pub(super) enum KvCacheBackend {
 }
 
 impl KvCacheBackend {
+    pub(super) fn geometry(&self) -> KvCacheGeometry {
+        match self {
+            Self::Contiguous(_) => KvCacheGeometry {
+                token_capacity: self.token_capacity(),
+                // The contiguous backend has no physical pages. Treat each token as one logical
+                // capacity unit; it is independently limited to one active request.
+                page_token_count: 1,
+            },
+            Self::Paged(cache) => KvCacheGeometry {
+                token_capacity: self.token_capacity(),
+                page_token_count: cache.per_page_token_count(),
+            },
+        }
+    }
+
     pub(super) fn supports_multiple_active_requests(&self) -> bool {
         matches!(self, Self::Paged(_))
     }

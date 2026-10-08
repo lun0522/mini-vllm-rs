@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use super::draft_token_count::DraftTokenCountController;
 use super::draft_token_count::DraftTokenCountPolicy;
 use super::kv_cache::create_kv_cache;
+use super::kv_cache::KvCacheGeometry;
 use super::model_instance::ModelInstance;
 use super::text_generation;
 
@@ -106,15 +107,7 @@ impl ModelRunner {
             .draft
             .as_ref()
             .map(|draft| draft.model.model_metadata());
-        let kv_cache_token_capacity = self
-            .draft
-            .as_ref()
-            .map(|draft| {
-                self.target
-                    .token_capacity()
-                    .min(draft.model.token_capacity())
-            })
-            .unwrap_or_else(|| self.target.token_capacity());
+        let kv_cache_token_capacity = self.kv_cache_geometry().token_capacity;
         ModelRunnerMetadata {
             model_metadata: GetModelMetadataResponse {
                 target_model: Some(target_model),
@@ -126,6 +119,20 @@ impl ModelRunner {
 
     pub(super) fn supports_multiple_active_requests(&self) -> bool {
         self.target.supports_multiple_active_requests()
+    }
+
+    pub(super) fn kv_cache_geometry(&self) -> KvCacheGeometry {
+        let target_geometry = self.target.kv_cache_geometry();
+        let Some(draft) = &self.draft else {
+            return target_geometry;
+        };
+        let draft_geometry = draft.model.kv_cache_geometry();
+        KvCacheGeometry {
+            token_capacity: target_geometry
+                .token_capacity
+                .min(draft_geometry.token_capacity),
+            page_token_count: target_geometry.page_token_count,
+        }
     }
 
     pub(super) fn start_request(
