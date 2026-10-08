@@ -4,6 +4,7 @@ use crate::proto::model_runner::DraftTokenStats;
 use crate::proto::model_runner::TextGenerationFinishReason;
 use crate::proto::model_runner::TextGenerationStats;
 use crate::proto::model_runner::TokenGenerationLatency;
+use anyhow::Context;
 use anyhow::Result;
 use log::error;
 use log::info;
@@ -39,12 +40,13 @@ impl InferenceEngine {
         scheduler_config: SchedulerConfig,
     ) -> Self {
         let scheduler_config = normalize_scheduler_config(&model_runner, scheduler_config);
+        let kv_cache_geometry = model_runner.kv_cache_geometry();
         info!("Scheduler config: {scheduler_config}");
         Self {
             backend_id,
             model_runner,
             request_manager: RequestManager::new(),
-            scheduler: Scheduler::new(scheduler_config),
+            scheduler: Scheduler::new(scheduler_config, kv_cache_geometry),
         }
     }
 
@@ -73,8 +75,11 @@ impl InferenceEngine {
     fn enqueue_request(&mut self, request: InferenceRequest) -> Result<()> {
         let request_id = request.generate_text.request_id;
         let input_token_count = request.generate_text.input_token_ids.len();
+        let max_new_token_count = usize::try_from(request.generate_text.max_new_tokens)
+            .context("max_new_tokens does not fit in usize")?;
         self.request_manager.add_request(request)?;
-        self.scheduler.enqueue(request_id, input_token_count);
+        self.scheduler
+            .enqueue(request_id, input_token_count, max_new_token_count);
         Ok(())
     }
 

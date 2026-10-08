@@ -35,7 +35,7 @@ through the lifecycle client.
 | `server/mod.rs` | Serves tonic RPCs, validates request capacity, and routes requests to inference backends. |
 | `server/inference_engine.rs` | Coordinates admission, scheduled execution, event delivery, timing, and cleanup for one backend. |
 | `server/request_manager.rs` | Owns request payloads, resumable execution state, response channels, and lifecycle timing. |
-| `server/scheduler.rs` | Owns only scheduling metadata and applies active-request and token-budget limits. |
+| `server/scheduler.rs` | Owns scheduling metadata and applies active-request, KV-cache reservation, and token-budget limits. |
 | `server/model_runner.rs` | Owns the target and optional draft model instances and manages their request lifecycles. |
 | `server/model_instance.rs` | Pairs one loaded model with its request-aware KV-cache manager. |
 | `server/text_generation.rs` | Implements resumable prefill, ordinary decoding, speculative decoding, sampling, and statistics. |
@@ -90,10 +90,21 @@ remaining capacity, it reduces `max_new_tokens` before queueing the request.
 
 ## Scheduling
 
-Each backend admits requests up to its active-request limit and builds batches
-within its token budget. Decode work is prioritized over prefill work; prefills
-are ordered either first-come-first-served or shortest-prefill-first. Long
-prefills can be split across scheduling iterations.
+Each backend admits requests while both active-request slots and KV-cache pages
+remain. A request reserves enough page-rounded capacity for
+`input_token_count + max_new_tokens - 1` cached tokens; the final generated
+token remains pending and therefore needs no cache slot. Admission preserves
+the configured policy order and stops when the next request does not fit.
+
+Reservations conservatively ignore prefix-cache hits, while inactive cached
+prefix pages remain reclaimable through the existing LRU eviction path. A
+request releases its reservation when it finishes or is removed after an error
+or cancellation.
+
+Admitted requests build batches within the scheduler's token budget. Decode
+work is prioritized over prefill work; prefills are ordered either
+first-come-first-served or shortest-prefill-first. Long prefills can be split
+across scheduling iterations.
 
 Paged KV caching supports multiple active requests and continuous batching. A
 contiguous cache permits only one active request, so the inference engine

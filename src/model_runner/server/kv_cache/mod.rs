@@ -23,10 +23,6 @@ pub(super) struct KvCacheGeometry {
     pub(super) page_token_count: usize,
 }
 
-#[allow(
-    dead_code,
-    reason = "used by capacity-aware scheduler admission in the next change"
-)]
 impl KvCacheGeometry {
     pub(super) fn page_capacity(self) -> usize {
         self.token_capacity / self.page_token_count

@@ -64,6 +64,20 @@ those distinctions become important. vLLM instead distinguishes scheduled
 tokens from capacity reserved for speculative slots in its
 [scheduler configuration](https://docs.vllm.ai/en/latest/api/vllm/config/scheduler/).
 
+## Scheduling admission capacity
+
+The scheduler reserves the worst-case page-rounded KV-cache footprint of every
+active request. The footprint contains the input and requested output tokens
+except for the final generated token, which remains pending rather than being
+written to the cache. A queued request is admitted only when its reservation
+fits alongside every active reservation, so admitted requests can reach their
+configured output limit without KV-cache preemption.
+
+Admission remains policy ordered: a request that does not fit is not bypassed
+by later requests. Prefix-cache hits do not reduce a reservation; this trades
+some concurrency for a simple completion guarantee. Inactive prefix pages are
+still evictable when an admitted request needs their physical storage.
+
 ## Comparison with other inference engines
 
 Process counts below describe the common serving configuration. Each project
@@ -143,11 +157,10 @@ remain in native Rust and avoid Python interpreter overhead.
 
 ## Future directions
 
-1. Make scheduler admission aware of available paged KV-cache capacity.
-2. Add seeded temperature and top-p sampling for target-only generation.
-3. Improve overload and cancellation handling, including early removal of
+1. Add seeded temperature and top-p sampling for target-only generation.
+2. Improve overload and cancellation handling, including early removal of
    cancelled queued requests and explicit capacity errors.
-4. Support and verify CUDA inference on Linux with NVIDIA GPUs.
-5. Add GPU paged attention, potentially using `candle-flash-attn`.
-6. Extend stochastic sampling to speculative decoding with a
+3. Support and verify CUDA inference on Linux with NVIDIA GPUs.
+4. Add GPU paged attention, potentially using `candle-flash-attn`.
+5. Extend stochastic sampling to speculative decoding with a
    distribution-correct acceptance algorithm.
