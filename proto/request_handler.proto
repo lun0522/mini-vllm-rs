@@ -7,6 +7,8 @@ import "model_runner.proto";
 service RequestHandlerService {
   // Streams a text-generation request through the model runner process.
   rpc GenerateText(.request_handler.GenerateText) returns (stream .request_handler.GenerateTextEvent);
+  // Returns prefix-cache telemetry from the model runner process.
+  rpc GetPrefixCacheTelemetry(.model_runner.GetPrefixCacheTelemetryRequest) returns (.model_runner.GetPrefixCacheTelemetryResponse);
   // Gracefully stops the request handler process.
   rpc Shutdown(.request_handler.Shutdown) returns (.request_handler.CommandResult);
 }

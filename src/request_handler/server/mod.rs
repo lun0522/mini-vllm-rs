@@ -1,6 +1,8 @@
 use crate::proto::model_runner::model_runner_service_client::ModelRunnerServiceClient;
 use crate::proto::model_runner::GenerateTextEvent as ModelRunnerGenerateTextEvent;
 use crate::proto::model_runner::GetModelMetadataRequest;
+use crate::proto::model_runner::GetPrefixCacheTelemetryRequest;
+use crate::proto::model_runner::GetPrefixCacheTelemetryResponse;
 use crate::proto::request_handler::request_handler_service_server::RequestHandlerService;
 use crate::proto::request_handler::request_handler_service_server::RequestHandlerServiceServer;
 use crate::proto::request_handler::CommandResult;
@@ -168,6 +170,16 @@ impl RequestHandlerService for RequestHandlerRpcService {
             request.stream_output,
         ));
         Ok(Response::new(ReceiverStream::new(event_receiver)))
+    }
+
+    async fn get_prefix_cache_telemetry(
+        &self,
+        request: Request<GetPrefixCacheTelemetryRequest>,
+    ) -> Result<Response<GetPrefixCacheTelemetryResponse>, Status> {
+        let mut model_runner_client = self.model_runner_client.clone();
+        model_runner_client
+            .get_prefix_cache_telemetry(request)
+            .await
     }
 
     async fn shutdown(

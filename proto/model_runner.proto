@@ -5,6 +5,8 @@ package model_runner;
 service ModelRunnerService {
   // Returns metadata required for tokenizer validation and input processing.
   rpc GetModelMetadata(GetModelMetadataRequest) returns (GetModelMetadataResponse);
+  // Returns a snapshot of prefix-cache telemetry for each inference backend.
+  rpc GetPrefixCacheTelemetry(GetPrefixCacheTelemetryRequest) returns (GetPrefixCacheTelemetryResponse);
   // Generates text and returns output events followed by final statistics.
   rpc GenerateText(GenerateTextRequest) returns (stream GenerateTextEvent);
   // Executes a command in the model runner process.
@@ -29,6 +31,27 @@ message ModelMetadata {
 message GetModelMetadataResponse {
   ModelMetadata target_model = 1;
   optional ModelMetadata draft_model = 2;
+}
+
+message GetPrefixCacheTelemetryRequest {}
+
+message GetPrefixCacheTelemetryResponse {
+  // Per-backend snapshots, ordered by backend ID.
+  repeated InferenceBackendPrefixCacheTelemetry backends = 1;
+}
+
+message InferenceBackendPrefixCacheTelemetry {
+  // Process-local identifier of the inference backend that owns these caches.
+  uint64 backend_id = 1;
+  // Target-model prefix-cache telemetry.
+  PrefixCacheTelemetry target = 2;
+  // Draft-model prefix-cache telemetry; absent when no draft model is configured.
+  optional PrefixCacheTelemetry draft = 3;
+}
+
+message PrefixCacheTelemetry {
+  // Maximum number of sequence tokens that the KV cache can hold.
+  uint64 token_capacity = 1;
 }
 
 message ModelRunnerCommand {

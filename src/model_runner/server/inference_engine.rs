@@ -2,6 +2,7 @@ use crate::model_runner::SchedulerConfig;
 use crate::proto::model_runner::DraftTokenCountHistogramBucket;
 use crate::proto::model_runner::DraftTokenStats;
 use crate::proto::model_runner::GenerationTiming;
+use crate::proto::model_runner::InferenceBackendPrefixCacheTelemetry;
 use crate::proto::model_runner::PrefixCacheStats;
 use crate::proto::model_runner::TextGenerationFinishReason;
 use crate::proto::model_runner::TextGenerationStats;
@@ -23,6 +24,7 @@ use super::request_manager::RequestOutcome;
 use super::scheduler::Scheduler;
 use super::scheduler::SchedulingDecision;
 use super::text_generation;
+use super::InferenceEngineMessage;
 use super::InferenceRequest;
 
 /// Coordinates request storage, scheduling, model execution, and result delivery.
@@ -50,24 +52,39 @@ impl InferenceEngine {
         }
     }
 
-    pub(super) fn run(mut self, mut request_receiver: mpsc::Receiver<InferenceRequest>) {
+    pub(super) fn run(mut self, mut message_receiver: mpsc::Receiver<InferenceEngineMessage>) {
         loop {
             if self.scheduler.is_vacant() {
-                let Some(request) = request_receiver.blocking_recv() else {
+                let Some(message) = message_receiver.blocking_recv() else {
                     break;
                 };
-                if let Err(error) = self.enqueue_request(request) {
-                    error!("Inference engine failed to enqueue a request: {error:#}");
+                if let Err(error) = self.handle_message(message) {
+                    error!("Inference engine failed to handle a message: {error:#}");
                     continue;
                 }
             }
-            while let Ok(request) = request_receiver.try_recv() {
-                if let Err(error) = self.enqueue_request(request) {
-                    error!("Inference engine failed to enqueue a request: {error:#}");
+            while let Ok(message) = message_receiver.try_recv() {
+                if let Err(error) = self.handle_message(message) {
+                    error!("Inference engine failed to handle a message: {error:#}");
                 }
             }
             if let Err(error) = self.process_requests() {
                 error!("Inference engine failed to process requests: {error:#}");
+            }
+        }
+    }
+
+    fn handle_message(&mut self, message: InferenceEngineMessage) -> Result<()> {
+        match message {
+            InferenceEngineMessage::Generate(request) => self.enqueue_request(request),
+            InferenceEngineMessage::GetPrefixCacheTelemetry { response_sender } => {
+                let telemetry = self.model_runner.prefix_cache_telemetry();
+                let _ = response_sender.send(InferenceBackendPrefixCacheTelemetry {
+                    backend_id: self.backend_id as u64,
+                    target: Some(telemetry.target),
+                    draft: telemetry.draft,
+                });
+                Ok(())
             }
         }
     }

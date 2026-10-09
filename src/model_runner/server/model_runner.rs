@@ -6,6 +6,7 @@ use crate::models::ModelInfo;
 use crate::models::ModelRole;
 use crate::proto::model_runner::GenerateTextRequest;
 use crate::proto::model_runner::GetModelMetadataResponse;
+use crate::proto::model_runner::PrefixCacheTelemetry;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Error;
@@ -42,6 +43,11 @@ struct DraftModel {
 struct NewlyIndexedTokenCounts {
     target: usize,
     draft: Option<usize>,
+}
+
+pub(super) struct ModelRunnerPrefixCacheTelemetry {
+    pub(super) target: PrefixCacheTelemetry,
+    pub(super) draft: Option<PrefixCacheTelemetry>,
 }
 
 /// Owns the loaded models and executes requests on the inference thread.
@@ -124,6 +130,17 @@ impl ModelRunner {
 
     pub(super) fn supports_multiple_active_requests(&self) -> bool {
         self.target.supports_multiple_active_requests()
+    }
+
+    pub(super) fn prefix_cache_telemetry(&self) -> ModelRunnerPrefixCacheTelemetry {
+        ModelRunnerPrefixCacheTelemetry {
+            target: PrefixCacheTelemetry {
+                token_capacity: self.target.kv_cache_geometry().token_capacity as u64,
+            },
+            draft: self.draft.as_ref().map(|draft| PrefixCacheTelemetry {
+                token_capacity: draft.model.kv_cache_geometry().token_capacity as u64,
+            }),
+        }
     }
 
     pub(super) fn kv_cache_geometry(&self) -> KvCacheGeometry {
