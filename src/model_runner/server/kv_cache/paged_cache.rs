@@ -6,6 +6,7 @@ use super::prefix_index::PrefixBlockIndex;
 use super::utils::get_page_from_pool;
 use super::utils::validate_cache_append;
 use super::utils::TOKEN_DIMENSION;
+use super::PrefixCacheTelemetry;
 use crate::models::ContiguousCacheTensors;
 use crate::models::ModelInfo;
 use crate::models::ModelRole;
@@ -25,6 +26,44 @@ pub(in crate::model_runner::server) struct PagedKvCache {
     prefix_block_index: Option<PrefixBlockIndex>,
     token_capacity: usize,
     layer_count: usize,
+    prefix_cache_counters: PrefixCacheCounters,
+}
+
+#[derive(Default)]
+struct PrefixCacheCounters {
+    cumulative_indexed_token_count: usize,
+    cumulative_evicted_token_count: usize,
+    cumulative_restored_token_count: usize,
+    cumulative_lookup_count: usize,
+    cumulative_hit_count: usize,
+}
+
+impl PrefixCacheCounters {
+    fn add_indexed_token_count(&mut self, token_count: usize) {
+        self.cumulative_indexed_token_count = self
+            .cumulative_indexed_token_count
+            .saturating_add(token_count);
+    }
+
+    fn add_evicted_token_count(&mut self, token_count: usize) {
+        self.cumulative_evicted_token_count = self
+            .cumulative_evicted_token_count
+            .saturating_add(token_count);
+    }
+
+    fn add_restored_token_count(&mut self, token_count: usize) {
+        self.cumulative_restored_token_count = self
+            .cumulative_restored_token_count
+            .saturating_add(token_count);
+    }
+
+    fn increment_lookup_count(&mut self) {
+        self.cumulative_lookup_count = self.cumulative_lookup_count.saturating_add(1);
+    }
+
+    fn increment_hit_count(&mut self) {
+        self.cumulative_hit_count = self.cumulative_hit_count.saturating_add(1);
+    }
 }
 
 /// Holds the virtual page mappings and prefix-index position for one request.
@@ -73,6 +112,7 @@ impl PagedKvCache {
             prefix_block_index,
             token_capacity,
             layer_count: model_info.layer_count,
+            prefix_cache_counters: PrefixCacheCounters::default(),
         })
     }
 
@@ -88,6 +128,29 @@ impl PagedKvCache {
         self.layer_count
     }
 
+    pub(super) fn prefix_cache_telemetry(&self) -> Option<PrefixCacheTelemetry> {
+        let prefix_block_index = self.prefix_block_index.as_ref()?;
+        let current_indexed_token_count = prefix_block_index
+            .block_count()
+            .checked_mul(self.physical_page_pool.per_page_token_count)
+            .expect("indexed prefix token count must fit within cache capacity");
+        Some(PrefixCacheTelemetry {
+            token_capacity: self.token_capacity,
+            current_indexed_token_count,
+            cumulative_indexed_token_count: self
+                .prefix_cache_counters
+                .cumulative_indexed_token_count,
+            cumulative_evicted_token_count: self
+                .prefix_cache_counters
+                .cumulative_evicted_token_count,
+            cumulative_restored_token_count: self
+                .prefix_cache_counters
+                .cumulative_restored_token_count,
+            cumulative_lookup_count: self.prefix_cache_counters.cumulative_lookup_count,
+            cumulative_hit_count: self.prefix_cache_counters.cumulative_hit_count,
+        })
+    }
+
     /// Attaches the longest reusable prefix to the current request and returns its token count.
     pub(super) fn restore_cached_prefix(
         &mut self,
@@ -97,11 +160,12 @@ impl PagedKvCache {
         let Some(prefix_block_index) = self.prefix_block_index.as_ref() else {
             return Ok(0);
         };
-        let prefix_match = prefix_block_index.find_longest_cached_prefix(input_token_ids)?;
         ensure!(
             !request_state.active_block_tables.is_populated(),
             "cannot attach a cached prefix to non-empty active block tables"
         );
+        self.prefix_cache_counters.increment_lookup_count();
+        let prefix_match = prefix_block_index.find_longest_cached_prefix(input_token_ids)?;
         let matched_token_count = prefix_match.cursor.matched_token_count();
         self.physical_page_pool
             .retain_allocated_pages_or_rollback(prefix_match.page_ids_by_layer.iter().flatten())?;
@@ -109,6 +173,11 @@ impl PagedKvCache {
             .active_block_tables
             .attach_cached_prefix(prefix_match.page_ids_by_layer, matched_token_count);
         *request_state.prefix_block_cursor = prefix_match.cursor;
+        self.prefix_cache_counters
+            .add_restored_token_count(matched_token_count);
+        if matched_token_count > 0 {
+            self.prefix_cache_counters.increment_hit_count();
+        }
         Ok(matched_token_count)
     }
 
@@ -225,6 +294,8 @@ impl PagedKvCache {
             .context("newly indexed prefix token count overflow")?;
         self.physical_page_pool
             .retain_allocated_pages_or_rollback(newly_indexed_pages.page_ids.iter())?;
+        self.prefix_cache_counters
+            .add_indexed_token_count(newly_indexed_token_count);
         Ok(newly_indexed_token_count)
     }
 
@@ -302,6 +373,8 @@ impl PagedKvCache {
             };
             self.physical_page_pool
                 .release_allocated_pages(evicted_block.page_ids_by_layer.iter().copied())?;
+            self.prefix_cache_counters
+                .add_evicted_token_count(self.physical_page_pool.per_page_token_count);
         }
         self.physical_page_pool
             .validate_append_capacity(current_token_count, appending_token_count)
@@ -833,6 +906,42 @@ mod tests {
                 .page_ids_by_layer,
             vec![indexed_page_ids]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn reports_prefix_cache_telemetry() -> Result<()> {
+        let mut cache = paged_cache_with_prefix_caching(1, 2, 2, true)?;
+        cache.append(0, 0, &cache_tensor(0, 4)?, &cache_tensor(100, 4)?)?;
+        assert_eq!(finish_request(&mut cache, &[1, 2, 3, 4])?, 4);
+
+        assert_eq!(cache.restore_cached_prefix(&[1, 2, 9])?, 2);
+        cache.reset_active_block_tables()?;
+        assert_eq!(cache.restore_cached_prefix(&[9, 9])?, 0);
+        cache.reset_active_block_tables()?;
+
+        cache.append(0, 0, &cache_tensor(0, 2)?, &cache_tensor(100, 2)?)?;
+
+        assert_eq!(
+            cache.prefix_cache_telemetry(),
+            Some(PrefixCacheTelemetry {
+                token_capacity: 4,
+                current_indexed_token_count: 2,
+                cumulative_indexed_token_count: 4,
+                cumulative_evicted_token_count: 2,
+                cumulative_restored_token_count: 2,
+                cumulative_lookup_count: 2,
+                cumulative_hit_count: 1,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn omits_prefix_cache_telemetry_when_prefix_caching_is_disabled() -> Result<()> {
+        let cache = paged_cache(1, 2, 2)?;
+
+        assert_eq!(cache.prefix_cache_telemetry(), None);
         Ok(())
     }
 

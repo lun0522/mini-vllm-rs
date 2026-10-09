@@ -23,6 +23,17 @@ pub(super) struct KvCacheGeometry {
     pub(super) page_token_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PrefixCacheTelemetry {
+    pub(super) token_capacity: usize,
+    pub(super) current_indexed_token_count: usize,
+    pub(super) cumulative_indexed_token_count: usize,
+    pub(super) cumulative_evicted_token_count: usize,
+    pub(super) cumulative_restored_token_count: usize,
+    pub(super) cumulative_lookup_count: usize,
+    pub(super) cumulative_hit_count: usize,
+}
+
 impl KvCacheGeometry {
     pub(super) fn page_capacity(self) -> usize {
         self.token_capacity / self.page_token_count
@@ -56,6 +67,13 @@ impl KvCacheBackend {
                 token_capacity: self.token_capacity(),
                 page_token_count: cache.per_page_token_count(),
             },
+        }
+    }
+
+    pub(super) fn prefix_cache_telemetry(&self) -> Option<PrefixCacheTelemetry> {
+        match self {
+            Self::Contiguous(_) => None,
+            Self::Paged(cache) => cache.prefix_cache_telemetry(),
         }
     }
 

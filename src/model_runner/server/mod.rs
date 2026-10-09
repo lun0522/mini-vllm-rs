@@ -425,9 +425,12 @@ mod tests {
                     backend_id,
                     target: Some(PrefixCacheTelemetry {
                         token_capacity: target_token_capacity,
+                        ..Default::default()
                     }),
-                    draft: draft_token_capacity
-                        .map(|token_capacity| PrefixCacheTelemetry { token_capacity }),
+                    draft: draft_token_capacity.map(|token_capacity| PrefixCacheTelemetry {
+                        token_capacity,
+                        ..Default::default()
+                    }),
                 });
             });
         }

@@ -119,6 +119,10 @@ impl PrefixBlockIndex {
         })
     }
 
+    pub(super) fn block_count(&self) -> usize {
+        self.blocks_map.len()
+    }
+
     pub(super) fn find_longest_cached_prefix(
         &self,
         input_token_ids: &[u32],

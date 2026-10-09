@@ -6,7 +6,6 @@ use crate::models::ModelInfo;
 use crate::models::ModelRole;
 use crate::proto::model_runner::GenerateTextRequest;
 use crate::proto::model_runner::GetModelMetadataResponse;
-use crate::proto::model_runner::PrefixCacheTelemetry;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Error;
@@ -20,6 +19,7 @@ use super::draft_token_count::DraftTokenCountController;
 use super::draft_token_count::DraftTokenCountPolicy;
 use super::kv_cache::create_kv_cache;
 use super::kv_cache::KvCacheGeometry;
+use super::kv_cache::PrefixCacheTelemetry;
 use super::model_instance::ModelInstance;
 use super::text_generation;
 
@@ -46,7 +46,7 @@ struct NewlyIndexedTokenCounts {
 }
 
 pub(super) struct ModelRunnerPrefixCacheTelemetry {
-    pub(super) target: PrefixCacheTelemetry,
+    pub(super) target: Option<PrefixCacheTelemetry>,
     pub(super) draft: Option<PrefixCacheTelemetry>,
 }
 
@@ -134,12 +134,11 @@ impl ModelRunner {
 
     pub(super) fn prefix_cache_telemetry(&self) -> ModelRunnerPrefixCacheTelemetry {
         ModelRunnerPrefixCacheTelemetry {
-            target: PrefixCacheTelemetry {
-                token_capacity: self.target.kv_cache_geometry().token_capacity as u64,
-            },
-            draft: self.draft.as_ref().map(|draft| PrefixCacheTelemetry {
-                token_capacity: draft.model.kv_cache_geometry().token_capacity as u64,
-            }),
+            target: self.target.prefix_cache_telemetry(),
+            draft: self
+                .draft
+                .as_ref()
+                .and_then(|draft| draft.model.prefix_cache_telemetry()),
         }
     }
 

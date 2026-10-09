@@ -8,6 +8,7 @@ use candle_core::Tensor;
 use super::kv_cache::KvCacheBackend;
 use super::kv_cache::KvCacheGeometry;
 use super::kv_cache::KvCacheManager;
+use super::kv_cache::PrefixCacheTelemetry;
 
 /// Owns one loaded model and the runtime KV-cache state used by that model instance.
 pub(super) struct ModelInstance {
@@ -33,6 +34,10 @@ impl ModelInstance {
 
     pub(super) fn kv_cache_geometry(&self) -> KvCacheGeometry {
         self.kv_cache_manager.geometry()
+    }
+
+    pub(super) fn prefix_cache_telemetry(&self) -> Option<PrefixCacheTelemetry> {
+        self.kv_cache_manager.prefix_cache_telemetry()
     }
 
     pub(super) fn forward(&mut self, inputs: &[ForwardInput]) -> Result<Vec<Tensor>> {

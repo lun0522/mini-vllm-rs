@@ -4,6 +4,7 @@ use crate::proto::model_runner::DraftTokenStats;
 use crate::proto::model_runner::GenerationTiming;
 use crate::proto::model_runner::InferenceBackendPrefixCacheTelemetry;
 use crate::proto::model_runner::PrefixCacheStats;
+use crate::proto::model_runner::PrefixCacheTelemetry as PrefixCacheTelemetryProto;
 use crate::proto::model_runner::TextGenerationFinishReason;
 use crate::proto::model_runner::TextGenerationStats;
 use anyhow::Context;
@@ -17,6 +18,7 @@ use thousands::Separable;
 use tokio::sync::mpsc;
 use tonic::Status;
 
+use super::kv_cache::PrefixCacheTelemetry;
 use super::model_runner::ModelRunner;
 use super::request_manager::RequestExecutionResult;
 use super::request_manager::RequestManager;
@@ -81,8 +83,8 @@ impl InferenceEngine {
                 let telemetry = self.model_runner.prefix_cache_telemetry();
                 let _ = response_sender.send(InferenceBackendPrefixCacheTelemetry {
                     backend_id: self.backend_id as u64,
-                    target: Some(telemetry.target),
-                    draft: telemetry.draft,
+                    target: telemetry.target.map(PrefixCacheTelemetryProto::from),
+                    draft: telemetry.draft.map(PrefixCacheTelemetryProto::from),
                 });
                 Ok(())
             }
@@ -312,13 +314,12 @@ fn create_client_facing_generation_stats(
     last_token_at: Option<Instant>,
     completed_at: Instant,
 ) -> TextGenerationStats {
-    let draft_token_stats = create_draft_token_stats(stats.draft_stats.as_ref());
-    let target_prefix_cache_stats =
-        Some(create_prefix_cache_stats(&stats.target_prefix_cache_stats));
+    let draft_token_stats = stats.draft_stats.as_ref().map(DraftTokenStats::from);
+    let target_prefix_cache_stats = Some(PrefixCacheStats::from(&stats.target_prefix_cache_stats));
     let draft_prefix_cache_stats = stats
         .draft_stats
         .as_ref()
-        .map(|draft_stats| create_prefix_cache_stats(&draft_stats.prefix_cache_stats));
+        .map(|draft_stats| PrefixCacheStats::from(&draft_stats.prefix_cache_stats));
     let timing = Some(create_generation_timing(
         stats,
         queued_at,
@@ -359,34 +360,6 @@ fn create_generation_timing(
     }
 }
 
-fn create_prefix_cache_stats(
-    stats: &text_generation::PrefixCacheGenerationStats,
-) -> PrefixCacheStats {
-    PrefixCacheStats {
-        restored_token_count: stats.restored_token_count as u64,
-        newly_indexed_token_count: stats.newly_indexed_token_count as u64,
-    }
-}
-
-fn create_draft_token_stats(
-    stats: Option<&text_generation::DraftGenerationStats>,
-) -> Option<DraftTokenStats> {
-    stats.map(|stats| DraftTokenStats {
-        accepted_token_count: stats.accepted_token_count as u64,
-        proposed_token_count: stats.proposed_token_count as u64,
-        selected_token_count_histogram: stats
-            .selected_token_count_histogram
-            .iter()
-            .map(
-                |(&draft_token_count, &usage_count)| DraftTokenCountHistogramBucket {
-                    draft_token_count: draft_token_count as u64,
-                    usage_count: usage_count as u64,
-                },
-            )
-            .collect(),
-    })
-}
-
 fn elapsed_microseconds_string(started_at: Instant, finished_at: Option<Instant>) -> String {
     finished_at.map_or_else(
         || "none".to_owned(),
@@ -419,6 +392,48 @@ fn draft_histogram_to_string(stats: Option<&text_generation::DraftGenerationStat
                 .join(",")
         },
     )
+}
+
+impl From<PrefixCacheTelemetry> for PrefixCacheTelemetryProto {
+    fn from(telemetry: PrefixCacheTelemetry) -> Self {
+        Self {
+            token_capacity: telemetry.token_capacity as u64,
+            current_indexed_token_count: telemetry.current_indexed_token_count as u64,
+            cumulative_indexed_token_count: telemetry.cumulative_indexed_token_count as u64,
+            cumulative_evicted_token_count: telemetry.cumulative_evicted_token_count as u64,
+            cumulative_restored_token_count: telemetry.cumulative_restored_token_count as u64,
+            cumulative_lookup_count: telemetry.cumulative_lookup_count as u64,
+            cumulative_hit_count: telemetry.cumulative_hit_count as u64,
+        }
+    }
+}
+
+impl From<&text_generation::PrefixCacheGenerationStats> for PrefixCacheStats {
+    fn from(stats: &text_generation::PrefixCacheGenerationStats) -> Self {
+        Self {
+            restored_token_count: stats.restored_token_count as u64,
+            newly_indexed_token_count: stats.newly_indexed_token_count as u64,
+        }
+    }
+}
+
+impl From<&text_generation::DraftGenerationStats> for DraftTokenStats {
+    fn from(stats: &text_generation::DraftGenerationStats) -> Self {
+        Self {
+            accepted_token_count: stats.accepted_token_count as u64,
+            proposed_token_count: stats.proposed_token_count as u64,
+            selected_token_count_histogram: stats
+                .selected_token_count_histogram
+                .iter()
+                .map(
+                    |(&draft_token_count, &usage_count)| DraftTokenCountHistogramBucket {
+                        draft_token_count: draft_token_count as u64,
+                        usage_count: usage_count as u64,
+                    },
+                )
+                .collect(),
+        }
+    }
 }
 
 #[cfg(test)]

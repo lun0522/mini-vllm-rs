@@ -2,6 +2,7 @@ use super::contiguous_cache::RequestContiguousCacheState;
 use super::paged_cache::RequestPagedCacheState;
 use super::KvCacheBackend;
 use super::KvCacheGeometry;
+use super::PrefixCacheTelemetry;
 use crate::models::ContiguousCacheTensors;
 use crate::models::KvCache;
 use crate::models::PagedCacheLayout;
@@ -60,6 +61,10 @@ impl KvCacheManager {
 
     pub fn geometry(&self) -> KvCacheGeometry {
         self.backend.geometry()
+    }
+
+    pub fn prefix_cache_telemetry(&self) -> Option<PrefixCacheTelemetry> {
+        self.backend.prefix_cache_telemetry()
     }
 
     /// Restores reusable prefix pages and returns the number of restored tokens.

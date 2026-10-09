@@ -43,15 +43,28 @@ message GetPrefixCacheTelemetryResponse {
 message InferenceBackendPrefixCacheTelemetry {
   // Process-local identifier of the inference backend that owns these caches.
   uint64 backend_id = 1;
-  // Target-model prefix-cache telemetry.
-  PrefixCacheTelemetry target = 2;
-  // Draft-model prefix-cache telemetry; absent when no draft model is configured.
+  // Target-model prefix-cache telemetry; absent when prefix caching is disabled.
+  optional PrefixCacheTelemetry target = 2;
+  // Draft-model prefix-cache telemetry; absent when no draft model is configured or prefix
+  // caching is disabled.
   optional PrefixCacheTelemetry draft = 3;
 }
 
 message PrefixCacheTelemetry {
   // Maximum number of sequence tokens that the KV cache can hold.
   uint64 token_capacity = 1;
+  // Number of tokens currently indexed and available for prefix reuse.
+  uint64 current_indexed_token_count = 2;
+  // Number of tokens newly indexed since the inference backend started.
+  uint64 cumulative_indexed_token_count = 3;
+  // Number of indexed tokens evicted since the inference backend started.
+  uint64 cumulative_evicted_token_count = 4;
+  // Number of tokens restored into requests since the inference backend started.
+  uint64 cumulative_restored_token_count = 5;
+  // Number of prefix-cache lookups since the inference backend started.
+  uint64 cumulative_lookup_count = 6;
+  // Number of lookups that restored at least one token since the inference backend started.
+  uint64 cumulative_hit_count = 7;
 }
 
 message ModelRunnerCommand {
