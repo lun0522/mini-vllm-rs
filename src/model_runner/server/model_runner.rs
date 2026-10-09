@@ -39,6 +39,11 @@ struct DraftModel {
     token_count_policy: DraftTokenCountPolicy,
 }
 
+struct NewlyIndexedTokenCounts {
+    target: usize,
+    draft: Option<usize>,
+}
+
 /// Owns the loaded models and executes requests on the inference thread.
 pub(super) struct ModelRunner {
     target: ModelInstance,
@@ -205,17 +210,22 @@ impl ModelRunner {
                 return Err(error);
             }
         };
-        if let Err(error) =
-            self.finalize_model_instances(request_id, &result.cached_sequence_token_ids)
-        {
-            if let Err(cleanup_error) = self.abort_request(request_id) {
-                return Err(error.context(format!(
-                    "additionally failed to clear KV caches: {cleanup_error:#}"
-                )));
-            }
-            return Err(error);
-        }
-        Ok(result)
+        let newly_indexed_token_counts =
+            match self.finalize_model_instances(request_id, &result.cached_sequence_token_ids) {
+                Ok(token_counts) => token_counts,
+                Err(error) => {
+                    if let Err(cleanup_error) = self.abort_request(request_id) {
+                        return Err(error.context(format!(
+                            "additionally failed to clear KV caches: {cleanup_error:#}"
+                        )));
+                    }
+                    return Err(error);
+                }
+            };
+        Ok(result.with_newly_indexed_token_counts(
+            newly_indexed_token_counts.target,
+            newly_indexed_token_counts.draft,
+        ))
     }
 
     pub(super) fn abort_request(&mut self, request_id: u64) -> Result<()> {
@@ -241,16 +251,21 @@ impl ModelRunner {
         Ok(())
     }
 
-    fn finalize_model_instances(&mut self, request_id: u64, token_ids: &[u32]) -> Result<()> {
+    fn finalize_model_instances(
+        &mut self,
+        request_id: u64,
+        token_ids: &[u32],
+    ) -> Result<NewlyIndexedTokenCounts> {
         let target_result = self.target.finish_request(request_id, token_ids);
         let draft_result = self
             .draft
             .as_mut()
             .map(|draft| draft.model.finish_request(request_id, token_ids))
             .transpose();
-        target_result?;
-        draft_result?;
-        Ok(())
+        Ok(NewlyIndexedTokenCounts {
+            target: target_result?,
+            draft: draft_result?,
+        })
     }
 
     fn get_inference_device(inference_device: InferenceDevice) -> Result<Device> {

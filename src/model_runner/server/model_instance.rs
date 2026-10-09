@@ -84,7 +84,8 @@ impl ModelInstance {
         self.kv_cache_manager.remove_request(request_id)
     }
 
-    pub(super) fn finish_request(&mut self, request_id: u64, token_ids: &[u32]) -> Result<()> {
+    /// Finalizes the request cache and returns the number of newly indexed prefix tokens.
+    pub(super) fn finish_request(&mut self, request_id: u64, token_ids: &[u32]) -> Result<usize> {
         self.kv_cache_manager.finish_request(request_id, token_ids)
     }
 }

@@ -70,10 +70,21 @@ message TextGenerationStats {
   uint64 input_token_count = 2;
   // Number of generated tokens, excluding the terminal end-of-sequence token.
   uint64 output_token_count = 3;
-  // Token latency measurements; absent when generation produced no output token.
-  TokenGenerationLatency token_generation_latency = 4;
+  // Request latency and model-execution phase durations.
+  GenerationTiming timing = 4;
   // Speculative-decoding statistics; absent when no draft model is configured.
   DraftTokenStats draft_token_stats = 5;
+  // Prefix-cache statistics for the target model.
+  PrefixCacheStats target_prefix_cache_stats = 6;
+  // Prefix-cache statistics for the draft model; absent when no draft model is configured.
+  PrefixCacheStats draft_prefix_cache_stats = 7;
+}
+
+message PrefixCacheStats {
+  // Number of input-prefix tokens restored from this model's prefix cache.
+  uint64 restored_token_count = 1;
+  // Number of previously uncached tokens this request added to the prefix cache.
+  uint64 newly_indexed_token_count = 2;
 }
 
 enum TextGenerationFinishReason {
@@ -98,11 +109,17 @@ message DraftTokenCountHistogramBucket {
   uint64 usage_count = 2;
 }
 
-message TokenGenerationLatency {
-  // Time from model-runner queue arrival until the first output token.
+message GenerationTiming {
+  // Time from model-runner queue arrival until the first output token; zero when none was emitted.
   uint64 time_to_first_token_microseconds = 1;
-  // Time from model-runner queue arrival until the final output token.
-  uint64 end_to_end_latency_microseconds = 2;
+  // Time from model-runner queue arrival until the final output token; zero when none was emitted.
+  uint64 time_to_last_token_microseconds = 2;
+  // Time spent executing prefill model work, excluding queueing.
+  uint64 prefill_duration_microseconds = 3;
+  // Time spent executing decode model work, excluding queueing.
+  uint64 decode_duration_microseconds = 4;
+  // Time from model-runner queue arrival until request finalization completed.
+  uint64 request_completion_latency_microseconds = 5;
 }
 
 // Requests a graceful shutdown of the model runner process.

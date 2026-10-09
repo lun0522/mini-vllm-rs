@@ -199,13 +199,14 @@ impl PagedKvCache {
             .release_allocated_pages(released_page_ids)
     }
 
+    /// Retains reusable complete blocks and returns their newly indexed token count.
     pub(super) fn retain_completed_blocks(
         &mut self,
         request_state: &RequestPagedCacheState,
         token_ids: &[u32],
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let Some(prefix_block_index) = self.prefix_block_index.as_mut() else {
-            return Ok(());
+            return Ok(0);
         };
         let cached_token_count = request_state.active_block_tables.cached_token_count();
         let cached_token_ids = token_ids
@@ -218,9 +219,13 @@ impl PagedKvCache {
             &cached_page_ids_by_layer,
         );
         let newly_indexed_pages = indexing_result?;
+        let newly_indexed_token_count = newly_indexed_pages
+            .block_count
+            .checked_mul(self.physical_page_pool.per_page_token_count)
+            .context("newly indexed prefix token count overflow")?;
         self.physical_page_pool
             .retain_allocated_pages_or_rollback(newly_indexed_pages.page_ids.iter())?;
-        Ok(())
+        Ok(newly_indexed_token_count)
     }
 
     pub(super) fn reset_request(
@@ -381,11 +386,6 @@ mod tests {
                 .truncate(&mut self.request_state, target_token_count)
         }
 
-        fn retain_completed_blocks(&mut self, token_ids: &[u32]) -> Result<()> {
-            self.cache
-                .retain_completed_blocks(&self.request_state, token_ids)
-        }
-
         fn reset_active_block_tables(&mut self) -> Result<()> {
             self.cache.reset_request(&mut self.request_state)
         }
@@ -479,9 +479,12 @@ mod tests {
         Ok(cached_page_ids_by_layer)
     }
 
-    fn finish_request(cache: &mut TestPagedKvCache, token_ids: &[u32]) -> Result<()> {
-        cache.retain_completed_blocks(token_ids)?;
-        cache.reset_active_block_tables()
+    fn finish_request(cache: &mut TestPagedKvCache, token_ids: &[u32]) -> Result<usize> {
+        let newly_indexed_token_count = cache
+            .cache
+            .retain_completed_blocks(&cache.request_state, token_ids)?;
+        cache.reset_active_block_tables()?;
+        Ok(newly_indexed_token_count)
     }
 
     #[test]
@@ -759,7 +762,8 @@ mod tests {
 
         // The final token ID has not been processed by the model and is not part of the active
         // KV cache. Request finalization indexes only the five tokens that have cached values.
-        finish_request(&mut cache, &[1, 2, 3, 4, 5, 6])?;
+        let newly_indexed_token_count = finish_request(&mut cache, &[1, 2, 3, 4, 5, 6])?;
+        assert_eq!(newly_indexed_token_count, 4);
 
         assert!(!cache.request_state.active_block_tables.is_populated());
         for layer_page_ids in &active_page_ids_by_layer {
@@ -798,13 +802,15 @@ mod tests {
         let indexed_page_ids = cache.request_state.active_block_tables.layer_block_tables[0]
             .page_ids
             .clone();
-        finish_request(&mut cache, &[1, 2, 3, 4])?;
+        let first_newly_indexed_token_count = finish_request(&mut cache, &[1, 2, 3, 4])?;
+        assert_eq!(first_newly_indexed_token_count, 4);
 
         cache.append(0, 0, &cache_tensor(0, 4)?, &cache_tensor(100, 4)?)?;
         let recomputed_page_ids = cache.request_state.active_block_tables.layer_block_tables[0]
             .page_ids
             .clone();
-        finish_request(&mut cache, &[1, 2, 3, 4])?;
+        let second_newly_indexed_token_count = finish_request(&mut cache, &[1, 2, 3, 4])?;
+        assert_eq!(second_newly_indexed_token_count, 0);
 
         for page_id in &indexed_page_ids {
             assert_eq!(

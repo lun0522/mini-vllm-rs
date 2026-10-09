@@ -90,6 +90,7 @@ pub(super) struct EvictedPrefixBlock {
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct NewlyIndexedPrefixPages {
     pub(super) page_ids: Vec<PageId>,
+    pub(super) block_count: usize,
 }
 
 pub(super) struct PrefixBlockIndex {
@@ -176,6 +177,7 @@ impl PrefixBlockIndex {
         let mut previous_block_key = cursor.block_key.clone();
         let mut is_appending_new_branch = false;
         let mut newly_indexed_page_ids = Vec::new();
+        let mut newly_indexed_block_count = 0usize;
         for (block_index, token_id_block) in sequence_token_ids
             .chunks_exact(self.per_block_token_count)
             .enumerate()
@@ -211,6 +213,9 @@ impl PrefixBlockIndex {
                 .map(|cached_page_ids| cached_page_ids[block_index])
                 .collect();
             newly_indexed_page_ids.extend(page_ids_by_layer.iter().copied());
+            newly_indexed_block_count = newly_indexed_block_count
+                .checked_add(1)
+                .context("newly indexed prefix block count overflow")?;
             self.blocks_map.insert(
                 key.clone(),
                 IndexedPrefixBlock {
@@ -229,6 +234,7 @@ impl PrefixBlockIndex {
         }
         Ok(NewlyIndexedPrefixPages {
             page_ids: newly_indexed_page_ids,
+            block_count: newly_indexed_block_count,
         })
     }
 
@@ -454,17 +460,19 @@ mod tests {
     #[test]
     fn reindexes_an_existing_sequence_without_duplicate_blocks() -> Result<()> {
         let mut index = PrefixBlockIndex::new(2)?;
-        index.index_cached_sequence(
+        let first_indexing = index.index_cached_sequence(
             &PrefixBlockCursor::at_root(),
             &[1, 2, 3, 4],
             &pages(&[&[10, 11]]),
         )?;
+        assert_eq!(first_indexing.block_count, 2);
 
-        index.index_cached_sequence(
+        let second_indexing = index.index_cached_sequence(
             &PrefixBlockCursor::at_root(),
             &[1, 2, 3, 4],
             &pages(&[&[20, 21]]),
         )?;
+        assert_eq!(second_indexing.block_count, 0);
 
         assert_eq!(index.blocks_map.len(), 2);
         assert_eq!(index.next_block_id, PrefixBlockId(2));

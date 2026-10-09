@@ -149,20 +149,43 @@ async fn validate_text_generation(channel: Channel) -> anyhow::Result<()> {
         "expected maximum-new-token-count finish reason, received {}",
         stats.finish_reason
     );
-    let latency = stats
-        .token_generation_latency
-        .ok_or_else(|| anyhow::anyhow!("generation returned no latency statistics"))?;
+    let timing = stats
+        .timing
+        .ok_or_else(|| anyhow::anyhow!("generation returned no timing statistics"))?;
     anyhow::ensure!(
-        latency.time_to_first_token_microseconds > 0,
+        timing.time_to_first_token_microseconds > 0,
         "time to first token was zero"
     );
     anyhow::ensure!(
-        latency.end_to_end_latency_microseconds >= latency.time_to_first_token_microseconds,
-        "end-to-end latency was shorter than time to first token"
+        timing.time_to_last_token_microseconds >= timing.time_to_first_token_microseconds,
+        "time to last token was shorter than time to first token"
+    );
+    anyhow::ensure!(
+        timing.request_completion_latency_microseconds >= timing.time_to_last_token_microseconds,
+        "request completion latency was shorter than time to last token"
     );
     anyhow::ensure!(
         stats.draft_token_stats.is_none(),
         "target-only generation returned draft-token statistics"
+    );
+    let target_prefix_cache_stats = stats
+        .target_prefix_cache_stats
+        .ok_or_else(|| anyhow::anyhow!("generation returned no target prefix-cache statistics"))?;
+    anyhow::ensure!(
+        target_prefix_cache_stats.restored_token_count == 0,
+        "first request unexpectedly restored target prefix-cache tokens"
+    );
+    anyhow::ensure!(
+        stats.draft_prefix_cache_stats.is_none(),
+        "target-only generation returned draft prefix-cache statistics"
+    );
+    anyhow::ensure!(
+        timing.prefill_duration_microseconds > 0,
+        "prefill duration was zero"
+    );
+    anyhow::ensure!(
+        timing.decode_duration_microseconds > 0,
+        "decode duration was zero"
     );
     Ok(())
 }

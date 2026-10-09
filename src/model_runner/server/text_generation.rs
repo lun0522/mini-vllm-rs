@@ -182,18 +182,43 @@ pub(super) struct CompletedGeneration {
     pub(super) stats: TextGenerationStats,
 }
 
+impl CompletedGeneration {
+    // TODO: Revisit this post-construction enrichment when adding incremental prefix-cache
+    // publication. Completion should then combine the finished generation with cache telemetry
+    // accumulated throughout the request.
+    pub(super) fn with_newly_indexed_token_counts(
+        mut self,
+        target: usize,
+        draft: Option<usize>,
+    ) -> Self {
+        self.stats
+            .target_prefix_cache_stats
+            .newly_indexed_token_count = target;
+        if let Some(draft_stats) = self.stats.draft_stats.as_mut() {
+            draft_stats.prefix_cache_stats.newly_indexed_token_count =
+                draft.expect("draft generation stats require draft KV-cache finish token count");
+        }
+        self
+    }
+}
+
 pub(super) struct TextGenerationStats {
     pub(super) finish_reason: GenerationFinishReason,
     pub(super) input_token_count: u64,
     pub(super) output_token_count: u64,
-    pub(super) target_cached_token_count: usize,
+    pub(super) target_prefix_cache_stats: PrefixCacheGenerationStats,
     pub(super) draft_stats: Option<DraftGenerationStats>,
     pub(super) prefill_duration: Duration,
     pub(super) decode_duration: Duration,
 }
 
+pub(super) struct PrefixCacheGenerationStats {
+    pub(super) restored_token_count: usize,
+    pub(super) newly_indexed_token_count: usize,
+}
+
 pub(super) struct DraftGenerationStats {
-    pub(super) cached_token_count: usize,
+    pub(super) prefix_cache_stats: PrefixCacheGenerationStats,
     pub(super) accepted_token_count: usize,
     pub(super) proposed_token_count: usize,
     pub(super) selected_token_count_histogram: BTreeMap<usize, usize>,
@@ -536,14 +561,20 @@ impl RequestExecutionState {
                 .context("input token count does not fit in u64")?,
             output_token_count: u64::try_from(output_token_count)
                 .context("output token count does not fit in u64")?,
-            target_cached_token_count: self.prefill_initial_positions.target,
+            target_prefix_cache_stats: PrefixCacheGenerationStats {
+                restored_token_count: self.prefill_initial_positions.target,
+                newly_indexed_token_count: 0,
+            },
             draft_stats: self
                 .draft_token_count_state
                 .map(|state| DraftGenerationStats {
-                    cached_token_count: self
-                        .prefill_initial_positions
-                        .draft
-                        .expect("draft token-count state requires a draft prefill position"),
+                    prefix_cache_stats: PrefixCacheGenerationStats {
+                        restored_token_count: self
+                            .prefill_initial_positions
+                            .draft
+                            .expect("draft token-count state requires a draft prefill position"),
+                        newly_indexed_token_count: 0,
+                    },
                     accepted_token_count: state.accepted_token_count,
                     proposed_token_count: state.proposed_token_count,
                     selected_token_count_histogram: state.selected_token_count_histogram,

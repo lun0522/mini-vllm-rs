@@ -83,15 +83,18 @@ impl KvCacheManager {
         )
     }
 
-    pub fn finish_request(&mut self, request_id: u64, token_ids: &[u32]) -> Result<()> {
-        self.with_request_state(
+    /// Finalizes and removes a request, returning the number of tokens it newly indexed for
+    /// prefix reuse.
+    pub fn finish_request(&mut self, request_id: u64, token_ids: &[u32]) -> Result<usize> {
+        let newly_indexed_token_count = self.with_request_state(
             request_id,
             /* handle_contiguous */
-            |_, _| Ok(()),
+            |_, _| Ok(0),
             /* handle_paged */
             |cache, request_state| cache.retain_completed_blocks(request_state, token_ids),
         )?;
-        self.remove_request(request_id)
+        self.remove_request(request_id)?;
+        Ok(newly_indexed_token_count)
     }
 
     /// Releases a request's active cache resources and removes its state.

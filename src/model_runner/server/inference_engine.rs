@@ -1,15 +1,15 @@
 use crate::model_runner::SchedulerConfig;
 use crate::proto::model_runner::DraftTokenCountHistogramBucket;
 use crate::proto::model_runner::DraftTokenStats;
+use crate::proto::model_runner::GenerationTiming;
+use crate::proto::model_runner::PrefixCacheStats;
 use crate::proto::model_runner::TextGenerationFinishReason;
 use crate::proto::model_runner::TextGenerationStats;
-use crate::proto::model_runner::TokenGenerationLatency;
 use anyhow::Context;
 use anyhow::Result;
 use log::error;
 use log::info;
 use log::warn;
-use std::collections::BTreeMap;
 use std::time::Duration;
 use std::time::Instant;
 use thousands::Separable;
@@ -182,6 +182,7 @@ impl InferenceEngine {
     }
 
     fn report_request_outcome(&self, request_id: u64, request_outcome: RequestOutcome) {
+        let completed_at = Instant::now();
         let queued_at = request_outcome.context.queued_at;
         let queue_duration = request_outcome
             .metrics
@@ -196,12 +197,15 @@ impl InferenceEngine {
                     queued_at,
                     request_outcome.metrics.first_token_at,
                     request_outcome.metrics.last_token_at,
+                    completed_at,
                 );
                 let draft_stats = result.stats.draft_stats.as_ref();
                 info!(
                     "Engine state (backend_id={}): request_id={} status=completed finish_reason={} \
-                     input_tokens={} output_tokens={} queue_us={} prefill_us={} ttft_us={} decode_us={} \
-                     target_cached_tokens={} draft_cached_tokens={} draft_accepted={} \
+                     input_tokens={} output_tokens={} queue_us={} prefill_us={} ttft_us={} \
+                     decode_us={} completion_us={} \
+                     target_cached_tokens={} target_newly_indexed_tokens={} \
+                     draft_cached_tokens={} draft_newly_indexed_tokens={} draft_accepted={} \
                      draft_proposed={} draft_selected_histogram={}",
                     self.backend_id,
                     request_id,
@@ -220,8 +224,21 @@ impl InferenceEngine {
                         .decode_duration
                         .as_micros()
                         .separate_with_commas(),
-                    result.stats.target_cached_token_count,
-                    count_to_string(draft_stats.map(|stats| stats.cached_token_count)),
+                    completed_at
+                        .duration_since(queued_at)
+                        .as_micros()
+                        .separate_with_commas(),
+                    result.stats.target_prefix_cache_stats.restored_token_count,
+                    result
+                        .stats
+                        .target_prefix_cache_stats
+                        .newly_indexed_token_count,
+                    count_to_string(
+                        draft_stats.map(|stats| stats.prefix_cache_stats.restored_token_count)
+                    ),
+                    count_to_string(
+                        draft_stats.map(|stats| stats.prefix_cache_stats.newly_indexed_token_count)
+                    ),
                     count_to_string(draft_stats.map(|stats| stats.accepted_token_count)),
                     count_to_string(draft_stats.map(|stats| stats.proposed_token_count)),
                     draft_histogram_to_string(draft_stats),
@@ -276,49 +293,81 @@ fn create_client_facing_generation_stats(
     queued_at: Instant,
     first_token_at: Option<Instant>,
     last_token_at: Option<Instant>,
+    completed_at: Instant,
 ) -> TextGenerationStats {
-    let draft_token_stats = stats
+    let draft_token_stats = create_draft_token_stats(stats.draft_stats.as_ref());
+    let target_prefix_cache_stats =
+        Some(create_prefix_cache_stats(&stats.target_prefix_cache_stats));
+    let draft_prefix_cache_stats = stats
         .draft_stats
         .as_ref()
-        .map(|draft_stats| DraftTokenStats {
-            accepted_token_count: draft_stats.accepted_token_count as u64,
-            proposed_token_count: draft_stats.proposed_token_count as u64,
-            selected_token_count_histogram: create_draft_token_count_histogram(
-                &draft_stats.selected_token_count_histogram,
-            ),
-        });
-    let token_generation_latency =
-        first_token_at
-            .zip(last_token_at)
-            .map(|(first_token_at, last_token_at)| TokenGenerationLatency {
-                time_to_first_token_microseconds: duration_to_microseconds(
-                    first_token_at.duration_since(queued_at),
-                ),
-                end_to_end_latency_microseconds: duration_to_microseconds(
-                    last_token_at.duration_since(queued_at),
-                ),
-            });
+        .map(|draft_stats| create_prefix_cache_stats(&draft_stats.prefix_cache_stats));
+    let timing = Some(create_generation_timing(
+        stats,
+        queued_at,
+        first_token_at,
+        last_token_at,
+        completed_at,
+    ));
     TextGenerationStats {
         finish_reason: TextGenerationFinishReason::from(stats.finish_reason) as i32,
         input_token_count: stats.input_token_count,
         output_token_count: stats.output_token_count,
-        token_generation_latency,
+        timing,
         draft_token_stats,
+        target_prefix_cache_stats,
+        draft_prefix_cache_stats,
     }
 }
 
-fn create_draft_token_count_histogram(
-    histogram: &BTreeMap<usize, usize>,
-) -> Vec<DraftTokenCountHistogramBucket> {
-    histogram
-        .iter()
-        .map(
-            |(&draft_token_count, &usage_count)| DraftTokenCountHistogramBucket {
-                draft_token_count: draft_token_count as u64,
-                usage_count: usage_count as u64,
-            },
-        )
-        .collect()
+fn create_generation_timing(
+    stats: &text_generation::TextGenerationStats,
+    queued_at: Instant,
+    first_token_at: Option<Instant>,
+    last_token_at: Option<Instant>,
+    completed_at: Instant,
+) -> GenerationTiming {
+    GenerationTiming {
+        time_to_first_token_microseconds: first_token_at.map_or(0, |first_token_at| {
+            duration_to_microseconds(first_token_at.duration_since(queued_at))
+        }),
+        time_to_last_token_microseconds: last_token_at.map_or(0, |last_token_at| {
+            duration_to_microseconds(last_token_at.duration_since(queued_at))
+        }),
+        prefill_duration_microseconds: duration_to_microseconds(stats.prefill_duration),
+        decode_duration_microseconds: duration_to_microseconds(stats.decode_duration),
+        request_completion_latency_microseconds: duration_to_microseconds(
+            completed_at.duration_since(queued_at),
+        ),
+    }
+}
+
+fn create_prefix_cache_stats(
+    stats: &text_generation::PrefixCacheGenerationStats,
+) -> PrefixCacheStats {
+    PrefixCacheStats {
+        restored_token_count: stats.restored_token_count as u64,
+        newly_indexed_token_count: stats.newly_indexed_token_count as u64,
+    }
+}
+
+fn create_draft_token_stats(
+    stats: Option<&text_generation::DraftGenerationStats>,
+) -> Option<DraftTokenStats> {
+    stats.map(|stats| DraftTokenStats {
+        accepted_token_count: stats.accepted_token_count as u64,
+        proposed_token_count: stats.proposed_token_count as u64,
+        selected_token_count_histogram: stats
+            .selected_token_count_histogram
+            .iter()
+            .map(
+                |(&draft_token_count, &usage_count)| DraftTokenCountHistogramBucket {
+                    draft_token_count: draft_token_count as u64,
+                    usage_count: usage_count as u64,
+                },
+            )
+            .collect(),
+    })
 }
 
 fn elapsed_microseconds_string(started_at: Instant, finished_at: Option<Instant>) -> String {
@@ -375,20 +424,26 @@ mod tests {
             finish_reason: text_generation::GenerationFinishReason::EndOfSequenceToken,
             input_token_count: 3,
             output_token_count: 2,
-            target_cached_token_count: 0,
+            target_prefix_cache_stats: text_generation::PrefixCacheGenerationStats {
+                restored_token_count: 0,
+                newly_indexed_token_count: 0,
+            },
             draft_stats: None,
             prefill_duration: Duration::ZERO,
             decode_duration: Duration::ZERO,
         };
         let now = Instant::now();
 
-        let client_stats = create_client_facing_generation_stats(&stats, now, Some(now), Some(now));
+        let client_stats = create_client_facing_generation_stats(&stats, now, None, None, now);
 
         assert_eq!(
             client_stats.finish_reason,
             TextGenerationFinishReason::EndOfSequenceToken as i32
         );
         assert!(client_stats.draft_token_stats.is_none());
+        let timing = client_stats.timing.unwrap();
+        assert_eq!(timing.time_to_first_token_microseconds, 0);
+        assert_eq!(timing.time_to_last_token_microseconds, 0);
     }
 
     #[test]
@@ -397,19 +452,31 @@ mod tests {
             finish_reason: text_generation::GenerationFinishReason::MaxNewTokensReached,
             input_token_count: 3,
             output_token_count: 2,
-            target_cached_token_count: 0,
+            target_prefix_cache_stats: text_generation::PrefixCacheGenerationStats {
+                restored_token_count: 16,
+                newly_indexed_token_count: 32,
+            },
             draft_stats: Some(text_generation::DraftGenerationStats {
-                cached_token_count: 0,
+                prefix_cache_stats: text_generation::PrefixCacheGenerationStats {
+                    restored_token_count: 8,
+                    newly_indexed_token_count: 24,
+                },
                 accepted_token_count: 5,
                 proposed_token_count: 8,
                 selected_token_count_histogram: BTreeMap::from([(3, 2), (4, 1)]),
             }),
-            prefill_duration: Duration::ZERO,
-            decode_duration: Duration::ZERO,
+            prefill_duration: Duration::from_micros(123),
+            decode_duration: Duration::from_micros(456),
         };
         let now = Instant::now();
 
-        let client_stats = create_client_facing_generation_stats(&stats, now, Some(now), Some(now));
+        let client_stats = create_client_facing_generation_stats(
+            &stats,
+            now,
+            Some(now + Duration::from_micros(10)),
+            Some(now + Duration::from_micros(20)),
+            now + Duration::from_micros(30),
+        );
         let draft_stats = client_stats.draft_token_stats.unwrap();
 
         assert_eq!(
@@ -418,6 +485,42 @@ mod tests {
         );
         assert_eq!(draft_stats.accepted_token_count, 5);
         assert_eq!(draft_stats.proposed_token_count, 8);
+        assert_eq!(
+            client_stats
+                .target_prefix_cache_stats
+                .as_ref()
+                .unwrap()
+                .restored_token_count,
+            16
+        );
+        assert_eq!(
+            client_stats
+                .target_prefix_cache_stats
+                .unwrap()
+                .newly_indexed_token_count,
+            32
+        );
+        assert_eq!(
+            client_stats
+                .draft_prefix_cache_stats
+                .as_ref()
+                .unwrap()
+                .restored_token_count,
+            8
+        );
+        assert_eq!(
+            client_stats
+                .draft_prefix_cache_stats
+                .unwrap()
+                .newly_indexed_token_count,
+            24
+        );
+        let timing = client_stats.timing.unwrap();
+        assert_eq!(timing.time_to_first_token_microseconds, 10);
+        assert_eq!(timing.time_to_last_token_microseconds, 20);
+        assert_eq!(timing.prefill_duration_microseconds, 123);
+        assert_eq!(timing.decode_duration_microseconds, 456);
+        assert_eq!(timing.request_completion_latency_microseconds, 30);
         assert_eq!(draft_stats.selected_token_count_histogram.len(), 2);
         assert_eq!(
             draft_stats.selected_token_count_histogram[0],
