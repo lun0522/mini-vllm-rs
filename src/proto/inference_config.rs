@@ -176,6 +176,24 @@ impl KvCacheConfig {
                 "KV-cache page token count must be greater than zero"
             );
         }
+        let publication_policy = PrefixCachePublicationPolicy::try_from(
+            self.prefix_cache_publication_policy,
+        )
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "unsupported prefix-cache publication policy {}",
+                self.prefix_cache_publication_policy
+            )
+        })?;
+        anyhow::ensure!(
+            publication_policy != PrefixCachePublicationPolicy::Unspecified,
+            "prefix-cache publication policy must be specified"
+        );
+        anyhow::ensure!(
+            publication_policy != PrefixCachePublicationPolicy::Incremental
+                || kv_cache_type == KvCacheType::PagedPrefix,
+            "incremental prefix-cache publication requires paged-prefix KV caching"
+        );
         Ok(())
     }
 }
@@ -208,6 +226,24 @@ impl fmt::Display for KvCacheConfig {
                 "Draft KV cache size: {} bytes",
                 size_bytes.separate_with_commas()
             ),
+        }?;
+        let publication_policy =
+            PrefixCachePublicationPolicy::try_from(self.prefix_cache_publication_policy)
+                .map_err(|_| fmt::Error)?;
+        writeln!(
+            formatter,
+            "Prefix cache publication policy: {}",
+            publication_policy.cli_value()
+        )
+    }
+}
+
+impl PrefixCachePublicationPolicy {
+    fn cli_value(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::OnRequestCompletion => "on-request-completion",
+            Self::Incremental => "incremental",
         }
     }
 }
@@ -382,13 +418,16 @@ mod tests {
             per_page_token_count: 32,
             target_kv_cache_size_bytes: 2_147_483_648,
             draft_kv_cache_size_bytes: 536_870_912,
+            prefix_cache_publication_policy: PrefixCachePublicationPolicy::OnRequestCompletion
+                .into(),
         };
 
         assert_eq!(
             config.to_string(),
             "KV cache type: paged-prefix:32\n\
              Target KV cache size: 2,147,483,648 bytes\n\
-             Draft KV cache size: 536,870,912 bytes\n"
+             Draft KV cache size: 536,870,912 bytes\n\
+             Prefix cache publication policy: on-request-completion\n"
         );
     }
 
@@ -399,6 +438,8 @@ mod tests {
             per_page_token_count: 0,
             target_kv_cache_size_bytes: 1024,
             draft_kv_cache_size_bytes: 0,
+            prefix_cache_publication_policy: PrefixCachePublicationPolicy::OnRequestCompletion
+                .into(),
         };
 
         assert!(config.validate().is_ok());
@@ -414,11 +455,29 @@ mod tests {
             per_page_token_count: 0,
             target_kv_cache_size_bytes: 1024,
             draft_kv_cache_size_bytes: 0,
+            prefix_cache_publication_policy: PrefixCachePublicationPolicy::OnRequestCompletion
+                .into(),
         };
 
         assert_eq!(
             config.validate().unwrap_err().to_string(),
             "KV-cache page token count must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn rejects_incremental_publication_without_prefix_caching() {
+        let config = KvCacheConfig {
+            kv_cache_type: KvCacheType::Paged.into(),
+            per_page_token_count: 16,
+            target_kv_cache_size_bytes: 1024,
+            draft_kv_cache_size_bytes: 0,
+            prefix_cache_publication_policy: PrefixCachePublicationPolicy::Incremental.into(),
+        };
+
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            "incremental prefix-cache publication requires paged-prefix KV caching"
         );
     }
 

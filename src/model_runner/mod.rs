@@ -6,6 +6,7 @@ use std::str::FromStr;
 
 use crate::proto::inference_config::KvCacheConfig as KvCacheConfigProto;
 use crate::proto::inference_config::KvCacheType as KvCacheTypeProto;
+use crate::proto::inference_config::PrefixCachePublicationPolicy as PrefixCachePublicationPolicyProto;
 use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
 use crate::proto::inference_config::SchedulingPolicy as SchedulingPolicyProto;
 use candle_core::DType;
@@ -17,6 +18,7 @@ pub(crate) struct KvCacheConfig {
     pub(crate) kv_cache_type: KvCacheType,
     pub(crate) target_kv_cache_size_bytes: usize,
     pub(crate) draft_kv_cache_size_bytes: Option<usize>,
+    pub(crate) prefix_cache_publication_policy: PrefixCachePublicationPolicy,
 }
 
 impl From<KvCacheConfigProto> for KvCacheConfig {
@@ -37,11 +39,17 @@ impl From<KvCacheConfigProto> for KvCacheConfig {
                 enable_prefix_caching: true,
             },
         };
+        let prefix_cache_publication_policy = PrefixCachePublicationPolicyProto::try_from(
+            config.prefix_cache_publication_policy,
+        )
+            .expect("validated KV-cache configuration should contain a supported prefix-cache publication policy")
+            .into();
         Self {
             kv_cache_type,
             target_kv_cache_size_bytes: config.target_kv_cache_size_bytes as usize,
             draft_kv_cache_size_bytes: (config.draft_kv_cache_size_bytes != 0)
                 .then_some(config.draft_kv_cache_size_bytes as usize),
+            prefix_cache_publication_policy,
         }
     }
 }
@@ -67,6 +75,10 @@ impl From<KvCacheConfig> for KvCacheConfigProto {
                 .draft_kv_cache_size_bytes
                 .map(|size| size as u64)
                 .unwrap_or(0),
+            prefix_cache_publication_policy: PrefixCachePublicationPolicyProto::from(
+                config.prefix_cache_publication_policy,
+            )
+            .into(),
         }
     }
 }
@@ -75,14 +87,52 @@ impl fmt::Display for KvCacheConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "kv_cache_type={} target_kv_cache_size_bytes={}",
-            self.kv_cache_type, self.target_kv_cache_size_bytes
+            "kv_cache_type={} target_kv_cache_size_bytes={} prefix_cache_publication_policy={}",
+            self.kv_cache_type,
+            self.target_kv_cache_size_bytes,
+            self.prefix_cache_publication_policy,
         )?;
         if let Some(size_bytes) = self.draft_kv_cache_size_bytes {
             write!(formatter, " draft_kv_cache_size_bytes={size_bytes}")
         } else {
             formatter.write_str(" draft_kv_cache_size_bytes=inferred")
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PrefixCachePublicationPolicy {
+    OnRequestCompletion,
+    Incremental,
+}
+
+impl From<PrefixCachePublicationPolicyProto> for PrefixCachePublicationPolicy {
+    fn from(policy: PrefixCachePublicationPolicyProto) -> Self {
+        match policy {
+            PrefixCachePublicationPolicyProto::Unspecified => unreachable!(
+                "validated KV-cache configuration should specify a prefix-cache publication policy"
+            ),
+            PrefixCachePublicationPolicyProto::OnRequestCompletion => Self::OnRequestCompletion,
+            PrefixCachePublicationPolicyProto::Incremental => Self::Incremental,
+        }
+    }
+}
+
+impl From<PrefixCachePublicationPolicy> for PrefixCachePublicationPolicyProto {
+    fn from(policy: PrefixCachePublicationPolicy) -> Self {
+        match policy {
+            PrefixCachePublicationPolicy::OnRequestCompletion => Self::OnRequestCompletion,
+            PrefixCachePublicationPolicy::Incremental => Self::Incremental,
+        }
+    }
+}
+
+impl fmt::Display for PrefixCachePublicationPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::OnRequestCompletion => "on-request-completion",
+            Self::Incremental => "incremental",
+        })
     }
 }
 
@@ -403,6 +453,7 @@ mod tests {
             },
             target_kv_cache_size_bytes: 2 * 1024 * 1024 * 1024,
             draft_kv_cache_size_bytes: Some(512 * 1024 * 1024),
+            prefix_cache_publication_policy: PrefixCachePublicationPolicy::Incremental,
         };
 
         assert_eq!(
@@ -417,11 +468,13 @@ mod tests {
             kv_cache_type: KvCacheType::Contiguous,
             target_kv_cache_size_bytes: 2 * 1024 * 1024 * 1024,
             draft_kv_cache_size_bytes: None,
+            prefix_cache_publication_policy: PrefixCachePublicationPolicy::OnRequestCompletion,
         };
 
         assert_eq!(
             config.to_string(),
             "kv_cache_type=contiguous target_kv_cache_size_bytes=2147483648 \
+             prefix_cache_publication_policy=on-request-completion \
              draft_kv_cache_size_bytes=inferred"
         );
     }

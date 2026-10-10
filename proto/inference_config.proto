@@ -96,6 +96,15 @@ message KvCacheConfig {
   // Total KV-cache allocation in bytes for the draft model. A value of zero
   // infers an allocation that gives the draft cache the target cache's token capacity.
   uint64 draft_kv_cache_size_bytes = 4;
+  // Controls when complete prefix-cache pages become reusable by other requests.
+  PrefixCachePublicationPolicy prefix_cache_publication_policy = 5;
+}
+
+// Selects when complete prefix-cache pages are published for reuse.
+enum PrefixCachePublicationPolicy {
+  PREFIX_CACHE_PUBLICATION_POLICY_UNSPECIFIED = 0;
+  PREFIX_CACHE_PUBLICATION_POLICY_ON_REQUEST_COMPLETION = 1;
+  PREFIX_CACHE_PUBLICATION_POLICY_INCREMENTAL = 2;
 }
 
 // Selects the KV-cache storage implementation.

@@ -8,6 +8,7 @@ use crate::proto::inference_config::FixedDraftTokenCountPolicy;
 use crate::proto::inference_config::KvCacheConfig as KvCacheConfigProto;
 use crate::proto::inference_config::KvCacheType as KvCacheTypeProto;
 use crate::proto::inference_config::ModelConfig;
+use crate::proto::inference_config::PrefixCachePublicationPolicy as PrefixCachePublicationPolicyProto;
 use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
 use crate::proto::inference_config::SchedulingPolicy as SchedulingPolicyProto;
 use crate::proto::inference_config::DEFAULT_KV_CACHE_TYPE;
@@ -23,6 +24,8 @@ const DEFAULT_DRAFT_TOKEN_COUNT: u64 = 4;
 const DEFAULT_MAX_BATCHED_TOKEN_COUNT: usize = 512;
 const DEFAULT_MAX_ACTIVE_REQUEST_COUNT: usize = 4;
 const DEFAULT_INPUT_PREPROCESSING_THREAD_COUNT: usize = 4;
+const DEFAULT_PREFIX_CACHE_PUBLICATION_POLICY: PrefixCachePublicationPolicyProto =
+    PrefixCachePublicationPolicyProto::OnRequestCompletion;
 
 /// Runs text generation with a model from Hugging Face.
 #[derive(FromArgs)]
@@ -136,6 +139,7 @@ fn default_kv_cache_config() -> KvCacheConfigProto {
         per_page_token_count: 0,
         target_kv_cache_size_bytes: DEFAULT_TARGET_KV_CACHE_SIZE_BYTES as u64,
         draft_kv_cache_size_bytes: 0,
+        prefix_cache_publication_policy: DEFAULT_PREFIX_CACHE_PUBLICATION_POLICY.into(),
     }
 }
 
@@ -204,6 +208,11 @@ fn normalize_kv_cache_config(config: &mut KvCacheConfigProto) {
              {DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT}"
         );
         config.per_page_token_count = DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT as u32;
+    }
+    if let Ok(PrefixCachePublicationPolicyProto::Unspecified) =
+        PrefixCachePublicationPolicyProto::try_from(config.prefix_cache_publication_policy)
+    {
+        config.prefix_cache_publication_policy = DEFAULT_PREFIX_CACHE_PUBLICATION_POLICY.into();
     }
 }
 
@@ -309,7 +318,7 @@ mod tests {
             &["mini-vllm-rs"],
             &[
                 "--kv-cache-config",
-                "kv_cache_type: KV_CACHE_TYPE_PAGED_PREFIX per_page_token_count: 32 target_kv_cache_size_bytes: 1073741824 draft_kv_cache_size_bytes: 268435456",
+                "kv_cache_type: KV_CACHE_TYPE_PAGED_PREFIX per_page_token_count: 32 target_kv_cache_size_bytes: 1073741824 draft_kv_cache_size_bytes: 268435456 prefix_cache_publication_policy: PREFIX_CACHE_PUBLICATION_POLICY_INCREMENTAL",
             ],
         )
         .expect("KV-cache arguments should parse");
@@ -324,6 +333,10 @@ mod tests {
             1_073_741_824
         );
         assert_eq!(args.kv_cache_config.draft_kv_cache_size_bytes, 268_435_456);
+        assert_eq!(
+            args.kv_cache_config.prefix_cache_publication_policy,
+            PrefixCachePublicationPolicyProto::Incremental as i32
+        );
     }
 
     #[test]
@@ -344,6 +357,10 @@ mod tests {
             DEFAULT_TARGET_KV_CACHE_SIZE_BYTES as u64
         );
         assert_eq!(args.kv_cache_config.draft_kv_cache_size_bytes, 0);
+        assert_eq!(
+            args.kv_cache_config.prefix_cache_publication_policy,
+            PrefixCachePublicationPolicyProto::OnRequestCompletion as i32
+        );
     }
 
     #[test]
@@ -356,6 +373,10 @@ mod tests {
         assert_eq!(
             config.target_kv_cache_size_bytes,
             DEFAULT_TARGET_KV_CACHE_SIZE_BYTES as u64
+        );
+        assert_eq!(
+            config.prefix_cache_publication_policy,
+            PrefixCachePublicationPolicyProto::OnRequestCompletion as i32
         );
         assert!(config.validate().is_ok());
     }
