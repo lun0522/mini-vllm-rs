@@ -62,6 +62,9 @@ order:
 8. [Prefill scheduling policies](benchmarks/scheduling_policies.md) compares
    FCFS, shortest-prefill-first, and round-robin allocation with short and long
    competing prefills.
+9. [Prefix-cache reuse](benchmarks/prefix_cache_reuse.md) measures overlap,
+   concurrent warm reuse, finish-time publication, and working-set churn
+   against an ordinary paged-cache baseline.
 
 ## Run
 

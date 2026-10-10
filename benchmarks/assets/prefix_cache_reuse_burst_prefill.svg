@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="420" viewBox="0 0 900 420" role="img" aria-labelledby="title desc">
+  <title id="title">Cold and warm burst prefill time</title>
+  <desc id="desc">Grouped bar chart comparing ordinary paged-cache and prefix-cached mean prefill time for cold and warm bursts of four concurrent requests.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
+    .title { font-size: 18px; font-weight: 600; }
+    .axis { font-size: 13px; fill: #57606a; }
+    .tick { font-size: 12px; fill: #57606a; }
+    .value { font-size: 12px; font-weight: 600; }
+    .grid { stroke: #d0d7de; stroke-width: 1; }
+  </style>
+  <rect width="900" height="420" fill="#ffffff"/>
+  <text x="450" y="28" text-anchor="middle" class="title">Cold and Warm Burst Prefill Time</text>
+
+  <line x1="90" y1="330" x2="830" y2="330" class="grid"/>
+  <line x1="90" y1="276" x2="830" y2="276" class="grid"/>
+  <line x1="90" y1="222" x2="830" y2="222" class="grid"/>
+  <line x1="90" y1="168" x2="830" y2="168" class="grid"/>
+  <line x1="90" y1="114" x2="830" y2="114" class="grid"/>
+  <line x1="90" y1="60" x2="830" y2="60" class="grid"/>
+  <text x="78" y="334" text-anchor="end" class="tick">0</text>
+  <text x="78" y="280" text-anchor="end" class="tick">800</text>
+  <text x="78" y="226" text-anchor="end" class="tick">1,600</text>
+  <text x="78" y="172" text-anchor="end" class="tick">2,400</text>
+  <text x="78" y="118" text-anchor="end" class="tick">3,200</text>
+  <text x="78" y="64" text-anchor="end" class="tick">4,000</text>
+
+  <line x1="90" y1="330" x2="830" y2="330" stroke="#57606a"/>
+  <line x1="90" y1="60" x2="90" y2="330" stroke="#57606a"/>
+  <text x="300" y="352" text-anchor="middle" class="axis">Cold burst</text>
+  <text x="620" y="352" text-anchor="middle" class="axis">Warm burst</text>
+  <text x="24" y="195" text-anchor="middle" class="axis" transform="rotate(-90 24 195)">Mean prefill time (ms)</text>
+
+  <rect x="215" y="110" width="76" height="220" rx="3" fill="#d97706"/>
+  <rect x="309" y="109" width="76" height="221" rx="3" fill="#2563eb"/>
+  <rect x="535" y="125" width="76" height="205" rx="3" fill="#d97706"/>
+  <rect x="629" y="326" width="76" height="4" rx="2" fill="#2563eb"/>
+  <text x="253" y="102" text-anchor="middle" class="value">3,264.2</text>
+  <text x="347" y="101" text-anchor="middle" class="value">3,266.6</text>
+  <text x="573" y="117" text-anchor="middle" class="value">3,033.9</text>
+  <text x="667" y="318" text-anchor="middle" class="value">55.4</text>
+
+  <rect x="320" y="390" width="14" height="10" rx="2" fill="#d97706"/>
+  <text x="342" y="399" class="tick">Baseline</text>
+  <rect x="450" y="390" width="14" height="10" rx="2" fill="#2563eb"/>
+  <text x="472" y="399" class="tick">Prefix cached</text>
+</svg>
