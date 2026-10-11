@@ -6,6 +6,7 @@ use std::str::FromStr;
 
 use crate::proto::inference_config::KvCacheConfig as KvCacheConfigProto;
 use crate::proto::inference_config::KvCacheType as KvCacheTypeProto;
+use crate::proto::inference_config::PrefixCacheCoordinationPolicy as PrefixCacheCoordinationPolicyProto;
 use crate::proto::inference_config::PrefixCachePublicationPolicy as PrefixCachePublicationPolicyProto;
 use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
 use crate::proto::inference_config::SchedulingPolicy as SchedulingPolicyProto;
@@ -220,44 +221,58 @@ impl FromStr for SchedulingPolicy {
     }
 }
 
+impl From<SchedulingPolicyProto> for SchedulingPolicy {
+    fn from(policy: SchedulingPolicyProto) -> Self {
+        match policy {
+            SchedulingPolicyProto::Unspecified => {
+                unreachable!("validated scheduler configuration should specify a policy")
+            }
+            SchedulingPolicyProto::FirstComeFirstServed => Self::FirstComeFirstServed,
+            SchedulingPolicyProto::ShortestPrefillFirst => Self::ShortestPrefillFirst,
+            SchedulingPolicyProto::RoundRobin => Self::RoundRobin,
+        }
+    }
+}
+
+impl From<SchedulingPolicy> for SchedulingPolicyProto {
+    fn from(policy: SchedulingPolicy) -> Self {
+        match policy {
+            SchedulingPolicy::FirstComeFirstServed => Self::FirstComeFirstServed,
+            SchedulingPolicy::ShortestPrefillFirst => Self::ShortestPrefillFirst,
+            SchedulingPolicy::RoundRobin => Self::RoundRobin,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SchedulerConfig {
     pub(crate) max_batched_token_count: usize,
     pub(crate) max_active_request_count: usize,
     pub(crate) scheduling_policy: SchedulingPolicy,
+    pub(crate) prefix_cache_coordination_policy: PrefixCacheCoordinationPolicy,
 }
 
 impl From<SchedulerConfigProto> for SchedulerConfig {
     fn from(config: SchedulerConfigProto) -> Self {
-        let scheduling_policy = match SchedulingPolicyProto::try_from(config.scheduling_policy)
-            .expect("validated scheduler configuration should contain a supported policy")
-        {
-            SchedulingPolicyProto::Unspecified => {
-                unreachable!("validated scheduler configuration should specify a policy")
-            }
-            SchedulingPolicyProto::FirstComeFirstServed => SchedulingPolicy::FirstComeFirstServed,
-            SchedulingPolicyProto::ShortestPrefillFirst => SchedulingPolicy::ShortestPrefillFirst,
-            SchedulingPolicyProto::RoundRobin => SchedulingPolicy::RoundRobin,
-        };
         Self {
             max_batched_token_count: config.max_batched_token_count as usize,
             max_active_request_count: config.max_active_request_count as usize,
-            scheduling_policy,
+            scheduling_policy: config.scheduling_policy().into(),
+            prefix_cache_coordination_policy: config.prefix_cache_coordination_policy().into(),
         }
     }
 }
 
 impl From<SchedulerConfig> for SchedulerConfigProto {
     fn from(config: SchedulerConfig) -> Self {
-        let scheduling_policy = match config.scheduling_policy {
-            SchedulingPolicy::FirstComeFirstServed => SchedulingPolicyProto::FirstComeFirstServed,
-            SchedulingPolicy::ShortestPrefillFirst => SchedulingPolicyProto::ShortestPrefillFirst,
-            SchedulingPolicy::RoundRobin => SchedulingPolicyProto::RoundRobin,
-        };
         Self {
             max_batched_token_count: config.max_batched_token_count as u32,
             max_active_request_count: config.max_active_request_count as u32,
-            scheduling_policy: scheduling_policy.into(),
+            scheduling_policy: SchedulingPolicyProto::from(config.scheduling_policy).into(),
+            prefix_cache_coordination_policy: PrefixCacheCoordinationPolicyProto::from(
+                config.prefix_cache_coordination_policy,
+            )
+            .into(),
         }
     }
 }
@@ -266,9 +281,50 @@ impl fmt::Display for SchedulerConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "max_batched_tokens={} max_active_requests={} scheduling_policy={}",
-            self.max_batched_token_count, self.max_active_request_count, self.scheduling_policy,
+            "max_batched_tokens={} max_active_requests={} scheduling_policy={} prefix_cache_coordination_policy={}",
+            self.max_batched_token_count,
+            self.max_active_request_count,
+            self.scheduling_policy,
+            self.prefix_cache_coordination_policy,
         )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PrefixCacheCoordinationPolicy {
+    Independent,
+    ExactInputSingleFlight,
+}
+
+impl From<PrefixCacheCoordinationPolicyProto> for PrefixCacheCoordinationPolicy {
+    fn from(policy: PrefixCacheCoordinationPolicyProto) -> Self {
+        match policy {
+            PrefixCacheCoordinationPolicyProto::Unspecified => unreachable!(
+                "validated scheduler configuration should specify a prefix-cache coordination policy"
+            ),
+            PrefixCacheCoordinationPolicyProto::Independent => Self::Independent,
+            PrefixCacheCoordinationPolicyProto::ExactInputSingleFlight => {
+                Self::ExactInputSingleFlight
+            }
+        }
+    }
+}
+
+impl From<PrefixCacheCoordinationPolicy> for PrefixCacheCoordinationPolicyProto {
+    fn from(policy: PrefixCacheCoordinationPolicy) -> Self {
+        match policy {
+            PrefixCacheCoordinationPolicy::Independent => Self::Independent,
+            PrefixCacheCoordinationPolicy::ExactInputSingleFlight => Self::ExactInputSingleFlight,
+        }
+    }
+}
+
+impl fmt::Display for PrefixCacheCoordinationPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Independent => "independent",
+            Self::ExactInputSingleFlight => "exact-input-single-flight",
+        })
     }
 }
 
@@ -422,11 +478,12 @@ mod tests {
             max_batched_token_count: 512,
             max_active_request_count: 4,
             scheduling_policy: SchedulingPolicy::FirstComeFirstServed,
+            prefix_cache_coordination_policy: PrefixCacheCoordinationPolicy::Independent,
         };
 
         assert_eq!(
             config.to_string(),
-            "max_batched_tokens=512 max_active_requests=4 scheduling_policy=first-come-first-served"
+            "max_batched_tokens=512 max_active_requests=4 scheduling_policy=first-come-first-served prefix_cache_coordination_policy=independent"
         );
     }
 
@@ -436,6 +493,7 @@ mod tests {
             max_batched_token_count: 1_024,
             max_active_request_count: 8,
             scheduling_policy: SchedulingPolicy::ShortestPrefillFirst,
+            prefix_cache_coordination_policy: PrefixCacheCoordinationPolicy::ExactInputSingleFlight,
         };
 
         assert_eq!(

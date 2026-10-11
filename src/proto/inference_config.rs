@@ -10,6 +10,8 @@ use draft_token_count_policy::Policy;
 
 pub(crate) const DEFAULT_SCHEDULING_POLICY: SchedulingPolicy =
     SchedulingPolicy::FirstComeFirstServed;
+pub(crate) const DEFAULT_PREFIX_CACHE_COORDINATION_POLICY: PrefixCacheCoordinationPolicy =
+    PrefixCacheCoordinationPolicy::Independent;
 pub(crate) const DEFAULT_KV_CACHE_TYPE: KvCacheType = KvCacheType::Contiguous;
 
 impl ModelConfig {
@@ -259,6 +261,28 @@ impl SchedulingPolicy {
     }
 }
 
+impl PrefixCacheCoordinationPolicy {
+    pub(crate) fn validate(self, kv_cache_type: KvCacheType) -> AnyhowResult<()> {
+        anyhow::ensure!(
+            self != Self::Unspecified,
+            "prefix-cache coordination policy must be specified"
+        );
+        anyhow::ensure!(
+            self != Self::ExactInputSingleFlight || kv_cache_type == KvCacheType::PagedPrefix,
+            "exact-input single-flight requires paged-prefix KV caching"
+        );
+        Ok(())
+    }
+
+    fn cli_value(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::Independent => "independent",
+            Self::ExactInputSingleFlight => "exact-input-single-flight",
+        }
+    }
+}
+
 impl FromStr for SchedulerConfig {
     type Err = String;
 
@@ -285,6 +309,18 @@ impl SchedulerConfig {
             scheduling_policy != SchedulingPolicy::Unspecified,
             "scheduling policy must be specified"
         );
+        let coordination_policy =
+            PrefixCacheCoordinationPolicy::try_from(self.prefix_cache_coordination_policy)
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "unsupported prefix-cache coordination policy {}",
+                        self.prefix_cache_coordination_policy
+                    )
+                })?;
+        anyhow::ensure!(
+            coordination_policy != PrefixCacheCoordinationPolicy::Unspecified,
+            "prefix-cache coordination policy must be specified"
+        );
         Ok(())
     }
 }
@@ -307,6 +343,14 @@ impl fmt::Display for SchedulerConfig {
             formatter,
             "Scheduling policy: {}",
             scheduling_policy.cli_value()
+        )?;
+        let coordination_policy =
+            PrefixCacheCoordinationPolicy::try_from(self.prefix_cache_coordination_policy)
+                .map_err(|_| fmt::Error)?;
+        writeln!(
+            formatter,
+            "Prefix cache coordination policy: {}",
+            coordination_policy.cli_value()
         )
     }
 }
@@ -401,13 +445,16 @@ mod tests {
             max_batched_token_count: 1_024,
             max_active_request_count: 8,
             scheduling_policy: SchedulingPolicy::ShortestPrefillFirst.into(),
+            prefix_cache_coordination_policy: PrefixCacheCoordinationPolicy::ExactInputSingleFlight
+                .into(),
         };
 
         assert_eq!(
             config.to_string(),
             "Maximum batched token count: 1,024\n\
              Maximum active request count: 8\n\
-             Scheduling policy: shortest-prefill-first\n"
+             Scheduling policy: shortest-prefill-first\n\
+             Prefix cache coordination policy: exact-input-single-flight\n"
         );
     }
 

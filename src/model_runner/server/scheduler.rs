@@ -331,6 +331,7 @@ impl Scheduler {
 mod tests {
     use super::*;
     use crate::model_runner::server::text_generation::GenerationFinishReason;
+    use crate::model_runner::PrefixCacheCoordinationPolicy;
 
     fn scheduler_with_token_budget(
         max_batched_token_count: usize,
@@ -342,6 +343,7 @@ mod tests {
                 max_batched_token_count,
                 max_active_request_count,
                 scheduling_policy,
+                prefix_cache_coordination_policy: PrefixCacheCoordinationPolicy::Independent,
             },
             KvCacheGeometry {
                 token_capacity: 4096,
@@ -419,6 +421,7 @@ mod tests {
                 max_batched_token_count: 512,
                 max_active_request_count: 1,
                 scheduling_policy: SchedulingPolicy::FirstComeFirstServed,
+                prefix_cache_coordination_policy: PrefixCacheCoordinationPolicy::Independent,
             },
             KvCacheGeometry {
                 token_capacity: 8,
@@ -438,6 +441,7 @@ mod tests {
                 max_batched_token_count: 512,
                 max_active_request_count: 3,
                 scheduling_policy: SchedulingPolicy::FirstComeFirstServed,
+                prefix_cache_coordination_policy: PrefixCacheCoordinationPolicy::Independent,
             },
             KvCacheGeometry {
                 token_capacity: 8,
@@ -473,6 +477,7 @@ mod tests {
                 max_batched_token_count: 512,
                 max_active_request_count: 3,
                 scheduling_policy: SchedulingPolicy::FirstComeFirstServed,
+                prefix_cache_coordination_policy: PrefixCacheCoordinationPolicy::Independent,
             },
             KvCacheGeometry {
                 token_capacity: 8,

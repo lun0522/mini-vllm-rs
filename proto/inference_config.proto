@@ -123,6 +123,8 @@ message SchedulerConfig {
   uint32 max_active_request_count = 2;
   // Policy used to choose requests for the next model batch.
   SchedulingPolicy scheduling_policy = 3;
+  // Controls whether requests with identical inputs coordinate cache population.
+  PrefixCacheCoordinationPolicy prefix_cache_coordination_policy = 4;
 }
 
 // Selects the order in which requests are admitted and prefills are scheduled.
@@ -131,4 +133,13 @@ enum SchedulingPolicy {
   SCHEDULING_POLICY_FIRST_COME_FIRST_SERVED = 1;
   SCHEDULING_POLICY_SHORTEST_PREFILL_FIRST = 2;
   SCHEDULING_POLICY_ROUND_ROBIN = 3;
+}
+
+// Selects how requests coordinate prefix-cache population independently of scheduling order.
+enum PrefixCacheCoordinationPolicy {
+  PREFIX_CACHE_COORDINATION_POLICY_UNSPECIFIED = 0;
+  // Allows each request to populate the prefix cache independently.
+  PREFIX_CACHE_COORDINATION_POLICY_INDEPENDENT = 1;
+  // Makes requests with identical inputs wait for one leader to populate the prefix cache.
+  PREFIX_CACHE_COORDINATION_POLICY_EXACT_INPUT_SINGLE_FLIGHT = 2;
 }

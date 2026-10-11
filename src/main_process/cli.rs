@@ -8,10 +8,12 @@ use crate::proto::inference_config::FixedDraftTokenCountPolicy;
 use crate::proto::inference_config::KvCacheConfig as KvCacheConfigProto;
 use crate::proto::inference_config::KvCacheType as KvCacheTypeProto;
 use crate::proto::inference_config::ModelConfig;
+use crate::proto::inference_config::PrefixCacheCoordinationPolicy as PrefixCacheCoordinationPolicyProto;
 use crate::proto::inference_config::PrefixCachePublicationPolicy as PrefixCachePublicationPolicyProto;
 use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
 use crate::proto::inference_config::SchedulingPolicy as SchedulingPolicyProto;
 use crate::proto::inference_config::DEFAULT_KV_CACHE_TYPE;
+use crate::proto::inference_config::DEFAULT_PREFIX_CACHE_COORDINATION_POLICY;
 use crate::proto::inference_config::DEFAULT_SCHEDULING_POLICY;
 use argh::FromArgs;
 use log::warn;
@@ -112,6 +114,9 @@ impl MainProcessArgs {
         }
         self.kv_cache_config.validate()?;
         self.scheduler_config.validate()?;
+        self.scheduler_config
+            .prefix_cache_coordination_policy()
+            .validate(self.kv_cache_config.kv_cache_type())?;
         Ok(())
     }
 }
@@ -130,6 +135,7 @@ fn default_scheduler_config() -> SchedulerConfigProto {
         max_batched_token_count: DEFAULT_MAX_BATCHED_TOKEN_COUNT as u32,
         max_active_request_count: DEFAULT_MAX_ACTIVE_REQUEST_COUNT as u32,
         scheduling_policy: DEFAULT_SCHEDULING_POLICY.into(),
+        prefix_cache_coordination_policy: DEFAULT_PREFIX_CACHE_COORDINATION_POLICY.into(),
     }
 }
 
@@ -235,6 +241,11 @@ fn normalize_scheduler_config(config: &mut SchedulerConfigProto) {
         warn!("Scheduling policy is unspecified; using default value first-come-first-served");
         config.scheduling_policy = DEFAULT_SCHEDULING_POLICY.into();
     }
+    if let Ok(PrefixCacheCoordinationPolicyProto::Unspecified) =
+        PrefixCacheCoordinationPolicyProto::try_from(config.prefix_cache_coordination_policy)
+    {
+        config.prefix_cache_coordination_policy = DEFAULT_PREFIX_CACHE_COORDINATION_POLICY.into();
+    }
 }
 
 #[cfg(test)]
@@ -299,7 +310,7 @@ mod tests {
             &["mini-vllm-rs"],
             &[
                 "--scheduler-config",
-                "max_batched_token_count: 1024 max_active_request_count: 8 scheduling_policy: SCHEDULING_POLICY_SHORTEST_PREFILL_FIRST",
+                "max_batched_token_count: 1024 max_active_request_count: 8 scheduling_policy: SCHEDULING_POLICY_SHORTEST_PREFILL_FIRST prefix_cache_coordination_policy: PREFIX_CACHE_COORDINATION_POLICY_EXACT_INPUT_SINGLE_FLIGHT",
             ],
         )
         .expect("scheduler arguments should parse");
@@ -309,6 +320,10 @@ mod tests {
         assert_eq!(
             args.scheduler_config.scheduling_policy,
             SchedulingPolicyProto::ShortestPrefillFirst as i32
+        );
+        assert_eq!(
+            args.scheduler_config.prefix_cache_coordination_policy,
+            PrefixCacheCoordinationPolicyProto::ExactInputSingleFlight as i32
         );
     }
 
@@ -399,7 +414,32 @@ mod tests {
             config.scheduling_policy,
             SchedulingPolicyProto::FirstComeFirstServed as i32
         );
+        assert_eq!(
+            config.prefix_cache_coordination_policy,
+            PrefixCacheCoordinationPolicyProto::Independent as i32
+        );
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_exact_input_single_flight_without_prefix_caching() {
+        let mut args = normalize(
+            MainProcessArgs::from_args(&["mini-vllm-rs"], &[])
+                .expect("default arguments should parse"),
+        );
+        args.scheduler_config.prefix_cache_coordination_policy =
+            PrefixCacheCoordinationPolicyProto::ExactInputSingleFlight.into();
+
+        let error = args.validate().unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "exact-input single-flight requires paged-prefix KV caching"
+        );
+
+        args.kv_cache_config.kv_cache_type = KvCacheTypeProto::PagedPrefix.into();
+        args.kv_cache_config.per_page_token_count = DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT as u32;
+        assert!(args.validate().is_ok());
     }
 
     #[test]
