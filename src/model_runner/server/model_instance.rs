@@ -85,11 +85,22 @@ impl ModelInstance {
             .truncate(request_id, target_token_count)
     }
 
+    /// Publishes complete prefix pages currently owned by a request without finalizing it.
+    pub(super) fn publish_completed_prefix(
+        &mut self,
+        request_id: u64,
+        token_ids: &[u32],
+    ) -> Result<()> {
+        self.kv_cache_manager
+            .publish_completed_prefix(request_id, token_ids)
+    }
+
     pub(super) fn abort_request(&mut self, request_id: u64) -> Result<()> {
         self.kv_cache_manager.remove_request(request_id)
     }
 
-    /// Finalizes the request cache and returns the number of newly indexed prefix tokens.
+    /// Performs a final completed-prefix publication, releases the request cache, and returns the
+    /// request's accumulated newly indexed prefix-token count.
     pub(super) fn finish_request(&mut self, request_id: u64, token_ids: &[u32]) -> Result<usize> {
         self.kv_cache_manager.finish_request(request_id, token_ids)
     }

@@ -88,8 +88,18 @@ impl KvCacheManager {
         )
     }
 
-    /// Finalizes and removes a request, returning the number of tokens it newly indexed for
-    /// prefix reuse.
+    /// Publishes complete prefix pages currently owned by a request without finalizing it.
+    pub fn publish_completed_prefix(&mut self, request_id: u64, token_ids: &[u32]) -> Result<()> {
+        self.with_request_state(
+            request_id,
+            /* handle_contiguous */ |_, _| Ok(()),
+            /* handle_paged */
+            |cache, request_state| cache.publish_completed_prefix(request_state, token_ids),
+        )
+    }
+
+    /// Publishes the final completed prefix, removes the request, and returns the number of tokens
+    /// it newly indexed across all publication calls.
     pub fn finish_request(&mut self, request_id: u64, token_ids: &[u32]) -> Result<usize> {
         let newly_indexed_token_count = self.with_request_state(
             request_id,

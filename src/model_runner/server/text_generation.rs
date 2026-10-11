@@ -284,6 +284,12 @@ impl RequestExecutionState {
         self.request_id
     }
 
+    /// Returns the committed sequence. A model's KV cache may contain only a prefix of it because
+    /// the final sampled token has not necessarily passed through that model yet.
+    pub(super) fn committed_token_ids(&self) -> &[u32] {
+        &self.tokens
+    }
+
     pub(super) fn phase(&self) -> GenerationPhase {
         self.generation_phase
     }
@@ -784,6 +790,12 @@ impl RequestExecutionBatch {
         self.requests
             .into_iter()
             .map(|request| request.execution_state)
+    }
+
+    pub(super) fn execution_states(&self) -> impl Iterator<Item = &RequestExecutionState> {
+        self.requests
+            .iter()
+            .map(|request| request.execution_state.as_ref())
     }
 
     pub(super) fn run_steps(
