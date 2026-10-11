@@ -1,5 +1,5 @@
 use super::contiguous_cache::RequestContiguousCacheState;
-use super::paged_cache::RequestPagedCacheState;
+use super::request_state::RequestPagedCacheState;
 use super::KvCacheBackend;
 use super::KvCacheGeometry;
 use super::PrefixCacheTelemetry;
@@ -47,9 +47,9 @@ impl KvCacheManager {
                     self.backend.layer_count(),
                 ))
             }
-            KvCacheBackend::Paged(_) => {
-                RequestKvCacheState::Paged(RequestPagedCacheState::new(self.backend.layer_count()))
-            }
+            KvCacheBackend::Paged(cache) => RequestKvCacheState::Paged(
+                RequestPagedCacheState::new(cache.layer_count(), cache.per_page_token_count()),
+            ),
         };
         self.request_states.insert(request_id, request_state);
         Ok(())
@@ -96,7 +96,10 @@ impl KvCacheManager {
             /* handle_contiguous */
             |_, _| Ok(0),
             /* handle_paged */
-            |cache, request_state| cache.retain_completed_blocks(request_state, token_ids),
+            |cache, request_state| {
+                cache.publish_completed_prefix(request_state, token_ids)?;
+                Ok(request_state.accumulated_indexed_token_count())
+            },
         )?;
         self.remove_request(request_id)?;
         Ok(newly_indexed_token_count)

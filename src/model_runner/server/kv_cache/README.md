@@ -34,7 +34,7 @@ Paged caching separates shared state from each active request:
 | --- | --- |
 | `PhysicalPagePool` | Owns key/value tensor storage, page ownership states, and free physical page IDs. |
 | `PrefixBlockIndex` | When enabled, maps reusable token blocks to per-layer page bundles without owning tensors or changing page states. |
-| `RequestPagedCacheState` | Owns one request's active block tables and prefix cursor. |
+| `RequestPagedCacheState` | Owns one request's per-layer block tables, prefix cursor, and publication counters. |
 | `LayerBlockTable` | Maps one request layer's logical token order to physical page IDs without accessing tensors or managing page states. |
 
 `PagedKvCache` owns the shared physical pool and prefix index. Concurrent
@@ -50,8 +50,8 @@ The production files follow the same boundary:
 | `manager.rs` | Maps request IDs to cache states and implements the model-facing cache interface. |
 | `contiguous_cache.rs` | Separates contiguous tensor storage from per-request, per-layer progress. |
 | `paged_cache.rs` | Coordinates shared paged storage, prefix metadata, and request mappings. |
+| `request_state.rs` | Implements one paged request's virtual block tables and prefix-publication progress. |
 | `physical_page_pool.rs` | Implements tensor storage, allocation, ownership counting, and page reads and writes. |
-| `active_block_tables.rs` | Implements per-request virtual block tables without accessing tensors. |
 | `prefix_index.rs` | Implements reusable-prefix lookup and LRU leaf selection. |
 
 ## Physical-page lifecycle
@@ -86,7 +86,7 @@ flowchart TD
     Request[Receive tokenized request] --> Restore["PagedKvCache::restore_cached_prefix(prompt_prefix)"]
     Restore --> Find["PrefixBlockIndex::find_longest_cached_prefix"]
     Find --> RetainMatch["PhysicalPagePool retains matched pages"]
-    RetainMatch --> Attach["ActiveBlockTables installs virtual mappings"]
+    RetainMatch --> Attach["RequestPagedCacheState installs virtual mappings"]
     Attach --> Work[Prefill unmatched tokens and generate]
     Work -->|Reject draft tokens| Truncate[Truncate request cache]
     Truncate --> Work

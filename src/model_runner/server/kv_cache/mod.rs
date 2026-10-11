@@ -6,12 +6,12 @@ use crate::models::ModelRole;
 use anyhow::Context;
 use anyhow::Result;
 
-mod active_block_tables;
 mod contiguous_cache;
 mod manager;
 mod paged_cache;
 mod physical_page_pool;
 mod prefix_index;
+mod request_state;
 mod utils;
 
 pub(super) use manager::KvCacheManager;

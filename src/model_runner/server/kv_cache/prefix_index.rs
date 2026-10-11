@@ -32,7 +32,7 @@ impl AccessTimestamp {
     }
 }
 
-#[derive(Clone, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct PrefixBlockKey {
     parent_id: Option<PrefixBlockId>,
     token_ids: Box<[u32]>,
@@ -57,7 +57,7 @@ pub(super) struct PrefixBlockMatch {
     pub(super) cursor: PrefixBlockCursor,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct PrefixBlockCursor {
     block_id: Option<PrefixBlockId>,
     block_key: Option<PrefixBlockKey>,
@@ -87,10 +87,11 @@ pub(super) struct EvictedPrefixBlock {
     pub(super) page_ids_by_layer: Box<[PageId]>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub(super) struct NewlyIndexedPrefixPages {
+#[derive(Debug)]
+pub(super) struct PrefixIndexingResult {
     pub(super) page_ids: Vec<PageId>,
     pub(super) block_count: usize,
+    pub(super) cursor: PrefixBlockCursor,
 }
 
 pub(super) struct PrefixBlockIndex {
@@ -162,14 +163,14 @@ impl PrefixBlockIndex {
         })
     }
 
-    pub(super) fn index_cached_sequence(
+    pub(super) fn index_cached_sequence<'a>(
         &mut self,
         cursor: &PrefixBlockCursor,
         sequence_token_ids: &[u32],
-        cached_page_ids_by_layer: &[Vec<PageId>],
-    ) -> Result<NewlyIndexedPrefixPages> {
+        cached_page_ids_by_layer: impl Clone + Iterator<Item = &'a [PageId]>,
+    ) -> Result<PrefixIndexingResult> {
         let complete_block_count = sequence_token_ids.len() / self.per_block_token_count;
-        Self::validate_cached_page_counts(complete_block_count, cached_page_ids_by_layer)?;
+        Self::validate_cached_page_counts(complete_block_count, cached_page_ids_by_layer.clone())?;
         let current_timestamp = self.current_timestamp.borrow_mut().begin_access()?;
 
         let starting_block_index = cursor.matched_token_count / self.per_block_token_count;
@@ -213,7 +214,7 @@ impl PrefixBlockIndex {
             let block_id = self.next_block_id.next()?;
             let has_child = block_index + 1 < complete_block_count;
             let page_ids_by_layer: Box<_> = cached_page_ids_by_layer
-                .iter()
+                .clone()
                 .map(|cached_page_ids| cached_page_ids[block_index])
                 .collect();
             newly_indexed_page_ids.extend(page_ids_by_layer.iter().copied());
@@ -236,9 +237,17 @@ impl PrefixBlockIndex {
             parent_id = Some(block_id);
             previous_block_key = Some(key);
         }
-        Ok(NewlyIndexedPrefixPages {
+        let indexed_token_count = complete_block_count
+            .checked_mul(self.per_block_token_count)
+            .context("indexed prefix token count overflow")?;
+        Ok(PrefixIndexingResult {
             page_ids: newly_indexed_page_ids,
             block_count: newly_indexed_block_count,
+            cursor: PrefixBlockCursor {
+                block_id: parent_id,
+                block_key: previous_block_key,
+                matched_token_count: indexed_token_count,
+            },
         })
     }
 
@@ -283,12 +292,11 @@ impl PrefixBlockIndex {
             .cloned()
     }
 
-    fn validate_cached_page_counts(
+    fn validate_cached_page_counts<'a>(
         complete_block_count: usize,
-        cached_page_ids_by_layer: &[Vec<PageId>],
+        cached_page_ids_by_layer: impl Iterator<Item = &'a [PageId]>,
     ) -> Result<()> {
         if let Some((layer_index, cached_page_ids)) = cached_page_ids_by_layer
-            .iter()
             .enumerate()
             .find(|(_, cached_page_ids)| cached_page_ids.len() < complete_block_count)
         {
@@ -340,6 +348,19 @@ mod tests {
             .collect()
     }
 
+    fn index_pages(
+        index: &mut PrefixBlockIndex,
+        cursor: &PrefixBlockCursor,
+        token_ids: &[u32],
+        page_ids_by_layer: Vec<Vec<PageId>>,
+    ) -> Result<PrefixIndexingResult> {
+        index.index_cached_sequence(
+            cursor,
+            token_ids,
+            page_ids_by_layer.iter().map(Vec::as_slice),
+        )
+    }
+
     #[test]
     fn rejects_a_zero_token_block_size() {
         assert!(PrefixBlockIndex::new(0).is_err());
@@ -349,13 +370,13 @@ mod tests {
     fn rejects_fewer_cached_pages_than_complete_blocks() -> Result<()> {
         let mut index = PrefixBlockIndex::new(2)?;
 
-        let error = index
-            .index_cached_sequence(
-                &PrefixBlockCursor::at_root(),
-                &[1, 2, 3, 4],
-                &pages(&[&[10, 11], &[20]]),
-            )
-            .unwrap_err();
+        let error = index_pages(
+            &mut index,
+            &PrefixBlockCursor::at_root(),
+            &[1, 2, 3, 4],
+            pages(&[&[10, 11], &[20]]),
+        )
+        .unwrap_err();
 
         assert_eq!(
             error.to_string(),
@@ -382,10 +403,11 @@ mod tests {
     #[test]
     fn finds_an_exact_prefix_match_across_layers() -> Result<()> {
         let mut index = PrefixBlockIndex::new(2)?;
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 3, 4],
-            &pages(&[&[10, 11], &[20, 21]]),
+            pages(&[&[10, 11], &[20, 21]]),
         )?;
         assert_eq!(index.leaf_block_keys.len(), 1);
 
@@ -401,10 +423,11 @@ mod tests {
     #[test]
     fn finds_the_reusable_prefix_before_a_divergent_suffix() -> Result<()> {
         let mut index = PrefixBlockIndex::new(2)?;
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 3, 4],
-            &pages(&[&[10, 11]]),
+            pages(&[&[10, 11]]),
         )?;
 
         assert_eq!(
@@ -419,15 +442,17 @@ mod tests {
     #[test]
     fn distinguishes_identical_blocks_with_different_prefixes() -> Result<()> {
         let mut index = PrefixBlockIndex::new(2)?;
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 7, 8],
-            &pages(&[&[10, 11]]),
+            pages(&[&[10, 11]]),
         )?;
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[3, 4, 7, 8],
-            &pages(&[&[20, 21]]),
+            pages(&[&[20, 21]]),
         )?;
 
         assert_eq!(
@@ -442,10 +467,11 @@ mod tests {
     #[test]
     fn ignores_an_incomplete_final_sequence_block() -> Result<()> {
         let mut index = PrefixBlockIndex::new(2)?;
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 3],
-            &pages(&[&[10, 11]]),
+            pages(&[&[10, 11]]),
         )?;
 
         assert_eq!(
@@ -464,17 +490,19 @@ mod tests {
     #[test]
     fn reindexes_an_existing_sequence_without_duplicate_blocks() -> Result<()> {
         let mut index = PrefixBlockIndex::new(2)?;
-        let first_indexing = index.index_cached_sequence(
+        let first_indexing = index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 3, 4],
-            &pages(&[&[10, 11]]),
+            pages(&[&[10, 11]]),
         )?;
         assert_eq!(first_indexing.block_count, 2);
 
-        let second_indexing = index.index_cached_sequence(
+        let second_indexing = index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 3, 4],
-            &pages(&[&[20, 21]]),
+            pages(&[&[20, 21]]),
         )?;
         assert_eq!(second_indexing.block_count, 0);
 
@@ -493,10 +521,11 @@ mod tests {
     #[test]
     fn evicts_a_leaf_before_its_parent() -> Result<()> {
         let mut index = PrefixBlockIndex::new(2)?;
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 3, 4],
-            &pages(&[&[10, 11], &[20, 21]]),
+            pages(&[&[10, 11], &[20, 21]]),
         )?;
 
         assert_eq!(
@@ -523,10 +552,11 @@ mod tests {
     #[test]
     fn does_not_evict_the_leaf_attached_to_the_active_request() -> Result<()> {
         let mut index = PrefixBlockIndex::new(2)?;
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 3, 4],
-            &pages(&[&[10, 11]]),
+            pages(&[&[10, 11]]),
         )?;
         let active_match = index.find_longest_cached_prefix(&[1, 2, 3, 4])?;
 
@@ -541,15 +571,17 @@ mod tests {
     #[test]
     fn stops_eviction_when_an_active_internal_block_becomes_a_leaf() -> Result<()> {
         let mut index = PrefixBlockIndex::new(2)?;
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 3, 4],
-            &pages(&[&[10, 11]]),
+            pages(&[&[10, 11]]),
         )?;
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 5, 6],
-            &pages(&[&[10, 12]]),
+            pages(&[&[10, 12]]),
         )?;
         let active_match = index.find_longest_cached_prefix(&[1, 2, 7, 8])?;
 
@@ -570,15 +602,17 @@ mod tests {
     #[test]
     fn evicts_the_least_recently_used_leaf() -> Result<()> {
         let mut index = PrefixBlockIndex::new(2)?;
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 3, 4],
-            &pages(&[&[10, 11]]),
+            pages(&[&[10, 11]]),
         )?;
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 5, 6],
-            &pages(&[&[10, 12]]),
+            pages(&[&[10, 12]]),
         )?;
         assert_eq!(index.leaf_block_keys.len(), 2);
 
@@ -604,15 +638,17 @@ mod tests {
     #[test]
     fn promotes_a_parent_only_after_evicting_its_final_child() -> Result<()> {
         let mut index = PrefixBlockIndex::new(2)?;
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 3, 4],
-            &pages(&[&[10, 11]]),
+            pages(&[&[10, 11]]),
         )?;
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 5, 6],
-            &pages(&[&[10, 12]]),
+            pages(&[&[10, 12]]),
         )?;
 
         assert_eq!(
@@ -641,21 +677,24 @@ mod tests {
     #[test]
     fn reindexing_updates_lru_access_timestamps() -> Result<()> {
         let mut index = PrefixBlockIndex::new(2)?;
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 3, 4],
-            &pages(&[&[10, 11]]),
+            pages(&[&[10, 11]]),
         )?;
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 5, 6],
-            &pages(&[&[10, 12]]),
+            pages(&[&[10, 12]]),
         )?;
 
-        index.index_cached_sequence(
+        index_pages(
+            &mut index,
             &PrefixBlockCursor::at_root(),
             &[1, 2, 3, 4],
-            &pages(&[&[10, 11]]),
+            pages(&[&[10, 11]]),
         )?;
 
         assert_eq!(
