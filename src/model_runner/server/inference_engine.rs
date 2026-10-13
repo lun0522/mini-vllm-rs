@@ -92,13 +92,17 @@ impl InferenceEngine {
     }
 
     fn enqueue_request(&mut self, request: InferenceRequest) -> Result<()> {
-        let request_id = request.generate_text.request_id;
-        let input_token_count = request.generate_text.input_token_ids.len();
-        let max_new_token_count = usize::try_from(request.generate_text.max_new_tokens)
-            .context("max_new_tokens does not fit in usize")?;
-        self.request_manager.add_request(request)?;
-        self.scheduler
-            .enqueue(request_id, input_token_count, max_new_token_count);
+        let scheduler = &mut self.scheduler;
+        self.request_manager
+            .add_request(request, |generate_text_request| {
+                let max_new_token_count = usize::try_from(generate_text_request.max_new_tokens)
+                    .context("max_new_tokens does not fit in usize")?;
+                scheduler.enqueue_request(
+                    generate_text_request.request_id,
+                    &generate_text_request.input_token_ids,
+                    max_new_token_count,
+                )
+            })?;
         Ok(())
     }
 
@@ -177,8 +181,12 @@ impl InferenceEngine {
             .finish_request(request_id, |execution_state| {
                 model_runner.finish_request(execution_state)
             })?;
-        self.report_request_outcome(request_id, request_outcome);
-        Ok(())
+        self.report_request_outcome(request_id, &request_outcome);
+        if request_outcome.result.is_ok() {
+            self.scheduler.complete_request(request_id)
+        } else {
+            self.scheduler.abort_request(request_id)
+        }
     }
 
     /// Releases model state and attaches any cleanup failure to the execution error.
@@ -196,11 +204,11 @@ impl InferenceEngine {
     fn finalize_request_abort(&mut self, request_id: u64, error: anyhow::Error) -> Result<()> {
         self.scheduler.remove_active_request(request_id)?;
         let request_outcome = self.request_manager.abort_request(request_id, error)?;
-        self.report_request_outcome(request_id, request_outcome);
-        Ok(())
+        self.report_request_outcome(request_id, &request_outcome);
+        self.scheduler.abort_request(request_id)
     }
 
-    fn report_request_outcome(&self, request_id: u64, request_outcome: RequestOutcome) {
+    fn report_request_outcome(&self, request_id: u64, request_outcome: &RequestOutcome) {
         let completed_at = Instant::now();
         let queued_at = request_outcome.context.queued_at;
         let queue_duration = request_outcome

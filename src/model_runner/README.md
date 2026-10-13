@@ -36,6 +36,7 @@ through the lifecycle client.
 | `server/inference_engine.rs` | Coordinates admission, scheduled execution, event delivery, timing, and cleanup for one backend. |
 | `server/request_manager.rs` | Owns request payloads, resumable execution state, response channels, and lifecycle timing. |
 | `server/scheduler.rs` | Owns scheduling metadata and applies active-request, KV-cache reservation, and token-budget limits. |
+| `server/prefix_cache_flight.rs` | Coordinates exact-input single flights so one leader populates the prefix cache before its followers run. |
 | `server/model_runner.rs` | Owns the target and optional draft model instances and manages their request lifecycles. |
 | `server/model_instance.rs` | Pairs one loaded model with its request-aware KV-cache manager. |
 | `server/text_generation.rs` | Implements resumable prefill, ordinary decoding, speculative decoding, sampling, and statistics. |
@@ -100,6 +101,14 @@ Reservations conservatively ignore prefix-cache hits, while inactive cached
 prefix pages remain reclaimable through the existing LRU eviction path. A
 request releases its reservation when it finishes or is removed after an error
 or cancellation.
+
+With exact-input single-flight coordination enabled, the first request for an
+input becomes its flight leader and identical requests remain queued but
+blocked. Completion of the leader releases all followers, which then restore
+the published prefix through normal cache lookup. The completed flight drains
+as those followers terminate, while later identical requests start a new
+flight and can reuse the same cached prefix. If a leader aborts, the oldest
+waiting follower becomes the new leader.
 
 Admitted requests build batches within the scheduler's token budget. Decode
 work is prioritized over prefill work; prefills are ordered either

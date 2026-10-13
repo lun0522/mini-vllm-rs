@@ -103,12 +103,17 @@ impl RequestManager {
         }
     }
 
-    pub(super) fn add_request(&mut self, request: InferenceRequest) -> Result<()> {
+    pub(super) fn add_request(
+        &mut self,
+        request: InferenceRequest,
+        prepare_request: impl FnOnce(&GenerateTextRequest) -> Result<()>,
+    ) -> Result<()> {
         let request_id = request.generate_text.request_id;
         ensure!(
             !self.request_states.contains_key(&request_id),
             "inference request {request_id} already exists"
         );
+        prepare_request(&request.generate_text)?;
         self.request_states.insert(
             request_id,
             RequestState::Queued {
@@ -471,10 +476,13 @@ mod tests {
     fn rejects_duplicate_request_ids() -> Result<()> {
         let mut requests = RequestManager::new();
         let (original, _event_receiver) = request(7);
-        requests.add_request(original)?;
+        requests.add_request(original, |_| Ok(()))?;
         let (duplicate, _duplicate_receiver) = request(7);
 
-        let error = requests.add_request(duplicate).unwrap_err().to_string();
+        let error = requests
+            .add_request(duplicate, |_| Ok(()))
+            .unwrap_err()
+            .to_string();
 
         assert_eq!(error, "inference request 7 already exists");
         Ok(())
@@ -484,7 +492,7 @@ mod tests {
     fn skips_invalid_scheduled_requests_and_advances_the_rest() -> Result<()> {
         let mut requests = RequestManager::new();
         let (active_request, _event_receiver) = request(7);
-        requests.add_request(active_request)?;
+        requests.add_request(active_request, |_| Ok(()))?;
         requests.start_execution(7, |generate_text| {
             RequestExecutionState::new(
                 generate_text,
@@ -496,7 +504,7 @@ mod tests {
             )
         })?;
         let (queued_request, _queued_event_receiver) = request(9);
-        requests.add_request(queued_request)?;
+        requests.add_request(queued_request, |_| Ok(()))?;
         let scheduled_requests = [
             ScheduledRequest {
                 request_id: 8,

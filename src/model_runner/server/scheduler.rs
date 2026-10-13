@@ -1,17 +1,22 @@
 use crate::model_runner::SchedulerConfig;
 use crate::model_runner::SchedulingPolicy;
 use anyhow::bail;
+use anyhow::ensure;
 use anyhow::Context;
 use anyhow::Result;
 use std::cmp::Ordering;
 
 use super::kv_cache::KvCacheGeometry;
+use super::prefix_cache_flight::FlightAdmission;
+use super::prefix_cache_flight::PrefixCacheFlightCoordinator;
+use super::prefix_cache_flight::RequestTermination;
 use super::text_generation::GenerationPhase;
 
 struct RequestSchedulingMetadata {
     request_id: u64,
     max_required_page_count: usize,
     phase: SchedulingPhase,
+    is_blocked: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -50,6 +55,7 @@ pub(super) struct Scheduler {
     kv_cache_geometry: KvCacheGeometry,
     scheduling_policy: SchedulingPolicy,
     next_round_robin_prefill_request_id: Option<u64>,
+    prefix_cache_flight_coordinator: Option<PrefixCacheFlightCoordinator>,
     queued_requests: Vec<RequestSchedulingMetadata>,
     active_requests: Vec<RequestSchedulingMetadata>,
 }
@@ -62,17 +68,26 @@ impl Scheduler {
             kv_cache_geometry,
             scheduling_policy: config.scheduling_policy,
             next_round_robin_prefill_request_id: None,
+            prefix_cache_flight_coordinator: PrefixCacheFlightCoordinator::from_policy(
+                config.prefix_cache_coordination_policy,
+            ),
             queued_requests: Vec::new(),
             active_requests: Vec::new(),
         }
     }
 
-    pub(super) fn enqueue(
+    pub(super) fn enqueue_request(
         &mut self,
         request_id: u64,
-        input_token_count: usize,
+        input_token_ids: &[u32],
         max_new_token_count: usize,
-    ) {
+    ) -> Result<()> {
+        let flight_admission = self
+            .prefix_cache_flight_coordinator
+            .as_mut()
+            .map(|coordinator| coordinator.add_request(request_id, input_token_ids))
+            .transpose()?;
+        let input_token_count = input_token_ids.len();
         // The final generated token is returned but is never appended to the cache.
         let max_cached_token_count = input_token_count
             .checked_add(max_new_token_count)
@@ -86,28 +101,47 @@ impl Scheduler {
             phase: SchedulingPhase::Prefill {
                 remaining_token_count: input_token_count,
             },
+            is_blocked: flight_admission == Some(FlightAdmission::Follower),
         });
+        Ok(())
     }
 
     /// Admits queued requests in policy order while active-request slots and cache pages remain.
     pub(super) fn admit_queued_requests(&mut self) -> Vec<u64> {
-        let available_slot_count = self
-            .max_active_request_count
-            .saturating_sub(self.active_requests.len());
-        if available_slot_count == 0 {
+        if self.active_requests.len() >= self.max_active_request_count {
             return Vec::new();
         }
 
         self.queued_requests
             .sort_by(|left, right| Self::compare_prefills(self.scheduling_policy, left, right));
-        let admitted_request_count = self.get_admissible_queued_request_count(available_slot_count);
-        let admitted_request_ids = self.queued_requests[..admitted_request_count]
-            .iter()
-            .map(|request| request.request_id)
-            .collect();
-        self.active_requests
-            .extend(self.queued_requests.drain(..admitted_request_count));
+        let mut available_page_count = self.get_unreserved_cache_page_count();
+        let mut admitted_request_ids = Vec::new();
+        let mut queued_requests = std::mem::take(&mut self.queued_requests).into_iter();
+        while let Some(request) = queued_requests.next() {
+            if request.is_blocked {
+                self.queued_requests.push(request);
+                continue;
+            }
+            if self.active_requests.len() >= self.max_active_request_count
+                || request.max_required_page_count > available_page_count
+            {
+                self.queued_requests.push(request);
+                self.queued_requests.extend(queued_requests);
+                break;
+            }
+            available_page_count -= request.max_required_page_count;
+            admitted_request_ids.push(request.request_id);
+            self.active_requests.push(request);
+        }
         admitted_request_ids
+    }
+
+    pub(super) fn complete_request(&mut self, request_id: u64) -> Result<()> {
+        self.handle_request_termination(request_id, RequestTermination::Completed)
+    }
+
+    pub(super) fn abort_request(&mut self, request_id: u64) -> Result<()> {
+        self.handle_request_termination(request_id, RequestTermination::Aborted)
     }
 
     pub(super) fn is_vacant(&self) -> bool {
@@ -300,21 +334,6 @@ impl Scheduler {
         }
     }
 
-    fn get_admissible_queued_request_count(&self, available_slot_count: usize) -> usize {
-        let mut available_page_count = self.get_unreserved_cache_page_count();
-        let mut admitted_request_count = 0;
-        for request in &self.queued_requests {
-            if admitted_request_count == available_slot_count
-                || request.max_required_page_count > available_page_count
-            {
-                break;
-            }
-            admitted_request_count += 1;
-            available_page_count -= request.max_required_page_count;
-        }
-        admitted_request_count
-    }
-
     fn get_unreserved_cache_page_count(&self) -> usize {
         let reserved_page_count = self
             .active_requests
@@ -324,6 +343,29 @@ impl Scheduler {
         self.kv_cache_geometry
             .page_capacity()
             .saturating_sub(reserved_page_count)
+    }
+
+    fn handle_request_termination(
+        &mut self,
+        request_id: u64,
+        request_termination: RequestTermination,
+    ) -> Result<()> {
+        let Some(coordinator) = self.prefix_cache_flight_coordinator.as_mut() else {
+            return Ok(());
+        };
+        for runnable_request_id in coordinator.remove_request(request_id, request_termination)? {
+            let request = self
+                .queued_requests
+                .iter_mut()
+                .find(|request| request.request_id == runnable_request_id)
+                .with_context(|| format!("queued request {runnable_request_id} does not exist"))?;
+            ensure!(
+                request.is_blocked,
+                "queued request {runnable_request_id} is not blocked"
+            );
+            request.is_blocked = false;
+        }
+        Ok(())
     }
 }
 
@@ -362,9 +404,9 @@ mod tests {
     #[test]
     fn admits_requests_in_arrival_order() {
         let mut scheduler = scheduler(3, SchedulingPolicy::FirstComeFirstServed);
-        scheduler.enqueue(1, 30, 1);
-        scheduler.enqueue(2, 10, 1);
-        scheduler.enqueue(3, 20, 1);
+        scheduler.enqueue_request(1, &[0; 30], 1).unwrap();
+        scheduler.enqueue_request(2, &[0; 10], 1).unwrap();
+        scheduler.enqueue_request(3, &[0; 20], 1).unwrap();
 
         let admitted_request_ids = scheduler.admit_queued_requests();
 
@@ -372,12 +414,58 @@ mod tests {
     }
 
     #[test]
+    fn single_flight_preserves_a_released_followers_policy_position() -> Result<()> {
+        let mut scheduler = Scheduler::new(
+            SchedulerConfig {
+                max_batched_token_count: 512,
+                max_active_request_count: 2,
+                scheduling_policy: SchedulingPolicy::FirstComeFirstServed,
+                prefix_cache_coordination_policy:
+                    PrefixCacheCoordinationPolicy::ExactInputSingleFlight,
+            },
+            KvCacheGeometry {
+                token_capacity: 4096,
+                page_token_count: 16,
+            },
+        );
+        scheduler.enqueue_request(1, &[10, 20], 1)?;
+        scheduler.enqueue_request(2, &[10, 20], 1)?;
+        scheduler.enqueue_request(3, &[30, 40], 1)?;
+        scheduler.enqueue_request(4, &[50, 60], 1)?;
+        assert_eq!(scheduler.admit_queued_requests(), vec![1, 3]);
+        scheduler.update_request_state(
+            1,
+            GenerationPhase::Finished {
+                finish_reason: GenerationFinishReason::MaxNewTokensReached,
+            },
+        )?;
+        scheduler.complete_request(1)?;
+        scheduler.update_request_state(
+            3,
+            GenerationPhase::Finished {
+                finish_reason: GenerationFinishReason::MaxNewTokensReached,
+            },
+        )?;
+        scheduler.complete_request(3)?;
+
+        assert_eq!(scheduler.admit_queued_requests(), vec![2, 4]);
+        scheduler.update_request_state(
+            2,
+            GenerationPhase::Finished {
+                finish_reason: GenerationFinishReason::MaxNewTokensReached,
+            },
+        )?;
+        scheduler.complete_request(2)?;
+        Ok(())
+    }
+
+    #[test]
     fn admits_shortest_prefills_first_and_preserves_tie_order() {
         let mut scheduler = scheduler(4, SchedulingPolicy::ShortestPrefillFirst);
-        scheduler.enqueue(1, 30, 1);
-        scheduler.enqueue(2, 10, 1);
-        scheduler.enqueue(3, 20, 1);
-        scheduler.enqueue(4, 10, 1);
+        scheduler.enqueue_request(1, &[0; 30], 1).unwrap();
+        scheduler.enqueue_request(2, &[0; 10], 1).unwrap();
+        scheduler.enqueue_request(3, &[0; 20], 1).unwrap();
+        scheduler.enqueue_request(4, &[0; 10], 1).unwrap();
 
         let admitted_request_ids = scheduler.admit_queued_requests();
 
@@ -387,9 +475,9 @@ mod tests {
     #[test]
     fn enforces_the_active_request_limit() {
         let mut scheduler = scheduler(2, SchedulingPolicy::FirstComeFirstServed);
-        scheduler.enqueue(1, 10, 1);
-        scheduler.enqueue(2, 20, 1);
-        scheduler.enqueue(3, 30, 1);
+        scheduler.enqueue_request(1, &[0; 10], 1).unwrap();
+        scheduler.enqueue_request(2, &[0; 20], 1).unwrap();
+        scheduler.enqueue_request(3, &[0; 30], 1).unwrap();
 
         let admitted_request_ids = scheduler.admit_queued_requests();
 
@@ -429,7 +517,7 @@ mod tests {
             },
         );
 
-        scheduler.enqueue(1, 3, 2);
+        scheduler.enqueue_request(1, &[0; 3], 2).unwrap();
 
         assert_eq!(scheduler.queued_requests[0].max_required_page_count, 4);
     }
@@ -448,9 +536,9 @@ mod tests {
                 page_token_count: 4,
             },
         );
-        scheduler.enqueue(1, 1, 1);
-        scheduler.enqueue(2, 4, 1);
-        scheduler.enqueue(3, 1, 1);
+        scheduler.enqueue_request(1, &[0; 1], 1).unwrap();
+        scheduler.enqueue_request(2, &[0; 4], 1).unwrap();
+        scheduler.enqueue_request(3, &[0; 1], 1).unwrap();
 
         assert_eq!(scheduler.admit_queued_requests(), vec![1, 2]);
 
@@ -464,7 +552,7 @@ mod tests {
             .unwrap();
         assert_eq!(scheduler.admit_queued_requests(), vec![3]);
 
-        scheduler.enqueue(4, 1, 1);
+        scheduler.enqueue_request(4, &[0; 1], 1).unwrap();
         assert!(scheduler.admit_queued_requests().is_empty());
         scheduler.remove_active_request(2).unwrap();
         assert_eq!(scheduler.admit_queued_requests(), vec![4]);
@@ -484,10 +572,10 @@ mod tests {
                 page_token_count: 4,
             },
         );
-        scheduler.enqueue(1, 4, 1);
+        scheduler.enqueue_request(1, &[0; 4], 1).unwrap();
         assert_eq!(scheduler.admit_queued_requests(), vec![1]);
-        scheduler.enqueue(2, 5, 1);
-        scheduler.enqueue(3, 1, 1);
+        scheduler.enqueue_request(2, &[0; 5], 1).unwrap();
+        scheduler.enqueue_request(3, &[0; 1], 1).unwrap();
 
         assert!(scheduler.admit_queued_requests().is_empty());
     }
@@ -496,9 +584,9 @@ mod tests {
     fn limits_scheduled_prefill_work_to_the_token_budget() {
         let mut scheduler =
             scheduler_with_token_budget(12, 3, SchedulingPolicy::FirstComeFirstServed);
-        scheduler.enqueue(1, 8, 1);
-        scheduler.enqueue(2, 10, 1);
-        scheduler.enqueue(3, 4, 1);
+        scheduler.enqueue_request(1, &[0; 8], 1).unwrap();
+        scheduler.enqueue_request(2, &[0; 10], 1).unwrap();
+        scheduler.enqueue_request(3, &[0; 4], 1).unwrap();
 
         scheduler.admit_queued_requests();
         let decision = scheduler.create_scheduling_decision();
@@ -524,7 +612,7 @@ mod tests {
     fn chunks_a_prefill_larger_than_the_token_budget() {
         let mut scheduler =
             scheduler_with_token_budget(8, 1, SchedulingPolicy::FirstComeFirstServed);
-        scheduler.enqueue(1, 20, 1);
+        scheduler.enqueue_request(1, &[0; 20], 1).unwrap();
 
         scheduler.admit_queued_requests();
         let decision = scheduler.create_scheduling_decision();
@@ -548,9 +636,9 @@ mod tests {
             SchedulingPolicy::RoundRobin,
         ] {
             let mut scheduler = scheduler_with_token_budget(4, 3, scheduling_policy);
-            scheduler.enqueue(1, 10, 1);
-            scheduler.enqueue(2, 10, 1);
-            scheduler.enqueue(3, 10, 1);
+            scheduler.enqueue_request(1, &[0; 10], 1).unwrap();
+            scheduler.enqueue_request(2, &[0; 10], 1).unwrap();
+            scheduler.enqueue_request(3, &[0; 10], 1).unwrap();
             scheduler.admit_queued_requests();
             scheduler
                 .update_request_state(
@@ -585,9 +673,9 @@ mod tests {
     fn applies_admission_policy_before_creating_a_schedule() {
         let mut scheduler =
             scheduler_with_token_budget(15, 2, SchedulingPolicy::ShortestPrefillFirst);
-        scheduler.enqueue(1, 30, 1);
-        scheduler.enqueue(2, 10, 1);
-        scheduler.enqueue(3, 20, 1);
+        scheduler.enqueue_request(1, &[0; 30], 1).unwrap();
+        scheduler.enqueue_request(2, &[0; 10], 1).unwrap();
+        scheduler.enqueue_request(3, &[0; 20], 1).unwrap();
 
         scheduler.admit_queued_requests();
         let decision = scheduler.create_scheduling_decision();
@@ -613,8 +701,8 @@ mod tests {
     fn schedules_active_prefills_by_remaining_token_count() {
         let mut scheduler =
             scheduler_with_token_budget(10, 2, SchedulingPolicy::ShortestPrefillFirst);
-        scheduler.enqueue(1, 10, 1);
-        scheduler.enqueue(2, 20, 1);
+        scheduler.enqueue_request(1, &[0; 10], 1).unwrap();
+        scheduler.enqueue_request(2, &[0; 20], 1).unwrap();
         scheduler.admit_queued_requests();
         scheduler
             .update_request_state(
@@ -655,9 +743,9 @@ mod tests {
     #[test]
     fn rotates_prefill_priority_across_round_robin_decisions() {
         let mut scheduler = scheduler_with_token_budget(5, 3, SchedulingPolicy::RoundRobin);
-        scheduler.enqueue(1, 10, 1);
-        scheduler.enqueue(2, 10, 1);
-        scheduler.enqueue(3, 10, 1);
+        scheduler.enqueue_request(1, &[0; 10], 1).unwrap();
+        scheduler.enqueue_request(2, &[0; 10], 1).unwrap();
+        scheduler.enqueue_request(3, &[0; 10], 1).unwrap();
         scheduler.admit_queued_requests();
         scheduler
             .update_request_state(
@@ -706,9 +794,9 @@ mod tests {
     #[test]
     fn round_robin_uses_budget_left_by_a_completed_prefill() {
         let mut scheduler = scheduler_with_token_budget(8, 3, SchedulingPolicy::RoundRobin);
-        scheduler.enqueue(1, 10, 1);
-        scheduler.enqueue(2, 2, 1);
-        scheduler.enqueue(3, 10, 1);
+        scheduler.enqueue_request(1, &[0; 10], 1).unwrap();
+        scheduler.enqueue_request(2, &[0; 2], 1).unwrap();
+        scheduler.enqueue_request(3, &[0; 10], 1).unwrap();
         scheduler.admit_queued_requests();
         scheduler
             .update_request_state(
@@ -745,7 +833,7 @@ mod tests {
     #[test]
     fn rejects_transitioning_from_decode_back_to_prefill() {
         let mut scheduler = scheduler(1, SchedulingPolicy::FirstComeFirstServed);
-        scheduler.enqueue(1, 10, 1);
+        scheduler.enqueue_request(1, &[0; 10], 1).unwrap();
         scheduler.admit_queued_requests();
         scheduler
             .update_request_state(
