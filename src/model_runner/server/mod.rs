@@ -41,6 +41,7 @@ mod inference_engine;
 mod kv_cache;
 mod model_instance;
 mod model_runner;
+mod prefix_cache_flight;
 mod request_manager;
 mod scheduler;
 mod text_generation;
