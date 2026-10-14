@@ -144,15 +144,26 @@ impl Scheduler {
         self.handle_request_termination(request_id, RequestTermination::Aborted)
     }
 
+    /// Releases requests waiting for the leader's successfully published prefix.
+    pub(super) fn release_prefix_flight(&mut self, request_id: u64) -> Result<()> {
+        let Some(coordinator) = self.prefix_cache_flight_coordinator.as_mut() else {
+            return Ok(());
+        };
+        let runnable_request_ids = coordinator.release_after_prefix_publication(request_id)?;
+        self.unblock_requests(runnable_request_ids)
+    }
+
     pub(super) fn is_vacant(&self) -> bool {
         self.queued_requests.is_empty() && self.active_requests.is_empty()
     }
 
-    pub(super) fn update_request_state(
+    /// Updates scheduling metadata and returns whether this transition requires prefix
+    /// publication before the request's flight can be released.
+    pub(super) fn update_request_phase(
         &mut self,
         request_id: u64,
         generation_phase: GenerationPhase,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let request_index = self
             .active_requests
             .iter()
@@ -162,7 +173,7 @@ impl Scheduler {
         let next_scheduling_phase = match (generation_phase, scheduling_phase) {
             (GenerationPhase::Finished { .. }, _) => {
                 self.active_requests.remove(request_index);
-                return Ok(());
+                return Ok(false);
             }
             (
                 GenerationPhase::Prefill {
@@ -178,7 +189,11 @@ impl Scheduler {
             }
         };
         self.active_requests[request_index].phase = next_scheduling_phase;
-        Ok(())
+        Ok(self.requires_prefix_publication_for_phase_transition(
+            request_id,
+            scheduling_phase,
+            next_scheduling_phase,
+        ))
     }
 
     pub(super) fn remove_active_request(&mut self, request_id: u64) -> Result<()> {
@@ -205,6 +220,22 @@ impl Scheduler {
         requests.extend(scheduled_prefills);
 
         SchedulingDecision { requests }
+    }
+
+    /// A leader that releases followers after prefill must publish its completed prefix before the
+    /// scheduler makes those followers runnable.
+    fn requires_prefix_publication_for_phase_transition(
+        &self,
+        request_id: u64,
+        scheduling_phase: SchedulingPhase,
+        next_scheduling_phase: SchedulingPhase,
+    ) -> bool {
+        matches!(scheduling_phase, SchedulingPhase::Prefill { .. })
+            && matches!(next_scheduling_phase, SchedulingPhase::Decode)
+            && self
+                .prefix_cache_flight_coordinator
+                .as_ref()
+                .is_some_and(|coordinator| coordinator.requires_prefix_publication(request_id))
     }
 
     fn schedule_decodes(&self, token_budget: usize) -> DecodeSchedulingResult {
@@ -353,7 +384,12 @@ impl Scheduler {
         let Some(coordinator) = self.prefix_cache_flight_coordinator.as_mut() else {
             return Ok(());
         };
-        for runnable_request_id in coordinator.remove_request(request_id, request_termination)? {
+        let runnable_request_ids = coordinator.remove_request(request_id, request_termination)?;
+        self.unblock_requests(runnable_request_ids)
+    }
+
+    fn unblock_requests(&mut self, runnable_request_ids: Vec<u64>) -> Result<()> {
+        for runnable_request_id in runnable_request_ids {
             let request = self
                 .queued_requests
                 .iter_mut()
@@ -433,14 +469,14 @@ mod tests {
         scheduler.enqueue_request(3, &[30, 40], 1)?;
         scheduler.enqueue_request(4, &[50, 60], 1)?;
         assert_eq!(scheduler.admit_queued_requests(), vec![1, 3]);
-        scheduler.update_request_state(
+        scheduler.update_request_phase(
             1,
             GenerationPhase::Finished {
                 finish_reason: GenerationFinishReason::MaxNewTokensReached,
             },
         )?;
         scheduler.complete_request(1)?;
-        scheduler.update_request_state(
+        scheduler.update_request_phase(
             3,
             GenerationPhase::Finished {
                 finish_reason: GenerationFinishReason::MaxNewTokensReached,
@@ -449,13 +485,64 @@ mod tests {
         scheduler.complete_request(3)?;
 
         assert_eq!(scheduler.admit_queued_requests(), vec![2, 4]);
-        scheduler.update_request_state(
+        scheduler.update_request_phase(
             2,
             GenerationPhase::Finished {
                 finish_reason: GenerationFinishReason::MaxNewTokensReached,
             },
         )?;
         scheduler.complete_request(2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn prefix_publication_single_flight_unblocks_followers_before_leader_completion() -> Result<()>
+    {
+        let mut scheduler = Scheduler::new(
+            SchedulerConfig {
+                max_batched_token_count: 512,
+                max_active_request_count: 2,
+                scheduling_policy: SchedulingPolicy::FirstComeFirstServed,
+                prefix_cache_coordination_policy:
+                    PrefixCacheCoordinationPolicy::ExactInputSingleFlightUntilPrefixPublished,
+            },
+            KvCacheGeometry {
+                token_capacity: 4096,
+                page_token_count: 16,
+            },
+        );
+        scheduler.enqueue_request(1, &[10, 20], 1)?;
+        scheduler.enqueue_request(2, &[10, 20], 1)?;
+        assert_eq!(scheduler.admit_queued_requests(), vec![1]);
+
+        assert_eq!(
+            scheduler.update_request_phase(
+                1,
+                GenerationPhase::Decode {
+                    generated_token_count: 1
+                }
+            )?,
+            true
+        );
+        scheduler.release_prefix_flight(1)?;
+
+        assert_eq!(scheduler.admit_queued_requests(), vec![2]);
+        assert_eq!(
+            scheduler.update_request_phase(
+                2,
+                GenerationPhase::Decode {
+                    generated_token_count: 1
+                }
+            )?,
+            false
+        );
+        scheduler.update_request_phase(
+            1,
+            GenerationPhase::Finished {
+                finish_reason: GenerationFinishReason::MaxNewTokensReached,
+            },
+        )?;
+        scheduler.complete_request(1)?;
         Ok(())
     }
 
@@ -485,7 +572,7 @@ mod tests {
         assert_eq!(scheduler.active_requests.len(), 2);
         assert_eq!(scheduler.queued_requests.len(), 1);
         scheduler
-            .update_request_state(
+            .update_request_phase(
                 1,
                 GenerationPhase::Finished {
                     finish_reason: GenerationFinishReason::MaxNewTokensReached,
@@ -543,7 +630,7 @@ mod tests {
         assert_eq!(scheduler.admit_queued_requests(), vec![1, 2]);
 
         scheduler
-            .update_request_state(
+            .update_request_phase(
                 1,
                 GenerationPhase::Finished {
                     finish_reason: GenerationFinishReason::MaxNewTokensReached,
@@ -641,7 +728,7 @@ mod tests {
             scheduler.enqueue_request(3, &[0; 10], 1).unwrap();
             scheduler.admit_queued_requests();
             scheduler
-                .update_request_state(
+                .update_request_phase(
                     2,
                     GenerationPhase::Decode {
                         generated_token_count: 1,
@@ -705,7 +792,7 @@ mod tests {
         scheduler.enqueue_request(2, &[0; 20], 1).unwrap();
         scheduler.admit_queued_requests();
         scheduler
-            .update_request_state(
+            .update_request_phase(
                 1,
                 GenerationPhase::Prefill {
                     remaining_token_count: 9,
@@ -713,7 +800,7 @@ mod tests {
             )
             .unwrap();
         scheduler
-            .update_request_state(
+            .update_request_phase(
                 2,
                 GenerationPhase::Prefill {
                     remaining_token_count: 2,
@@ -748,7 +835,7 @@ mod tests {
         scheduler.enqueue_request(3, &[0; 10], 1).unwrap();
         scheduler.admit_queued_requests();
         scheduler
-            .update_request_state(
+            .update_request_phase(
                 1,
                 GenerationPhase::Decode {
                     generated_token_count: 1,
@@ -799,7 +886,7 @@ mod tests {
         scheduler.enqueue_request(3, &[0; 10], 1).unwrap();
         scheduler.admit_queued_requests();
         scheduler
-            .update_request_state(
+            .update_request_phase(
                 1,
                 GenerationPhase::Decode {
                     generated_token_count: 1,
@@ -836,7 +923,7 @@ mod tests {
         scheduler.enqueue_request(1, &[0; 10], 1).unwrap();
         scheduler.admit_queued_requests();
         scheduler
-            .update_request_state(
+            .update_request_phase(
                 1,
                 GenerationPhase::Decode {
                     generated_token_count: 1,
@@ -845,7 +932,7 @@ mod tests {
             .unwrap();
 
         let error = scheduler
-            .update_request_state(
+            .update_request_phase(
                 1,
                 GenerationPhase::Prefill {
                     remaining_token_count: 5,

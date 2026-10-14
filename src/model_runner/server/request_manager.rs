@@ -224,6 +224,21 @@ impl RequestManager {
             .is_some_and(|state| !matches!(state, RequestState::Queued { .. }))
     }
 
+    /// Returns committed token IDs for a request that is currently executing.
+    pub(super) fn committed_token_ids(&self, request_id: u64) -> Result<&[u32]> {
+        let request = self
+            .request_states
+            .get(&request_id)
+            .with_context(|| format!("inference request {request_id} does not exist"))?;
+        let RequestState::Executing {
+            execution_state, ..
+        } = request
+        else {
+            bail!("inference request {request_id} is not executing");
+        };
+        Ok(execution_state.committed_token_ids())
+    }
+
     /// Removes an executing request and applies its model-side completion operation.
     pub(super) fn finish_request(
         &mut self,

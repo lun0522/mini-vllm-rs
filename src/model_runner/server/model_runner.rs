@@ -212,8 +212,7 @@ impl ModelRunner {
             &mut self.target,
             self.draft.as_mut().map(|draft| &mut draft.model),
         )?;
-        // Incremental mode explicitly publishes optional checkpoints after successful execution
-        // steps. Both publication modes perform a final publication through finish_request().
+        // Incremental mode publishes complete prefix pages after every successful execution step.
         if self.prefix_cache_publication_policy == PrefixCachePublicationPolicy::Incremental {
             for execution_state in execution_batch.execution_states() {
                 self.publish_completed_prefix(
@@ -223,6 +222,26 @@ impl ModelRunner {
             }
         }
         Ok(generation_steps)
+    }
+
+    /// Publishes complete target and draft prefix pages without finalizing the request.
+    ///
+    /// Publication policies may call this internally while coordination policies call it through
+    /// the inference engine. Repeated calls are safe: each call publishes only complete pages not
+    /// previously published by the request.
+    pub(super) fn publish_completed_prefix(
+        &mut self,
+        request_id: u64,
+        token_ids: &[u32],
+    ) -> Result<()> {
+        self.target
+            .publish_completed_prefix(request_id, token_ids)?;
+        if let Some(draft) = &mut self.draft {
+            draft
+                .model
+                .publish_completed_prefix(request_id, token_ids)?;
+        }
+        Ok(())
     }
 
     pub(super) fn finish_request(
@@ -313,18 +332,6 @@ impl ModelRunner {
             }
             InferenceDevice::Mixed => bail!("expecting a specific device type"),
         }
-    }
-
-    /// Publishes complete target and draft prefix pages without finalizing the request.
-    fn publish_completed_prefix(&mut self, request_id: u64, token_ids: &[u32]) -> Result<()> {
-        self.target
-            .publish_completed_prefix(request_id, token_ids)?;
-        if let Some(draft) = &mut self.draft {
-            draft
-                .model
-                .publish_completed_prefix(request_id, token_ids)?;
-        }
-        Ok(())
     }
 }
 

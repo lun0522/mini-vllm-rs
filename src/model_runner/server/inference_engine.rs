@@ -124,8 +124,9 @@ impl InferenceEngine {
             self.request_manager
                 .start_execution(request_id, |request| model_runner.start_request(request))?
         };
-        self.scheduler
-            .update_request_state(request_id, started_request.generation_phase)?;
+        // Cache restoration during startup may shorten prefill or move the request directly into
+        // decode, so synchronize the scheduler with the execution state's actual initial phase.
+        self.handle_generation_phase(request_id, started_request.generation_phase)?;
         info!(
             "Engine state (backend_id={}): request_id={} status=started input_tokens={} \
              generation_phase={} ignore_eos_tokens={} queue_us={}",
@@ -154,10 +155,17 @@ impl InferenceEngine {
             });
         for RequestExecutionResult { request_id, result } in results {
             match result {
-                Ok(phase) => self.complete_execution_step(request_id, phase)?,
+                Ok(phase) => {
+                    if let Err(error) = self.complete_execution_step(request_id, phase) {
+                        if self.request_manager.has_started_execution(request_id) {
+                            self.abort_started_request(request_id, error)?;
+                        } else {
+                            return Err(error);
+                        }
+                    }
+                }
                 Err(error) if self.request_manager.has_started_execution(request_id) => {
-                    let error = self.abort_model_execution(request_id, error);
-                    self.finalize_request_abort(request_id, error)?;
+                    self.abort_started_request(request_id, error)?;
                 }
                 Err(_) => self.scheduler.remove_active_request(request_id)?,
             }
@@ -170,7 +178,7 @@ impl InferenceEngine {
         request_id: u64,
         phase: text_generation::GenerationPhase,
     ) -> Result<()> {
-        self.scheduler.update_request_state(request_id, phase)?;
+        self.handle_generation_phase(request_id, phase)?;
         if !matches!(phase, text_generation::GenerationPhase::Finished { .. }) {
             return Ok(());
         }
@@ -187,6 +195,31 @@ impl InferenceEngine {
         } else {
             self.scheduler.abort_request(request_id)
         }
+    }
+
+    /// Updates scheduling state and optionally publishes a completed prefix so requests with the
+    /// same input, held back to avoid duplicate prefix computation, can reuse it and begin running.
+    /// This publication is an intermediate checkpoint and does not finalize the leader request.
+    fn handle_generation_phase(
+        &mut self,
+        request_id: u64,
+        phase: text_generation::GenerationPhase,
+    ) -> Result<()> {
+        let is_prefix_publication_required =
+            self.scheduler.update_request_phase(request_id, phase)?;
+        if !is_prefix_publication_required {
+            return Ok(());
+        }
+
+        let committed_token_ids = self.request_manager.committed_token_ids(request_id)?;
+        self.model_runner
+            .publish_completed_prefix(request_id, committed_token_ids)?;
+        self.scheduler.release_prefix_flight(request_id)
+    }
+
+    fn abort_started_request(&mut self, request_id: u64, error: anyhow::Error) -> Result<()> {
+        let error = self.abort_model_execution(request_id, error);
+        self.finalize_request_abort(request_id, error)
     }
 
     /// Releases model state and attaches any cleanup failure to the execution error.

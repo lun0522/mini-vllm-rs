@@ -102,12 +102,31 @@ prefix pages remain reclaimable through the existing LRU eviction path. A
 request releases its reservation when it finishes or is removed after an error
 or cancellation.
 
-With exact-input single-flight coordination enabled, the first request for an
-input becomes its flight leader and identical requests remain queued but
-blocked. Completion of the leader releases all followers, which then restore
-the published prefix through normal cache lookup. The completed flight drains
-as those followers terminate, while later identical requests start a new
-flight and can reuse the same cached prefix. If a leader aborts, the oldest
+### Prefix-cache publication and coordination
+
+Prefix-cache publication controls when complete pages become reusable:
+
+- `on-request-completion` publishes when `finish_request()` finalizes the
+  request.
+- `incremental` additionally publishes newly completed pages after every
+  successful execution step. Finalization still performs one last publication
+  to capture any remaining complete page.
+
+Prefix-cache coordination independently controls how concurrent requests with
+identical inputs populate the cache:
+
+- `independent` schedules every request normally, so concurrent cold requests
+  may compute and attempt to publish the same prefix.
+- `exact-input-single-flight-until-request-completion` selects the first
+  request as leader and blocks identical followers until that request finishes.
+- `exact-input-single-flight-until-prefix-published` blocks identical followers
+  only until the leader finishes prefill and publishes the shared prefix. This
+  policy requests a publication checkpoint at that boundary even when the
+  configured publication policy is `on-request-completion`.
+
+Released followers restore the published prefix through normal cache lookup.
+Later identical requests create a new flight and may reuse the same cached
+prefix. If an active leader aborts before releasing its followers, the oldest
 waiting follower becomes the new leader.
 
 Admitted requests build batches within the scheduler's token budget. Decode

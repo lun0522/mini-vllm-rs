@@ -108,6 +108,11 @@ cargo run --release
   - `draft_kv_cache_size_bytes`: Sets the draft model's total KV-cache
     allocation. When omitted or set to `0`, it is inferred so the draft cache
     holds the same number of tokens as the target cache.
+  - `prefix_cache_publication_policy`: Accepts
+    `PREFIX_CACHE_PUBLICATION_POLICY_ON_REQUEST_COMPLETION` or
+    `PREFIX_CACHE_PUBLICATION_POLICY_INCREMENTAL`, controlling whether complete
+    prefix pages become reusable only at finalization or after each successful
+    execution step.
 - `--scheduler-config '<textproto>'` configures scheduling:
   - `max_batched_token_count`: Sets the scheduling work budget and defaults to
     `512`; see [Scheduling work budget](ARCHITECTURE.md#scheduling-work-budget).
@@ -117,6 +122,14 @@ cargo run --release
     `SCHEDULING_POLICY_FIRST_COME_FIRST_SERVED`,
     `SCHEDULING_POLICY_SHORTEST_PREFILL_FIRST`, or
     `SCHEDULING_POLICY_ROUND_ROBIN`, and defaults to the first option.
+  - `prefix_cache_coordination_policy`: Accepts
+    `PREFIX_CACHE_COORDINATION_POLICY_INDEPENDENT`,
+    `PREFIX_CACHE_COORDINATION_POLICY_EXACT_INPUT_SINGLE_FLIGHT_UNTIL_REQUEST_COMPLETION`,
+    or `PREFIX_CACHE_COORDINATION_POLICY_EXACT_INPUT_SINGLE_FLIGHT_UNTIL_PREFIX_PUBLISHED`.
+    The single-flight policies hold identical-input followers until their
+    leader completes or publishes the shared prefix, respectively. See
+    [Prefix-cache publication and coordination](src/model_runner/README.md#prefix-cache-publication-and-coordination)
+    for how the policies interact.
 - `--input-preprocessing-thread-count <count>` sets the request-handler
   preprocessing pool size and defaults to `4`.
 - `--request-socket <path>` changes the public request-handler Unix socket and
