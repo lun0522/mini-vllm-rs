@@ -36,7 +36,7 @@ through the lifecycle client.
 | `server/inference_engine.rs` | Coordinates admission, scheduled execution, event delivery, timing, and cleanup for one backend. |
 | `server/request_manager.rs` | Owns request payloads, resumable execution state, response channels, and lifecycle timing. |
 | `server/scheduler.rs` | Owns scheduling metadata and applies active-request, KV-cache reservation, and token-budget limits. |
-| `server/prefix_cache_flight.rs` | Coordinates exact-input single flights so one leader populates the prefix cache before its followers run. |
+| `server/prefix_cache_flight.rs` | Coordinates exact-input single flights and tracks whether followers wait for leader completion or prefix publication. |
 | `server/model_runner.rs` | Owns the target and optional draft model instances and manages their request lifecycles. |
 | `server/model_instance.rs` | Pairs one loaded model with its request-aware KV-cache manager. |
 | `server/text_generation.rs` | Implements resumable prefill, ordinary decoding, speculative decoding, sampling, and statistics. |

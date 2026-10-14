@@ -19,6 +19,12 @@ pub(super) enum RequestTermination {
     Aborted,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FlightReleaseCondition {
+    RequestCompletion,
+    PrefixPublication,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct FlightId(u64);
 
@@ -79,6 +85,9 @@ impl Flight {
 /// Flight membership is independent of the matching strategy. The initial exact-input index can
 /// later be replaced by prefix-aware matching without changing request or flight bookkeeping.
 pub(super) struct PrefixCacheFlightCoordinator {
+    // Read by the execution integration once prefix-publication release is connected.
+    #[allow(dead_code)]
+    release_condition: FlightReleaseCondition,
     next_flight_id: FlightId,
     flights: HashMap<FlightId, Flight>,
     request_flight_ids: HashMap<u64, FlightId>,
@@ -90,12 +99,18 @@ impl PrefixCacheFlightCoordinator {
     pub(super) fn from_policy(policy: PrefixCacheCoordinationPolicy) -> Option<Self> {
         match policy {
             PrefixCacheCoordinationPolicy::Independent => None,
-            PrefixCacheCoordinationPolicy::ExactInputSingleFlight => Some(Self::new()),
+            PrefixCacheCoordinationPolicy::ExactInputSingleFlightUntilRequestCompletion => {
+                Some(Self::new(FlightReleaseCondition::RequestCompletion))
+            }
+            PrefixCacheCoordinationPolicy::ExactInputSingleFlightUntilPrefixPublished => {
+                Some(Self::new(FlightReleaseCondition::PrefixPublication))
+            }
         }
     }
 
-    fn new() -> Self {
+    fn new(release_condition: FlightReleaseCondition) -> Self {
         Self {
+            release_condition,
             next_flight_id: FlightId(0),
             flights: HashMap::new(),
             request_flight_ids: HashMap::new(),
@@ -250,15 +265,28 @@ mod tests {
             PrefixCacheCoordinationPolicy::Independent
         )
         .is_none());
-        assert!(PrefixCacheFlightCoordinator::from_policy(
-            PrefixCacheCoordinationPolicy::ExactInputSingleFlight
+        let completion_coordinator = PrefixCacheFlightCoordinator::from_policy(
+            PrefixCacheCoordinationPolicy::ExactInputSingleFlightUntilRequestCompletion,
         )
-        .is_some());
+        .unwrap();
+        assert_eq!(
+            completion_coordinator.release_condition,
+            FlightReleaseCondition::RequestCompletion
+        );
+        let publication_coordinator = PrefixCacheFlightCoordinator::from_policy(
+            PrefixCacheCoordinationPolicy::ExactInputSingleFlightUntilPrefixPublished,
+        )
+        .unwrap();
+        assert_eq!(
+            publication_coordinator.release_condition,
+            FlightReleaseCondition::PrefixPublication
+        );
     }
 
     #[test]
     fn adds_leaders_and_ordered_followers_by_exact_input() -> Result<()> {
-        let mut coordinator = PrefixCacheFlightCoordinator::new();
+        let mut coordinator =
+            PrefixCacheFlightCoordinator::new(FlightReleaseCondition::RequestCompletion);
 
         assert_eq!(
             coordinator.add_request(1, &[10, 20])?,
@@ -277,7 +305,8 @@ mod tests {
 
     #[test]
     fn completed_leader_releases_followers_and_drains_flight() -> Result<()> {
-        let mut coordinator = PrefixCacheFlightCoordinator::new();
+        let mut coordinator =
+            PrefixCacheFlightCoordinator::new(FlightReleaseCondition::RequestCompletion);
         coordinator.add_request(1, &[10, 20])?;
         coordinator.add_request(2, &[10, 20])?;
         coordinator.add_request(3, &[10, 20])?;
@@ -305,7 +334,8 @@ mod tests {
 
     #[test]
     fn aborted_leader_promotes_oldest_follower() -> Result<()> {
-        let mut coordinator = PrefixCacheFlightCoordinator::new();
+        let mut coordinator =
+            PrefixCacheFlightCoordinator::new(FlightReleaseCondition::RequestCompletion);
         coordinator.add_request(1, &[10, 20])?;
         coordinator.add_request(2, &[10, 20])?;
         coordinator.add_request(3, &[10, 20])?;
@@ -328,7 +358,8 @@ mod tests {
 
     #[test]
     fn aborted_follower_preserves_the_flight() -> Result<()> {
-        let mut coordinator = PrefixCacheFlightCoordinator::new();
+        let mut coordinator =
+            PrefixCacheFlightCoordinator::new(FlightReleaseCondition::RequestCompletion);
         coordinator.add_request(1, &[10, 20])?;
         coordinator.add_request(2, &[10, 20])?;
         coordinator.add_request(3, &[10, 20])?;
@@ -346,7 +377,8 @@ mod tests {
 
     #[test]
     fn rejects_invalid_request_lifecycle() -> Result<()> {
-        let mut coordinator = PrefixCacheFlightCoordinator::new();
+        let mut coordinator =
+            PrefixCacheFlightCoordinator::new(FlightReleaseCondition::RequestCompletion);
         coordinator.add_request(1, &[10, 20])?;
         coordinator.add_request(2, &[10, 20])?;
 

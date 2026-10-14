@@ -121,7 +121,8 @@ fn run_worker(
                             stream_output,
                         });
                 info!(
-                    "Input preprocessing state: request_id={request_id} worker_index={worker_index} status=finished success={}",
+                    "Input preprocessing state: request_id={request_id} \
+                     worker_index={worker_index} status=finished success={}",
                     result.is_ok()
                 );
                 // A dropped receiver means the RPC was cancelled while preprocessing was running;

@@ -268,7 +268,7 @@ impl PrefixCacheCoordinationPolicy {
             "prefix-cache coordination policy must be specified"
         );
         anyhow::ensure!(
-            self != Self::ExactInputSingleFlight || kv_cache_type == KvCacheType::PagedPrefix,
+            matches!(self, Self::Independent) || kv_cache_type == KvCacheType::PagedPrefix,
             "exact-input single-flight requires paged-prefix KV caching"
         );
         Ok(())
@@ -278,7 +278,12 @@ impl PrefixCacheCoordinationPolicy {
         match self {
             Self::Unspecified => "unspecified",
             Self::Independent => "independent",
-            Self::ExactInputSingleFlight => "exact-input-single-flight",
+            Self::ExactInputSingleFlightUntilRequestCompletion => {
+                "exact-input-single-flight-until-request-completion"
+            }
+            Self::ExactInputSingleFlightUntilPrefixPublished => {
+                "exact-input-single-flight-until-prefix-published"
+            }
         }
     }
 }
@@ -445,8 +450,8 @@ mod tests {
             max_batched_token_count: 1_024,
             max_active_request_count: 8,
             scheduling_policy: SchedulingPolicy::ShortestPrefillFirst.into(),
-            prefix_cache_coordination_policy: PrefixCacheCoordinationPolicy::ExactInputSingleFlight
-                .into(),
+            prefix_cache_coordination_policy:
+                PrefixCacheCoordinationPolicy::ExactInputSingleFlightUntilRequestCompletion.into(),
         };
 
         assert_eq!(
@@ -454,7 +459,7 @@ mod tests {
             "Maximum batched token count: 1,024\n\
              Maximum active request count: 8\n\
              Scheduling policy: shortest-prefill-first\n\
-             Prefix cache coordination policy: exact-input-single-flight\n"
+             Prefix cache coordination policy: exact-input-single-flight-until-request-completion\n"
         );
     }
 

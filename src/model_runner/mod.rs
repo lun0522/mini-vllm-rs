@@ -293,7 +293,8 @@ impl fmt::Display for SchedulerConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PrefixCacheCoordinationPolicy {
     Independent,
-    ExactInputSingleFlight,
+    ExactInputSingleFlightUntilRequestCompletion,
+    ExactInputSingleFlightUntilPrefixPublished,
 }
 
 impl From<PrefixCacheCoordinationPolicyProto> for PrefixCacheCoordinationPolicy {
@@ -303,8 +304,11 @@ impl From<PrefixCacheCoordinationPolicyProto> for PrefixCacheCoordinationPolicy 
                 "validated scheduler configuration should specify a prefix-cache coordination policy"
             ),
             PrefixCacheCoordinationPolicyProto::Independent => Self::Independent,
-            PrefixCacheCoordinationPolicyProto::ExactInputSingleFlight => {
-                Self::ExactInputSingleFlight
+            PrefixCacheCoordinationPolicyProto::ExactInputSingleFlightUntilRequestCompletion => {
+                Self::ExactInputSingleFlightUntilRequestCompletion
+            }
+            PrefixCacheCoordinationPolicyProto::ExactInputSingleFlightUntilPrefixPublished => {
+                Self::ExactInputSingleFlightUntilPrefixPublished
             }
         }
     }
@@ -314,7 +318,12 @@ impl From<PrefixCacheCoordinationPolicy> for PrefixCacheCoordinationPolicyProto 
     fn from(policy: PrefixCacheCoordinationPolicy) -> Self {
         match policy {
             PrefixCacheCoordinationPolicy::Independent => Self::Independent,
-            PrefixCacheCoordinationPolicy::ExactInputSingleFlight => Self::ExactInputSingleFlight,
+            PrefixCacheCoordinationPolicy::ExactInputSingleFlightUntilRequestCompletion => {
+                Self::ExactInputSingleFlightUntilRequestCompletion
+            }
+            PrefixCacheCoordinationPolicy::ExactInputSingleFlightUntilPrefixPublished => {
+                Self::ExactInputSingleFlightUntilPrefixPublished
+            }
         }
     }
 }
@@ -323,7 +332,12 @@ impl fmt::Display for PrefixCacheCoordinationPolicy {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Independent => "independent",
-            Self::ExactInputSingleFlight => "exact-input-single-flight",
+            Self::ExactInputSingleFlightUntilRequestCompletion => {
+                "exact-input-single-flight-until-request-completion"
+            }
+            Self::ExactInputSingleFlightUntilPrefixPublished => {
+                "exact-input-single-flight-until-prefix-published"
+            }
         })
     }
 }
@@ -483,7 +497,11 @@ mod tests {
 
         assert_eq!(
             config.to_string(),
-            "max_batched_tokens=512 max_active_requests=4 scheduling_policy=first-come-first-served prefix_cache_coordination_policy=independent"
+            concat!(
+                "max_batched_tokens=512 max_active_requests=4 ",
+                "scheduling_policy=first-come-first-served ",
+                "prefix_cache_coordination_policy=independent",
+            )
         );
     }
 
@@ -493,7 +511,8 @@ mod tests {
             max_batched_token_count: 1_024,
             max_active_request_count: 8,
             scheduling_policy: SchedulingPolicy::ShortestPrefillFirst,
-            prefix_cache_coordination_policy: PrefixCacheCoordinationPolicy::ExactInputSingleFlight,
+            prefix_cache_coordination_policy:
+                PrefixCacheCoordinationPolicy::ExactInputSingleFlightUntilRequestCompletion,
         };
 
         assert_eq!(

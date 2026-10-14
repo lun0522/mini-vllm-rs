@@ -257,7 +257,13 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         Tokenizer::from_bytes(format!(
-            r#"{{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"normalizer":null,"pre_tokenizer":null,"post_processor":null,"decoder":null,"model":{{"type":"WordLevel","vocab":{{{vocabulary}}},"unk_token":"[UNK]"}}}}"#
+            concat!(
+                r#"{{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"#,
+                r#""normalizer":null,"pre_tokenizer":null,"post_processor":null,"decoder":null,"#,
+                r#""model":{{"type":"WordLevel","vocab":{{{vocabulary}}},"#,
+                r#""unk_token":"[UNK]"}}}}"#,
+            ),
+            vocabulary = vocabulary,
         ))
         .unwrap()
     }

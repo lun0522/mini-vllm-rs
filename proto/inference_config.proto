@@ -140,6 +140,8 @@ enum PrefixCacheCoordinationPolicy {
   PREFIX_CACHE_COORDINATION_POLICY_UNSPECIFIED = 0;
   // Allows each request to populate the prefix cache independently.
   PREFIX_CACHE_COORDINATION_POLICY_INDEPENDENT = 1;
-  // Makes requests with identical inputs wait for one leader to populate the prefix cache.
-  PREFIX_CACHE_COORDINATION_POLICY_EXACT_INPUT_SINGLE_FLIGHT = 2;
+  // Makes requests with identical inputs wait until one leader completes its request.
+  PREFIX_CACHE_COORDINATION_POLICY_EXACT_INPUT_SINGLE_FLIGHT_UNTIL_REQUEST_COMPLETION = 2;
+  // Makes requests with identical inputs wait until one leader publishes their shared prefix.
+  PREFIX_CACHE_COORDINATION_POLICY_EXACT_INPUT_SINGLE_FLIGHT_UNTIL_PREFIX_PUBLISHED = 3;
 }

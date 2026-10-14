@@ -310,7 +310,12 @@ mod tests {
             &["mini-vllm-rs"],
             &[
                 "--scheduler-config",
-                "max_batched_token_count: 1024 max_active_request_count: 8 scheduling_policy: SCHEDULING_POLICY_SHORTEST_PREFILL_FIRST prefix_cache_coordination_policy: PREFIX_CACHE_COORDINATION_POLICY_EXACT_INPUT_SINGLE_FLIGHT",
+                concat!(
+                    "max_batched_token_count: 1024 max_active_request_count: 8 ",
+                    "scheduling_policy: SCHEDULING_POLICY_SHORTEST_PREFILL_FIRST ",
+                    "prefix_cache_coordination_policy: ",
+                    "PREFIX_CACHE_COORDINATION_POLICY_EXACT_INPUT_SINGLE_FLIGHT_UNTIL_REQUEST_COMPLETION",
+                ),
             ],
         )
         .expect("scheduler arguments should parse");
@@ -323,7 +328,7 @@ mod tests {
         );
         assert_eq!(
             args.scheduler_config.prefix_cache_coordination_policy,
-            PrefixCacheCoordinationPolicyProto::ExactInputSingleFlight as i32
+            PrefixCacheCoordinationPolicyProto::ExactInputSingleFlightUntilRequestCompletion as i32
         );
     }
 
@@ -333,7 +338,13 @@ mod tests {
             &["mini-vllm-rs"],
             &[
                 "--kv-cache-config",
-                "kv_cache_type: KV_CACHE_TYPE_PAGED_PREFIX per_page_token_count: 32 target_kv_cache_size_bytes: 1073741824 draft_kv_cache_size_bytes: 268435456 prefix_cache_publication_policy: PREFIX_CACHE_PUBLICATION_POLICY_INCREMENTAL",
+                concat!(
+                    "kv_cache_type: KV_CACHE_TYPE_PAGED_PREFIX per_page_token_count: 32 ",
+                    "target_kv_cache_size_bytes: 1073741824 ",
+                    "draft_kv_cache_size_bytes: 268435456 ",
+                    "prefix_cache_publication_policy: ",
+                    "PREFIX_CACHE_PUBLICATION_POLICY_INCREMENTAL",
+                ),
             ],
         )
         .expect("KV-cache arguments should parse");
@@ -428,7 +439,7 @@ mod tests {
                 .expect("default arguments should parse"),
         );
         args.scheduler_config.prefix_cache_coordination_policy =
-            PrefixCacheCoordinationPolicyProto::ExactInputSingleFlight.into();
+            PrefixCacheCoordinationPolicyProto::ExactInputSingleFlightUntilRequestCompletion.into();
 
         let error = args.validate().unwrap_err();
 
@@ -456,7 +467,11 @@ mod tests {
             &["mini-vllm-rs"],
             &[
                 "--draft-model",
-                "model { model_id: 'draft' model_filename: 'draft.gguf' tokenizer_id: 'tokenizer' } token_count_policy { fixed { draft_token_count: 6 } }",
+                concat!(
+                    "model { model_id: 'draft' model_filename: 'draft.gguf' ",
+                    "tokenizer_id: 'tokenizer' } ",
+                    "token_count_policy { fixed { draft_token_count: 6 } }",
+                ),
             ],
         )
         .expect("draft model configuration should parse");
@@ -500,7 +515,13 @@ mod tests {
             &["mini-vllm-rs"],
             &[
                 "--draft-model",
-                "model { model_id: 'draft' model_filename: 'draft.gguf' tokenizer_id: 'tokenizer' } token_count_policy { acceptance_rate { initial_draft_token_count: 4 decrease_threshold: 0.4 increase_threshold: 0.8 minimum_draft_token_count: 1 maximum_draft_token_count: 8 } }",
+                concat!(
+                    "model { model_id: 'draft' model_filename: 'draft.gguf' ",
+                    "tokenizer_id: 'tokenizer' } token_count_policy { acceptance_rate { ",
+                    "initial_draft_token_count: 4 decrease_threshold: 0.4 ",
+                    "increase_threshold: 0.8 minimum_draft_token_count: 1 ",
+                    "maximum_draft_token_count: 8 } }",
+                ),
             ],
         )
         .expect("draft model configuration should parse");
@@ -520,7 +541,12 @@ mod tests {
             &["mini-vllm-rs"],
             &[
                 "--draft-model",
-                "model { model_id: 'draft' model_filename: 'draft.gguf' tokenizer_id: 'tokenizer' } token_count_policy { accepted_length { initial_draft_token_count: 4 smoothing_factor: 0.2 minimum_draft_token_count: 1 maximum_draft_token_count: 12 } }",
+                concat!(
+                    "model { model_id: 'draft' model_filename: 'draft.gguf' ",
+                    "tokenizer_id: 'tokenizer' } token_count_policy { accepted_length { ",
+                    "initial_draft_token_count: 4 smoothing_factor: 0.2 ",
+                    "minimum_draft_token_count: 1 maximum_draft_token_count: 12 } }",
+                ),
             ],
         )
         .expect("draft model configuration should parse");

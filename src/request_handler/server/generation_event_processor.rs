@@ -92,9 +92,12 @@ mod tests {
     use tokenizers::Tokenizer;
 
     fn processor(stream_output: bool) -> GenerationEventProcessor {
-        let tokenizer = Tokenizer::from_bytes(
-            r#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"normalizer":null,"pre_tokenizer":null,"post_processor":null,"decoder":null,"model":{"type":"WordLevel","vocab":{"[UNK]":0,"hello":1,"world":2},"unk_token":"[UNK]"}}"#,
-        )
+        let tokenizer = Tokenizer::from_bytes(concat!(
+            r#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"#,
+            r#""normalizer":null,"pre_tokenizer":null,"post_processor":null,"decoder":null,"#,
+            r#""model":{"type":"WordLevel","vocab":{"[UNK]":0,"hello":1,"world":2},"#,
+            r#""unk_token":"[UNK]"}}"#,
+        ))
         .unwrap();
         GenerationEventProcessor::new(IncrementalTokenDecoder::new(tokenizer), stream_output)
     }

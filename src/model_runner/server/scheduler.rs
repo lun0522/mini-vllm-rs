@@ -421,7 +421,7 @@ mod tests {
                 max_active_request_count: 2,
                 scheduling_policy: SchedulingPolicy::FirstComeFirstServed,
                 prefix_cache_coordination_policy:
-                    PrefixCacheCoordinationPolicy::ExactInputSingleFlight,
+                    PrefixCacheCoordinationPolicy::ExactInputSingleFlightUntilRequestCompletion,
             },
             KvCacheGeometry {
                 token_capacity: 4096,
