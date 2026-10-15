@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="420" viewBox="0 0 900 420" role="img" aria-labelledby="title desc">
+  <title id="title">Decode-time-arrival latency reduction from incremental publication</title>
+  <desc id="desc">Line chart showing mean time to first token and wall-time reductions versus completion-only publication for independent decode-time arrivals at concurrency two, four, and eight.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
+    .title { font-size: 18px; font-weight: 600; }
+    .subtitle { font-size: 12px; fill: #57606a; }
+    .axis { font-size: 13px; fill: #57606a; }
+    .tick { font-size: 12px; fill: #57606a; }
+    .value { font-size: 12px; font-weight: 600; }
+    .grid { stroke: #d0d7de; stroke-width: 1; }
+    .series { fill: none; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+  </style>
+  <rect width="900" height="420" fill="#ffffff"/>
+  <text x="450" y="28" text-anchor="middle" class="title">Decode-Time-Arrival Latency Reduction</text>
+  <text x="450" y="48" text-anchor="middle" class="subtitle">Incremental versus completion-only publication with independent requests</text>
+
+  <line x1="90" y1="330" x2="830" y2="330" class="grid"/>
+  <line x1="90" y1="276" x2="830" y2="276" class="grid"/>
+  <line x1="90" y1="222" x2="830" y2="222" class="grid"/>
+  <line x1="90" y1="168" x2="830" y2="168" class="grid"/>
+  <line x1="90" y1="114" x2="830" y2="114" class="grid"/>
+  <line x1="90" y1="60" x2="830" y2="60" class="grid"/>
+  <text x="78" y="334" text-anchor="end" class="tick">0%</text>
+  <text x="78" y="280" text-anchor="end" class="tick">20%</text>
+  <text x="78" y="226" text-anchor="end" class="tick">40%</text>
+  <text x="78" y="172" text-anchor="end" class="tick">60%</text>
+  <text x="78" y="118" text-anchor="end" class="tick">80%</text>
+  <text x="78" y="64" text-anchor="end" class="tick">100%</text>
+
+  <line x1="90" y1="330" x2="830" y2="330" stroke="#57606a"/>
+  <line x1="90" y1="60" x2="90" y2="330" stroke="#57606a"/>
+  <text x="150" y="352" text-anchor="middle" class="tick">2</text>
+  <text x="460" y="352" text-anchor="middle" class="tick">4</text>
+  <text x="770" y="352" text-anchor="middle" class="tick">8</text>
+  <text x="460" y="380" text-anchor="middle" class="axis">Concurrent requests</text>
+  <text x="24" y="195" text-anchor="middle" class="axis" transform="rotate(-90 24 195)">Reduction versus completion-only</text>
+
+  <polyline points="150,202 460,99 770,79" class="series" stroke="#2563eb"/>
+  <polyline points="150,295 460,274 770,246" class="series" stroke="#d97706"/>
+  <g fill="#2563eb"><circle cx="150" cy="202" r="5"/><circle cx="460" cy="99" r="5"/><circle cx="770" cy="79" r="5"/></g>
+  <g fill="#d97706"><circle cx="150" cy="295" r="5"/><circle cx="460" cy="274" r="5"/><circle cx="770" cy="246" r="5"/></g>
+  <g class="value" text-anchor="middle">
+    <text x="150" y="188">47.5%</text><text x="460" y="85">85.5%</text><text x="770" y="65">93.0%</text>
+    <text x="150" y="317">13.1%</text><text x="460" y="296">20.9%</text><text x="770" y="268">31.2%</text>
+  </g>
+
+  <line x1="308" y1="405" x2="332" y2="405" class="series" stroke="#2563eb"/><circle cx="320" cy="405" r="4" fill="#2563eb"/>
+  <text x="340" y="409" class="tick">Mean TTFT</text>
+  <line x1="472" y1="405" x2="496" y2="405" class="series" stroke="#d97706"/><circle cx="484" cy="405" r="4" fill="#d97706"/>
+  <text x="504" y="409" class="tick">Wall time</text>
+</svg>

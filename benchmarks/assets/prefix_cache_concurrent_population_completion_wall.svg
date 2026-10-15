@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="420" viewBox="0 0 900 420" role="img" aria-labelledby="title desc">
+  <title id="title">Wall-time reduction from completion-gated single flight by output length</title>
+  <desc id="desc">Line chart showing wall-time reduction versus independent execution for completion-gated single flight at concurrency two, four, and eight with 16-token and 128-token outputs.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
+    .title { font-size: 18px; font-weight: 600; }
+    .subtitle { font-size: 12px; fill: #57606a; }
+    .axis { font-size: 13px; fill: #57606a; }
+    .tick { font-size: 12px; fill: #57606a; }
+    .value { font-size: 12px; font-weight: 600; }
+    .grid { stroke: #d0d7de; stroke-width: 1; }
+    .series { fill: none; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+  </style>
+  <rect width="900" height="420" fill="#ffffff"/>
+  <text x="450" y="28" text-anchor="middle" class="title">Completion-Gated Single-Flight Wall-Time Reduction</text>
+  <text x="450" y="48" text-anchor="middle" class="subtitle">Relative to completion-only publication with independent execution</text>
+
+  <line x1="90" y1="330" x2="830" y2="330" class="grid"/>
+  <line x1="90" y1="263" x2="830" y2="263" class="grid"/>
+  <line x1="90" y1="195" x2="830" y2="195" class="grid"/>
+  <line x1="90" y1="128" x2="830" y2="128" class="grid"/>
+  <line x1="90" y1="60" x2="830" y2="60" class="grid"/>
+  <text x="78" y="334" text-anchor="end" class="tick">0%</text>
+  <text x="78" y="267" text-anchor="end" class="tick">20%</text>
+  <text x="78" y="199" text-anchor="end" class="tick">40%</text>
+  <text x="78" y="132" text-anchor="end" class="tick">60%</text>
+  <text x="78" y="64" text-anchor="end" class="tick">80%</text>
+
+  <line x1="90" y1="330" x2="830" y2="330" stroke="#57606a"/>
+  <line x1="90" y1="60" x2="90" y2="330" stroke="#57606a"/>
+  <text x="150" y="352" text-anchor="middle" class="tick">2</text>
+  <text x="460" y="352" text-anchor="middle" class="tick">4</text>
+  <text x="770" y="352" text-anchor="middle" class="tick">8</text>
+  <text x="460" y="380" text-anchor="middle" class="axis">Concurrent requests</text>
+  <text x="24" y="195" text-anchor="middle" class="axis" transform="rotate(-90 24 195)">Wall-time reduction</text>
+
+  <polyline points="150,212 460,143 770,97" class="series" stroke="#2563eb"/>
+  <polyline points="150,292 460,265 770,243" class="series" stroke="#d97706"/>
+  <g fill="#2563eb"><circle cx="150" cy="212" r="5"/><circle cx="460" cy="143" r="5"/><circle cx="770" cy="97" r="5"/></g>
+  <g fill="#d97706"><circle cx="150" cy="292" r="5"/><circle cx="460" cy="265" r="5"/><circle cx="770" cy="243" r="5"/></g>
+  <g class="value" text-anchor="middle">
+    <text x="150" y="198">34.9%</text><text x="460" y="129">55.3%</text><text x="770" y="83">69.0%</text>
+    <text x="150" y="314">11.4%</text><text x="460" y="287">19.3%</text><text x="770" y="265">25.7%</text>
+  </g>
+
+  <line x1="282" y1="405" x2="306" y2="405" class="series" stroke="#2563eb"/><circle cx="294" cy="405" r="4" fill="#2563eb"/>
+  <text x="314" y="409" class="tick">16-token output</text>
+  <line x1="474" y1="405" x2="498" y2="405" class="series" stroke="#d97706"/><circle cx="486" cy="405" r="4" fill="#d97706"/>
+  <text x="506" y="409" class="tick">128-token output</text>
+</svg>

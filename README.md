@@ -65,6 +65,9 @@ order:
 9. [Prefix-cache reuse](benchmarks/prefix_cache_reuse.md) measures overlap,
    concurrent warm reuse, finish-time publication, and working-set churn
    against an ordinary paged-cache baseline.
+10. [Prefix-cache concurrent population](benchmarks/prefix_cache_concurrent_population.md)
+    compares incremental publication and exact-input single-flight policies for
+    simultaneous bursts and decode-time arrivals.
 
 ## Run
 

@@ -79,6 +79,8 @@ scheduling decisions.
 
 ## Results
 
+### Metrics
+
 - **TTFT:** Time from client submission until the first streamed output.
 - **Follower spread:** Difference between the latest and earliest follower
   TTFT.

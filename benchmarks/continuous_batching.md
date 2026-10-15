@@ -62,6 +62,8 @@ span multiple scheduling decisions while the anchor continues decoding.
 
 ## Results
 
+### Metrics
+
 - **Wall time:** Time from anchor submission until every measured request
   completes.
 - **Aggregate output throughput:** Total output tokens divided by wall time.

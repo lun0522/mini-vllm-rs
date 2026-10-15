@@ -71,6 +71,8 @@ pages that another request has already indexed.
 
 ## Results
 
+### Metrics
+
 - **Prefill:** Model-side processing of input tokens that were not restored
   from cache, excluding queueing and request setup.
 - **TTFT:** Time from client submission until the first streamed output,

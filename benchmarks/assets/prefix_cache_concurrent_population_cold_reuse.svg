@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="420" viewBox="0 0 900 420" role="img" aria-labelledby="title desc">
+  <title id="title">Opportunistic cold-burst reuse with incremental publication</title>
+  <desc id="desc">Dot chart showing restored-token totals from each of three independent simultaneous cold-burst runs with 128-token outputs at concurrency two, four, and eight.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
+    .title { font-size: 18px; font-weight: 600; }
+    .subtitle { font-size: 12px; fill: #57606a; }
+    .axis { font-size: 13px; fill: #57606a; }
+    .tick { font-size: 12px; fill: #57606a; }
+    .value { font-size: 12px; font-weight: 600; }
+    .grid { stroke: #d0d7de; stroke-width: 1; }
+  </style>
+  <rect width="900" height="420" fill="#ffffff"/>
+  <text x="450" y="28" text-anchor="middle" class="title">Independent Cold-Burst Prefix Reuse</text>
+  <text x="450" y="48" text-anchor="middle" class="subtitle">128-token output with incremental publication; each dot is one run</text>
+
+  <line x1="90" y1="330" x2="830" y2="330" class="grid"/>
+  <line x1="90" y1="263" x2="830" y2="263" class="grid"/>
+  <line x1="90" y1="195" x2="830" y2="195" class="grid"/>
+  <line x1="90" y1="128" x2="830" y2="128" class="grid"/>
+  <line x1="90" y1="60" x2="830" y2="60" class="grid"/>
+  <text x="78" y="334" text-anchor="end" class="tick">0</text>
+  <text x="78" y="267" text-anchor="end" class="tick">900</text>
+  <text x="78" y="199" text-anchor="end" class="tick">1,800</text>
+  <text x="78" y="132" text-anchor="end" class="tick">2,700</text>
+  <text x="78" y="64" text-anchor="end" class="tick">3,600</text>
+
+  <line x1="90" y1="330" x2="830" y2="330" stroke="#57606a"/>
+  <line x1="90" y1="60" x2="90" y2="330" stroke="#57606a"/>
+  <text x="150" y="352" text-anchor="middle" class="tick">2</text>
+  <text x="460" y="352" text-anchor="middle" class="tick">4</text>
+  <text x="770" y="352" text-anchor="middle" class="tick">8</text>
+  <text x="460" y="380" text-anchor="middle" class="axis">Concurrent requests</text>
+  <text x="24" y="195" text-anchor="middle" class="axis" transform="rotate(-90 24 195)">Restored tokens per burst</text>
+
+  <g fill="#2563eb">
+    <circle cx="138" cy="330" r="6"/><circle cx="150" cy="330" r="6"/><circle cx="162" cy="290" r="6"/>
+    <circle cx="448" cy="251" r="6"/><circle cx="460" cy="211" r="6"/><circle cx="472" cy="211" r="6"/>
+    <circle cx="758" cy="172" r="6"/><circle cx="770" cy="172" r="6"/><circle cx="782" cy="92" r="6"/>
+  </g>
+  <g class="value" text-anchor="middle">
+    <text x="150" y="274">0, 0, 528</text>
+    <text x="460" y="195">1,056, 1,584, 1,584</text>
+    <text x="770" y="76">2,112, 2,112, 3,168</text>
+  </g>
+</svg>

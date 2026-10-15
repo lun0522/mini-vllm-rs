@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="420" viewBox="0 0 900 420" role="img" aria-labelledby="title desc">
+  <title id="title">Decode-time-arrival latency reduction from prefix-publication release</title>
+  <desc id="desc">Zero-centered line chart showing the percentage reduction in mean time-to-first-token and maximum end-to-end latency when releasing at prefix publication rather than request completion at concurrency two, four, and eight. Higher values indicate larger latency reductions; negative values indicate regressions.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
+    .title { font-size: 18px; font-weight: 600; }
+    .subtitle { font-size: 12px; fill: #57606a; }
+    .axis { font-size: 13px; fill: #57606a; }
+    .tick { font-size: 12px; fill: #57606a; }
+    .value { font-size: 12px; font-weight: 600; }
+    .grid { stroke: #d0d7de; stroke-width: 1; }
+    .zero { stroke: #57606a; stroke-width: 1.5; stroke-dasharray: 4 3; }
+    .series { fill: none; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+  </style>
+  <rect width="900" height="420" fill="#ffffff"/>
+  <text x="450" y="28" text-anchor="middle" class="title">Decode-Time-Arrival Latency Reduction from Earlier Release</text>
+  <text x="450" y="48" text-anchor="middle" class="subtitle">Prefix-publication versus request-completion release; higher is better</text>
+
+  <line x1="90" y1="330" x2="830" y2="330" class="grid"/>
+  <line x1="90" y1="285" x2="830" y2="285" class="grid"/>
+  <line x1="90" y1="240" x2="830" y2="240" class="grid"/>
+  <line x1="90" y1="195" x2="830" y2="195" class="grid"/>
+  <line x1="90" y1="150" x2="830" y2="150" class="grid"/>
+  <line x1="90" y1="285" x2="830" y2="285" class="zero"/>
+  <line x1="90" y1="60" x2="830" y2="60" class="grid"/>
+  <text x="78" y="334" text-anchor="end" class="tick">−20%</text>
+  <text x="78" y="289" text-anchor="end" class="tick">0%</text>
+  <text x="78" y="244" text-anchor="end" class="tick">20%</text>
+  <text x="78" y="199" text-anchor="end" class="tick">40%</text>
+  <text x="78" y="154" text-anchor="end" class="tick">60%</text>
+  <text x="78" y="109" text-anchor="end" class="tick">80%</text>
+  <text x="78" y="64" text-anchor="end" class="tick">100%</text>
+
+  <line x1="90" y1="60" x2="90" y2="330" stroke="#57606a"/>
+  <text x="150" y="352" text-anchor="middle" class="tick">2</text>
+  <text x="460" y="352" text-anchor="middle" class="tick">4</text>
+  <text x="770" y="352" text-anchor="middle" class="tick">8</text>
+  <text x="460" y="380" text-anchor="middle" class="axis">Concurrent requests</text>
+  <text x="24" y="195" text-anchor="middle" class="axis" transform="rotate(-90 24 195)">Latency reduction versus completion release</text>
+
+  <polyline points="150,123 460,94 770,89" class="series" stroke="#2563eb"/>
+  <polyline points="150,317 460,293 770,271" class="series" stroke="#d97706"/>
+  <g fill="#2563eb"><circle cx="150" cy="123" r="5"/><circle cx="460" cy="94" r="5"/><circle cx="770" cy="89" r="5"/></g>
+  <g fill="#d97706"><circle cx="150" cy="317" r="5"/><circle cx="460" cy="293" r="5"/><circle cx="770" cy="271" r="5"/></g>
+  <g class="value" text-anchor="middle">
+    <text x="150" y="116">72.0%</text><text x="460" y="87">85.0%</text><text x="770" y="82">87.2%</text>
+    <text x="150" y="312">−14.4%</text><text x="460" y="310">−3.4%</text><text x="770" y="264">6.3%</text>
+  </g>
+
+  <line x1="300" y1="405" x2="324" y2="405" class="series" stroke="#2563eb"/><circle cx="312" cy="405" r="4" fill="#2563eb"/>
+  <text x="332" y="409" class="tick">Mean TTFT</text>
+  <line x1="464" y1="405" x2="488" y2="405" class="series" stroke="#d97706"/><circle cx="476" cy="405" r="4" fill="#d97706"/>
+  <text x="496" y="409" class="tick">Maximum E2E</text>
+</svg>
