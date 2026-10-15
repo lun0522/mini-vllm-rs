@@ -145,7 +145,7 @@ The conversions become negligible for larger matmuls: multiplication is
 
 The resulting overall metrics for F16-QMatMul relative to F32 are:
 
-![Overall F16-QMatMul metrics relative to F32](assets/cpu_activation_dtype_overall.svg)
+![Overall F16-QMatMul metrics relative to F32](assets/cpu_activation_dtype/overall.svg)
 
 F16-QMatMul's peak RSS increase is 13.70 MiB higher than native F16, likely
 because the workaround temporarily holds full F32 input and output tensors for
@@ -159,7 +159,7 @@ the KV cache.
 The representative trace confirms that the workaround fixes the original
 bottleneck in large-prefill `qmatmul` spans with the same operation labels:
 
-![Large-prefill quantized matmul latency relative to F32](assets/cpu_activation_dtype_qmatmul.svg)
+![Large-prefill quantized matmul latency relative to F32](assets/cpu_activation_dtype/qmatmul.svg)
 
 - Native F16 is roughly 3–4× slower than F32.
 - F16-QMatMul is within 0–10% of F32.
@@ -169,7 +169,7 @@ bottleneck in large-prefill `qmatmul` spans with the same operation labels:
 The workaround applies only to quantized matmul. Attention continues to operate
 directly on F16 activations:
 
-![Attention latency for F16-QMatMul relative to native F16](assets/cpu_activation_dtype_attention.svg)
+![Attention latency for F16-QMatMul relative to native F16](assets/cpu_activation_dtype/attention.svg)
 
 - Q × K and Attention × V remain effectively unchanged from native F16.
 - Cache, mask, and softmax operations show no material regression from native

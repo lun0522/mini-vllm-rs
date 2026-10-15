@@ -83,9 +83,9 @@ pages that another request has already indexed.
 
 ### Cached Prefill Stayed Flat as Input Length Grew
 
-![Baseline and prefix-cached prefill time by input token length](assets/prefix_cache_reuse_prefill.svg)
+![Baseline and prefix-cached prefill time by input token length](assets/prefix_cache_reuse/prefill.svg)
 
-![Baseline and prefix-cached TTFT by input token length](assets/prefix_cache_reuse_ttft.svg)
+![Baseline and prefix-cached TTFT by input token length](assets/prefix_cache_reuse/ttft.svg)
 
 - The zero-overlap probe restored no tokens and performed the same as ordinary
   paged caching.
@@ -104,7 +104,7 @@ avoided the corresponding prefill work as the reusable prefix grew.
 
 ### A Warm Prefix Benefited Concurrent Requests
 
-![Baseline and prefix-cached warm fan-out TTFT by concurrency](assets/prefix_cache_reuse_fanout_ttft.svg)
+![Baseline and prefix-cached warm fan-out TTFT by concurrency](assets/prefix_cache_reuse/fanout_ttft.svg)
 
 Every fan-out request restored 896 tokens. At concurrency 1 through 4, mean
 TTFT fell by **95.6–95.9%**. At concurrency 8, it still fell by **67.4%**, but
@@ -113,7 +113,7 @@ conservatively reserved each request's maximum 66-page demand. The remaining 3
 requests waited for admitted requests to finish, increasing mean TTFT to 3.161
 seconds even though all 8 found the warm prefix.
 
-![Baseline and prefix-cached warm fan-out maximum E2E by concurrency](assets/prefix_cache_reuse_fanout_e2e.svg)
+![Baseline and prefix-cached warm fan-out maximum E2E by concurrency](assets/prefix_cache_reuse/fanout_e2e.svg)
 
 Maximum E2E improved by 40.5–44.4%, substantially less than TTFT. These
 requests generated 128 tokens, so decode and continuous batching remained a
@@ -134,9 +134,9 @@ performed duplicate prefill work.
 The following warm group restored 944 tokens per request, reducing mean prefill
 and TTFT by **98.1%**.
 
-![Baseline and prefix-cached prefill time for cold and warm bursts](assets/prefix_cache_reuse_burst_prefill.svg)
+![Baseline and prefix-cached prefill time for cold and warm bursts](assets/prefix_cache_reuse/burst_prefill.svg)
 
-![Baseline and prefix-cached TTFT for cold and warm bursts](assets/prefix_cache_reuse_burst_ttft.svg)
+![Baseline and prefix-cached TTFT for cold and warm bursts](assets/prefix_cache_reuse/burst_ttft.svg)
 
 - **Cold burst:** Newly indexed 1,072 tokens; cached maximum E2E was 12,969.9 ±
   23.5 ms.
@@ -157,7 +157,7 @@ cycle returned to its first prefix, the later prefixes from the first cycle had
 already displaced it; continuing the cycle evicted the remaining earlier
 entries before they could be reused.
 
-![Prefill and TTFT reduction during working-set churn](assets/prefix_cache_reuse_churn_change.svg)
+![Prefill and TTFT reduction during working-set churn](assets/prefix_cache_reuse/churn_change.svg)
 
 Neither prefill nor TTFT changed materially in either cycle, confirming that
 the over-capacity access pattern prevented useful reuse.

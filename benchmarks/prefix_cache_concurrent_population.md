@@ -89,7 +89,7 @@ were still running, so later-scheduled peers sometimes attached them. The
 spread across runs shows that this reuse depended on execution order rather
 than a designated publisher.
 
-![Restored tokens from incremental publication during independent cold bursts](assets/prefix_cache_concurrent_population_cold_reuse.svg)
+![Restored tokens from incremental publication during independent cold bursts](assets/prefix_cache_concurrent_population/cold_reuse.svg)
 
 - At concurrency 2, both requests sometimes entered the same prefill batch and
   published only afterward, leaving neither able to reuse the other's pages.
@@ -105,7 +105,7 @@ restored the original request's 480-token aligned prompt.
 
 The resulting TTFT and wall-time reductions grew with concurrency:
 
-![TTFT and wall-time reductions from incremental publication for decode-time arrivals](assets/prefix_cache_concurrent_population_decode_time_arrivals.svg)
+![TTFT and wall-time reductions from incremental publication for decode-time arrivals](assets/prefix_cache_concurrent_population/decode_time_arrivals.svg)
 
 ### Single Flight Eliminated Duplicate Cold Prefix Population Deterministically
 
@@ -119,12 +119,12 @@ prefill fell by **93.5–96.7%** at concurrency 4 and 8. Wall-time improvement
 was smaller with longer output because followers remained blocked throughout
 the leader's decode.
 
-![Completion-gated single-flight wall-time reduction by output length](assets/prefix_cache_concurrent_population_completion_wall.svg)
+![Completion-gated single-flight wall-time reduction by output length](assets/prefix_cache_concurrent_population/completion_wall.svg)
 
 Completion gating avoided duplicate prompt prefill, but did not improve TTFT
 for every request or workload shape:
 
-![Independent and completion-gated single-flight TTFT for long-output bursts](assets/prefix_cache_concurrent_population_completion_ttft.svg)
+![Independent and completion-gated single-flight TTFT for long-output bursts](assets/prefix_cache_concurrent_population/completion_ttft.svg)
 
 As the chart shows, for **simultaneous bursts**:
 
@@ -146,7 +146,7 @@ followers to begin before the leader finished decoding.
 For simultaneous 128-token bursts, releasing at prefix publication prevented
 the leader's decode from increasingly delaying follower TTFT.
 
-![Long-output TTFT by single-flight release point](assets/prefix_cache_concurrent_population_release_ttft.svg)
+![Long-output TTFT by single-flight release point](assets/prefix_cache_concurrent_population/release_ttft.svg)
 
 For decode-time arrivals, the later requests arrived after the original leader
 had already published and closed its flight under prefix-publication release.
@@ -154,7 +154,7 @@ They therefore formed a new flight over an already warm prefix rather than being
 released from the original flight. Earlier release substantially improved TTFT,
 but maximum E2E did not improve uniformly:
 
-![Decode-time-arrival latency reduction from prefix-publication release](assets/prefix_cache_concurrent_population_release_tradeoff.svg)
+![Decode-time-arrival latency reduction from prefix-publication release](assets/prefix_cache_concurrent_population/release_tradeoff.svg)
 
 Completion gating lets the original request decode alone, whereas prefix-
 publication release overlaps its decode with the later requests. At concurrency

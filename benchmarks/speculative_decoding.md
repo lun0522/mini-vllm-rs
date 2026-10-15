@@ -73,7 +73,7 @@ We first compared target-only decoding with a fixed proposal length of 4.
 Fixed-4 was **12.5% slower** on the code-refactoring prompt and **52.7%
 slower** on the creative-writing prompt.
 
-![Target-only and fixed-4 decode throughput](assets/speculative_decoding_fixed.svg)
+![Target-only and fixed-4 decode throughput](assets/speculative_decoding/fixed.svg)
 
 The draft statistics explain why one proposal length does not fit both
 workloads:
@@ -101,7 +101,7 @@ work can cost more than the target steps it replaces.
 We then added the acceptance-rate and accepted-length policies. Both improved
 decode throughput over fixed-4 on both workloads:
 
-![Decode throughput by speculative policy](assets/speculative_decoding_policies.svg)
+![Decode throughput by speculative policy](assets/speculative_decoding/policies.svg)
 
 - For the code-refactoring prompt, the acceptance-rate policy exceeded
   target-only throughput by **38.3%**, while accepted length exceeded it by
@@ -113,9 +113,9 @@ decode throughput over fixed-4 on both workloads:
 The selected-count histograms were identical across all five runs and show how
 each policy adapted to the two workloads:
 
-![Selected draft-token counts for code refactoring](assets/speculative_decoding_code_histogram.svg)
+![Selected draft-token counts for code refactoring](assets/speculative_decoding/code_histogram.svg)
 
-![Selected draft-token counts for creative writing](assets/speculative_decoding_creative_histogram.svg)
+![Selected draft-token counts for creative writing](assets/speculative_decoding/creative_histogram.svg)
 
 - For the code-refactoring prompt, the acceptance-rate policy spent 61 of 66
   selections at the upper bound of 8, while the accepted-length policy spent
@@ -138,7 +138,7 @@ Exact throughput and latency measurements are in the
 [draft-token acceptance totals](#llama-draft-token-acceptance) shown
 separately.
 
-![Llama decode throughput by speculative policy](assets/speculative_decoding_llama_policies.svg)
+![Llama decode throughput by speculative policy](assets/speculative_decoding/llama_policies.svg)
 
 - The Llama draft was not uniformly less predictive. Compared with Qwen, its
   fixed-4 acceptance was lower for code refactoring (**96.9% vs. 98.6%**) but
@@ -160,9 +160,9 @@ The Llama histograms show the same split as Qwen for these prompts: the
 code-refactoring prompt favors longer proposals, while the creative-writing
 prompt favors shorter ones.
 
-![Llama selected draft-token counts for code refactoring](assets/speculative_decoding_llama_code_histogram.svg)
+![Llama selected draft-token counts for code refactoring](assets/speculative_decoding/llama_code_histogram.svg)
 
-![Llama selected draft-token counts for creative writing](assets/speculative_decoding_llama_creative_histogram.svg)
+![Llama selected draft-token counts for creative writing](assets/speculative_decoding/llama_creative_histogram.svg)
 
 ## Conclusions and Future Work
 

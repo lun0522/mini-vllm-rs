@@ -77,14 +77,14 @@ latency and sample standard deviations, are available in the
 
 ### Decode Throughput
 
-![F32 and F16 decode throughput by CPU attention implementation](assets/cpu_paged_attention_f16_decode.svg)
+![F32 and F16 decode throughput by CPU attention implementation](assets/cpu_paged_attention_f16/decode.svg)
 
 ### Peak RSS Increase
 
 Peak increase is measured during the long request relative to RSS after the
 warm-up and small-prefill requests.
 
-![F32 and F16 peak RSS increase by CPU attention implementation](assets/cpu_paged_attention_f16_rss.svg)
+![F32 and F16 peak RSS increase by CPU attention implementation](assets/cpu_paged_attention_f16/rss.svg)
 
 ## Analysis
 

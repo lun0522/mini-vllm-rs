@@ -90,7 +90,7 @@ scheduling decisions.
 
 ### A Short Request Behind a Long Prefill
 
-![Head-of-line follower TTFT by policy](assets/scheduling_policies_head_of_line_ttft.svg)
+![Head-of-line follower TTFT by policy](assets/scheduling_policies/head_of_line_ttft.svg)
 
 1. FCFS repeatedly allocated the post-decode budget to the oldest long prefill.
    The short follower did not begin decoding until almost the same time as that
@@ -113,7 +113,7 @@ both remained within 1.5% of FCFS.
 
 ### Fairness Among Long Prefills
 
-![Long-follower TTFT by policy and request](assets/scheduling_policies_long_fairness_ttft.svg)
+![Long-follower TTFT by policy and request](assets/scheduling_policies/long_fairness_ttft.svg)
 
 1. FCFS favored the oldest request: it reached its first token in 8.238 seconds,
    followed by the two peers at 16.063 and 24.565 seconds. This is useful when

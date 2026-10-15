@@ -68,14 +68,14 @@ request are available in the [appendix](#appendix-detailed-results).
 
 ### Decode Throughput at 512 and 2048 Output Tokens
 
-![F32 decode throughput at 512 and 2048 output tokens](assets/cpu_paged_attention_f32_decode.svg)
+![F32 decode throughput at 512 and 2048 output tokens](assets/cpu_paged_attention_f32/decode.svg)
 
 ### Peak RSS During the 512- and 2048-Token Requests
 
 Peak increase is measured relative to RSS after the 1-token warm-up and covers
 both subsequent requests.
 
-![F32 peak RSS increase during the post-warm-up requests](assets/cpu_paged_attention_f32_rss.svg)
+![F32 peak RSS increase during the post-warm-up requests](assets/cpu_paged_attention_f32/rss.svg)
 
 ## Analysis
 
