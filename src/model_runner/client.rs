@@ -2,10 +2,12 @@ use crate::model_runner::server;
 use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheConfig;
+use crate::model_runner::RequestOrchestratorConfig;
 use crate::model_runner::SchedulerConfig;
 use crate::models::model_downloader::ModelArtifacts;
 use crate::proto::inference_config::DraftModelRunnerConfig;
 use crate::proto::inference_config::KvCacheConfig as KvCacheConfigProto;
+use crate::proto::inference_config::RequestOrchestratorConfig as RequestOrchestratorConfigProto;
 use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
 use crate::proto::model_runner::model_runner_command::Command::Shutdown as ShutdownCommand;
 use crate::proto::model_runner::model_runner_service_client::ModelRunnerServiceClient;
@@ -39,6 +41,7 @@ pub(crate) struct ModelRunnerProcessConfig {
     pub(crate) kv_cache_config: KvCacheConfig,
     pub(crate) draft_model_runner_config: Option<DraftModelRunnerConfig>,
     pub(crate) scheduler_config: SchedulerConfig,
+    pub(crate) request_orchestrator_config: RequestOrchestratorConfig,
     pub(crate) trace_directory: Option<PathBuf>,
 }
 
@@ -133,6 +136,14 @@ fn spawn(
             format_textproto(
                 &SchedulerConfigProto::from(config.scheduler_config),
                 "inference_config.SchedulerConfig",
+            )
+            .map_err(anyhow::Error::msg)?,
+        )
+        .arg("--request-orchestrator-config")
+        .arg(
+            format_textproto(
+                &RequestOrchestratorConfigProto::from(config.request_orchestrator_config),
+                "inference_config.RequestOrchestratorConfig",
             )
             .map_err(anyhow::Error::msg)?,
         );

@@ -8,11 +8,72 @@ use crate::proto::inference_config::KvCacheConfig as KvCacheConfigProto;
 use crate::proto::inference_config::KvCacheType as KvCacheTypeProto;
 use crate::proto::inference_config::PrefixCacheCoordinationPolicy as PrefixCacheCoordinationPolicyProto;
 use crate::proto::inference_config::PrefixCachePublicationPolicy as PrefixCachePublicationPolicyProto;
+use crate::proto::inference_config::RequestOrchestratorConfig as RequestOrchestratorConfigProto;
+use crate::proto::inference_config::RequestRoutingPolicy as RequestRoutingPolicyProto;
 use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
 use crate::proto::inference_config::SchedulingPolicy as SchedulingPolicyProto;
 use candle_core::DType;
 
 pub(crate) const DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT: usize = 16;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RequestOrchestratorConfig {
+    pub(crate) routing_policy: RequestRoutingPolicy,
+}
+
+impl From<RequestOrchestratorConfigProto> for RequestOrchestratorConfig {
+    fn from(config: RequestOrchestratorConfigProto) -> Self {
+        Self {
+            routing_policy: config.routing_policy().into(),
+        }
+    }
+}
+
+impl From<RequestOrchestratorConfig> for RequestOrchestratorConfigProto {
+    fn from(config: RequestOrchestratorConfig) -> Self {
+        Self {
+            routing_policy: RequestRoutingPolicyProto::from(config.routing_policy).into(),
+        }
+    }
+}
+
+impl fmt::Display for RequestOrchestratorConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "routing_policy={}", self.routing_policy)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RequestRoutingPolicy {
+    RoundRobin,
+}
+
+impl From<RequestRoutingPolicyProto> for RequestRoutingPolicy {
+    fn from(policy: RequestRoutingPolicyProto) -> Self {
+        match policy {
+            RequestRoutingPolicyProto::Unspecified => unreachable!(
+                "validated request orchestrator configuration should specify a routing policy"
+            ),
+            RequestRoutingPolicyProto::RoundRobin => Self::RoundRobin,
+        }
+    }
+}
+
+impl From<RequestRoutingPolicy> for RequestRoutingPolicyProto {
+    fn from(policy: RequestRoutingPolicy) -> Self {
+        match policy {
+            RequestRoutingPolicy::RoundRobin => Self::RoundRobin,
+        }
+    }
+}
+
+impl fmt::Display for RequestRoutingPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::RoundRobin => "round-robin",
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct KvCacheConfig {
@@ -470,6 +531,19 @@ mod tests {
         assert_eq!(InferenceDevice::Cpu.to_string(), "CPU");
         assert_eq!(InferenceDevice::Gpu.to_string(), "GPU");
         assert_eq!(InferenceDevice::Mixed.to_string(), "Mixed");
+    }
+
+    #[test]
+    fn round_trips_request_orchestrator_configuration_through_proto() {
+        let config = RequestOrchestratorConfig {
+            routing_policy: RequestRoutingPolicy::RoundRobin,
+        };
+
+        assert_eq!(config.to_string(), "routing_policy=round-robin");
+        assert_eq!(
+            RequestOrchestratorConfig::from(RequestOrchestratorConfigProto::from(config)),
+            config
+        );
     }
 
     #[test]

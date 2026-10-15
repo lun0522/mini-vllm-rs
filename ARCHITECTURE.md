@@ -27,8 +27,10 @@ client -> request handler -> model runner
    backend in CPU-only or GPU-only mode. Mixed mode creates two independent
    backends on separate threads, one for CPU and one for GPU. Each backend has
    its own scheduler, loaded target and optional draft model, and KV caches.
-   Whole requests are routed round-robin and continuously batched within their
-   assigned backend; a request is not divided across devices.
+   A request orchestrator assigns whole requests to backends according to the
+   configured routing policy. The initial policy is round-robin. Requests are
+   continuously batched within their assigned backend and are not divided
+   across devices.
 
 The serving processes exchange requests, token IDs, and statistics (rather than
 model tensors) using Protocol Buffers over local Unix sockets. The model runner

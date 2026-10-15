@@ -12,6 +12,8 @@ pub(crate) const DEFAULT_SCHEDULING_POLICY: SchedulingPolicy =
     SchedulingPolicy::FirstComeFirstServed;
 pub(crate) const DEFAULT_PREFIX_CACHE_COORDINATION_POLICY: PrefixCacheCoordinationPolicy =
     PrefixCacheCoordinationPolicy::Independent;
+pub(crate) const DEFAULT_REQUEST_ROUTING_POLICY: RequestRoutingPolicy =
+    RequestRoutingPolicy::RoundRobin;
 pub(crate) const DEFAULT_KV_CACHE_TYPE: KvCacheType = KvCacheType::Contiguous;
 
 impl ModelConfig {
@@ -360,6 +362,48 @@ impl fmt::Display for SchedulerConfig {
     }
 }
 
+impl RequestOrchestratorConfig {
+    pub(crate) fn validate(&self) -> AnyhowResult<()> {
+        let routing_policy = RequestRoutingPolicy::try_from(self.routing_policy).map_err(|_| {
+            anyhow::anyhow!("unsupported request routing policy {}", self.routing_policy)
+        })?;
+        anyhow::ensure!(
+            routing_policy != RequestRoutingPolicy::Unspecified,
+            "request routing policy must be specified"
+        );
+        Ok(())
+    }
+}
+
+impl FromStr for RequestOrchestratorConfig {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_textproto(value, "inference_config.RequestOrchestratorConfig")
+    }
+}
+
+impl fmt::Display for RequestOrchestratorConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let routing_policy =
+            RequestRoutingPolicy::try_from(self.routing_policy).map_err(|_| fmt::Error)?;
+        writeln!(
+            formatter,
+            "Request routing policy: {}",
+            routing_policy.cli_value()
+        )
+    }
+}
+
+impl RequestRoutingPolicy {
+    fn cli_value(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::RoundRobin => "round-robin",
+        }
+    }
+}
+
 fn validate_draft_token_count(count: u64) -> AnyhowResult<()> {
     anyhow::ensure!(
         count > 0,
@@ -460,6 +504,23 @@ mod tests {
              Maximum active request count: 8\n\
              Scheduling policy: shortest-prefill-first\n\
              Prefix cache coordination policy: exact-input-single-flight-until-request-completion\n"
+        );
+    }
+
+    #[test]
+    fn validates_and_displays_request_orchestrator_configuration() {
+        let config = RequestOrchestratorConfig {
+            routing_policy: RequestRoutingPolicy::RoundRobin.into(),
+        };
+
+        assert!(config.validate().is_ok());
+        assert_eq!(config.to_string(), "Request routing policy: round-robin\n");
+        assert_eq!(
+            RequestOrchestratorConfig::default()
+                .validate()
+                .unwrap_err()
+                .to_string(),
+            "request routing policy must be specified"
         );
     }
 

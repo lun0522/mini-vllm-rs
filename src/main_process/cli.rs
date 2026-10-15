@@ -10,10 +10,13 @@ use crate::proto::inference_config::KvCacheType as KvCacheTypeProto;
 use crate::proto::inference_config::ModelConfig;
 use crate::proto::inference_config::PrefixCacheCoordinationPolicy as PrefixCacheCoordinationPolicyProto;
 use crate::proto::inference_config::PrefixCachePublicationPolicy as PrefixCachePublicationPolicyProto;
+use crate::proto::inference_config::RequestOrchestratorConfig as RequestOrchestratorConfigProto;
+use crate::proto::inference_config::RequestRoutingPolicy as RequestRoutingPolicyProto;
 use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
 use crate::proto::inference_config::SchedulingPolicy as SchedulingPolicyProto;
 use crate::proto::inference_config::DEFAULT_KV_CACHE_TYPE;
 use crate::proto::inference_config::DEFAULT_PREFIX_CACHE_COORDINATION_POLICY;
+use crate::proto::inference_config::DEFAULT_REQUEST_ROUTING_POLICY;
 use crate::proto::inference_config::DEFAULT_SCHEDULING_POLICY;
 use argh::FromArgs;
 use log::warn;
@@ -50,6 +53,9 @@ pub(crate) struct MainProcessArgs {
     /// textproto scheduler configuration
     #[argh(option, default = "default_scheduler_config()")]
     pub(crate) scheduler_config: SchedulerConfigProto,
+    /// textproto request orchestrator configuration
+    #[argh(option, default = "default_request_orchestrator_config()")]
+    pub(crate) request_orchestrator_config: RequestOrchestratorConfigProto,
     /// number of request-handler threads used for concurrent input preprocessing
     #[argh(option, default = "DEFAULT_INPUT_PREPROCESSING_THREAD_COUNT")]
     pub(crate) input_preprocessing_thread_count: usize,
@@ -79,6 +85,7 @@ impl fmt::Display for MainProcessArgs {
         writeln!(formatter, "Activation dtype: {}", self.activation_dtype)?;
         write!(formatter, "{}", self.kv_cache_config)?;
         write!(formatter, "{}", self.scheduler_config)?;
+        write!(formatter, "{}", self.request_orchestrator_config)?;
         writeln!(
             formatter,
             "Input preprocessing thread count: {}",
@@ -114,6 +121,7 @@ impl MainProcessArgs {
         }
         self.kv_cache_config.validate()?;
         self.scheduler_config.validate()?;
+        self.request_orchestrator_config.validate()?;
         self.scheduler_config
             .prefix_cache_coordination_policy()
             .validate(self.kv_cache_config.kv_cache_type())?;
@@ -139,6 +147,12 @@ fn default_scheduler_config() -> SchedulerConfigProto {
     }
 }
 
+fn default_request_orchestrator_config() -> RequestOrchestratorConfigProto {
+    RequestOrchestratorConfigProto {
+        routing_policy: DEFAULT_REQUEST_ROUTING_POLICY.into(),
+    }
+}
+
 fn default_kv_cache_config() -> KvCacheConfigProto {
     KvCacheConfigProto {
         kv_cache_type: DEFAULT_KV_CACHE_TYPE.into(),
@@ -160,6 +174,7 @@ fn default_control_socket() -> PathBuf {
 fn normalize(mut args: MainProcessArgs) -> MainProcessArgs {
     normalize_kv_cache_config(&mut args.kv_cache_config);
     normalize_scheduler_config(&mut args.scheduler_config);
+    normalize_request_orchestrator_config(&mut args.request_orchestrator_config);
     if args.input_preprocessing_thread_count == 0 {
         warn!(
             "Input preprocessing thread count is 0; using default value \
@@ -248,6 +263,15 @@ fn normalize_scheduler_config(config: &mut SchedulerConfigProto) {
     }
 }
 
+fn normalize_request_orchestrator_config(config: &mut RequestOrchestratorConfigProto) {
+    if let Ok(RequestRoutingPolicyProto::Unspecified) =
+        RequestRoutingPolicyProto::try_from(config.routing_policy)
+    {
+        warn!("Request routing policy is unspecified; using default value round-robin");
+        config.routing_policy = DEFAULT_REQUEST_ROUTING_POLICY.into();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,6 +353,23 @@ mod tests {
         assert_eq!(
             args.scheduler_config.prefix_cache_coordination_policy,
             PrefixCacheCoordinationPolicyProto::ExactInputSingleFlightUntilRequestCompletion as i32
+        );
+    }
+
+    #[test]
+    fn parses_request_orchestrator_configuration() {
+        let args = MainProcessArgs::from_args(
+            &["mini-vllm-rs"],
+            &[
+                "--request-orchestrator-config",
+                "routing_policy: REQUEST_ROUTING_POLICY_ROUND_ROBIN",
+            ],
+        )
+        .expect("request orchestrator arguments should parse");
+
+        assert_eq!(
+            args.request_orchestrator_config.routing_policy,
+            RequestRoutingPolicyProto::RoundRobin as i32
         );
     }
 
@@ -428,6 +469,19 @@ mod tests {
         assert_eq!(
             config.prefix_cache_coordination_policy,
             PrefixCacheCoordinationPolicyProto::Independent as i32
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn normalizes_an_empty_request_orchestrator_configuration() {
+        let mut config = RequestOrchestratorConfigProto::default();
+
+        normalize_request_orchestrator_config(&mut config);
+
+        assert_eq!(
+            config.routing_policy,
+            RequestRoutingPolicyProto::RoundRobin as i32
         );
         assert!(config.validate().is_ok());
     }

@@ -133,6 +133,10 @@ cargo run --release
     leader completes or publishes the shared prefix, respectively. See
     [Prefix-cache publication and coordination](src/model_runner/README.md#prefix-cache-publication-and-coordination)
     for how the policies interact.
+- `--request-orchestrator-config '<textproto>'` configures backend routing:
+  - `routing_policy`: Accepts `REQUEST_ROUTING_POLICY_ROUND_ROBIN` and defaults
+    to it. Successive requests are assigned cyclically across the configured
+    inference backends.
 - `--input-preprocessing-thread-count <count>` sets the request-handler
   preprocessing pool size and defaults to `4`.
 - `--request-socket <path>` changes the public request-handler Unix socket and

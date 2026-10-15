@@ -85,6 +85,8 @@ fn spawn_server(request_socket: &Path, control_socket: &Path) -> anyhow::Result<
         .arg(format!("target_kv_cache_size_bytes: {}", 128 * 1024 * 1024))
         .arg("--scheduler-config")
         .arg("max_batched_token_count: 64 max_active_request_count: 1")
+        .arg("--request-orchestrator-config")
+        .arg("routing_policy: REQUEST_ROUTING_POLICY_ROUND_ROBIN")
         .arg("--request-socket")
         .arg(request_socket)
         .arg("--control-socket")

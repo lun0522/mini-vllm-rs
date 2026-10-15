@@ -3,6 +3,7 @@ use super::server::ControlServer;
 use crate::model_runner::client::ModelRunnerProcess;
 use crate::model_runner::client::ModelRunnerProcessConfig;
 use crate::model_runner::KvCacheConfig;
+use crate::model_runner::RequestOrchestratorConfig;
 use crate::model_runner::SchedulerConfig;
 use crate::models::model_downloader::ModelArtifacts;
 use crate::models::model_downloader::ModelDownloader;
@@ -32,6 +33,7 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
         activation_dtype,
         kv_cache_config,
         scheduler_config,
+        request_orchestrator_config,
         input_preprocessing_thread_count,
         trace_directory,
         request_socket,
@@ -48,6 +50,7 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
         .tempdir_in("/tmp")
         .context("failed to create the server runtime directory")?;
     let scheduler_config = SchedulerConfig::from(scheduler_config);
+    let request_orchestrator_config = RequestOrchestratorConfig::from(request_orchestrator_config);
     let kv_cache_config = KvCacheConfig::from(kv_cache_config);
     let model_runner_process = ModelRunnerProcess::start(
         &model_artifacts,
@@ -58,6 +61,7 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
             kv_cache_config,
             draft_model_runner_config,
             scheduler_config,
+            request_orchestrator_config,
             trace_directory,
         },
     )

@@ -145,3 +145,16 @@ enum PrefixCacheCoordinationPolicy {
   // Makes requests with identical inputs wait until one leader publishes their shared prefix.
   PREFIX_CACHE_COORDINATION_POLICY_EXACT_INPUT_SINGLE_FLIGHT_UNTIL_PREFIX_PUBLISHED = 3;
 }
+
+// Configures how requests are assigned to inference backends.
+message RequestOrchestratorConfig {
+  // Policy used to select one backend for each request.
+  RequestRoutingPolicy routing_policy = 1;
+}
+
+// Selects how requests are routed across inference backends.
+enum RequestRoutingPolicy {
+  REQUEST_ROUTING_POLICY_UNSPECIFIED = 0;
+  // Assigns successive requests to backends in cyclic order.
+  REQUEST_ROUTING_POLICY_ROUND_ROBIN = 1;
+}

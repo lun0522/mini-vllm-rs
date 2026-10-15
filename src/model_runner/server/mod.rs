@@ -1,6 +1,7 @@
 use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
 use crate::model_runner::KvCacheConfig;
+use crate::model_runner::RequestOrchestratorConfig;
 use crate::model_runner::SchedulerConfig;
 use crate::proto::inference_config::DraftModelRunnerConfig as DraftModelRunnerConfigProto;
 use crate::proto::inference_config::DraftTokenCountPolicy as DraftTokenCountPolicyProto;
@@ -22,8 +23,6 @@ use anyhow::Context;
 use anyhow::Result;
 use log::info;
 use log::warn;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
 use std::time::Instant;
 use tokio::net::UnixListener;
@@ -37,21 +36,23 @@ use tonic::Status;
 
 mod cli;
 mod draft_token_count;
-mod inference_engine;
+mod inference_worker;
 mod kv_cache;
 mod model_instance;
 mod model_runner;
 mod prefix_cache_flight;
 mod request_manager;
+mod request_orchestrator;
 mod scheduler;
 mod text_generation;
 
 pub(crate) use cli::ModelRunnerProcessArgs;
 use draft_token_count::DraftTokenCountPolicy;
-use inference_engine::InferenceEngine;
+use inference_worker::InferenceWorker;
 use model_runner::DraftModelRunnerConfig;
 use model_runner::ModelRunner;
 use model_runner::ModelRunnerMetadata;
+use request_orchestrator::RequestOrchestrator;
 
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_MODEL_RUNNER";
 const INFERENCE_MESSAGE_QUEUE_CAPACITY: usize = 32;
@@ -60,16 +61,16 @@ const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
 struct InferenceBackend {
     metadata: ModelRunnerMetadata,
     thread: JoinHandle<()>,
-    message_sender: mpsc::Sender<InferenceEngineMessage>,
+    message_sender: mpsc::Sender<InferenceWorkerMessage>,
 }
 
 struct InferenceBackends {
     metadata: ModelRunnerMetadata,
     threads: Vec<JoinHandle<()>>,
-    message_senders: Vec<mpsc::Sender<InferenceEngineMessage>>,
+    message_senders: Vec<mpsc::Sender<InferenceWorkerMessage>>,
 }
 
-pub(super) enum InferenceEngineMessage {
+pub(super) enum InferenceWorkerMessage {
     Generate(InferenceRequest),
     GetPrefixCacheTelemetry {
         response_sender: oneshot::Sender<InferenceBackendPrefixCacheTelemetry>,
@@ -87,6 +88,7 @@ pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
 }
 
 async fn run_server(args: ModelRunnerProcessArgs) -> Result<()> {
+    args.request_orchestrator_config.validate()?;
     let inference_devices = match args.inference_device {
         InferenceDevice::Mixed => vec![InferenceDevice::Cpu, InferenceDevice::Gpu],
         specific_device => vec![specific_device],
@@ -102,8 +104,9 @@ async fn run_server(args: ModelRunnerProcessArgs) -> Result<()> {
     let service = ModelRunnerRpcService::new(
         inference_backends.metadata,
         inference_backends.message_senders,
+        RequestOrchestratorConfig::from(args.request_orchestrator_config),
         shutdown,
-    );
+    )?;
     let server_result = tonic::transport::Server::builder()
         .add_service(ModelRunnerServiceServer::new(service))
         .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async {
@@ -122,23 +125,26 @@ async fn run_server(args: ModelRunnerProcessArgs) -> Result<()> {
 
 struct ModelRunnerRpcService {
     metadata: ModelRunnerMetadata,
-    inference_message_senders: Vec<mpsc::Sender<InferenceEngineMessage>>,
-    next_sender_index: AtomicUsize,
+    inference_message_senders: Vec<mpsc::Sender<InferenceWorkerMessage>>,
+    request_orchestrator: RequestOrchestrator,
     shutdown: RpcShutdown,
 }
 
 impl ModelRunnerRpcService {
     pub fn new(
         metadata: ModelRunnerMetadata,
-        inference_message_senders: Vec<mpsc::Sender<InferenceEngineMessage>>,
+        inference_message_senders: Vec<mpsc::Sender<InferenceWorkerMessage>>,
+        request_orchestrator_config: RequestOrchestratorConfig,
         shutdown: RpcShutdown,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let request_orchestrator =
+            RequestOrchestrator::new(inference_message_senders.len(), request_orchestrator_config)?;
+        Ok(Self {
             metadata,
             inference_message_senders,
-            next_sender_index: AtomicUsize::new(0),
+            request_orchestrator,
             shutdown,
-        }
+        })
     }
 }
 
@@ -161,7 +167,7 @@ impl ModelRunnerService for ModelRunnerRpcService {
         for message_sender in &self.inference_message_senders {
             let (response_sender, response_receiver) = oneshot::channel();
             message_sender
-                .send(InferenceEngineMessage::GetPrefixCacheTelemetry { response_sender })
+                .send(InferenceWorkerMessage::GetPrefixCacheTelemetry { response_sender })
                 .await
                 .map_err(|_| Status::unavailable("model runner inference thread stopped"))?;
             backends.push(
@@ -188,12 +194,10 @@ impl ModelRunnerService for ModelRunnerRpcService {
         .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let request_id = request.request_id;
         let queued_at = Instant::now();
-        // TODO: Use a smarter way to choose inference backend.
-        let sender_index = self.next_sender_index.fetch_add(1, Ordering::Relaxed)
-            % self.inference_message_senders.len();
+        let routing_decision = self.request_orchestrator.route_request();
         let (event_sender, event_receiver) = mpsc::channel(GENERATION_EVENT_QUEUE_CAPACITY);
-        self.inference_message_senders[sender_index]
-            .send(InferenceEngineMessage::Generate(InferenceRequest {
+        self.inference_message_senders[routing_decision.backend_index]
+            .send(InferenceWorkerMessage::Generate(InferenceRequest {
                 queued_at,
                 generate_text: request,
                 event_sender,
@@ -274,7 +278,7 @@ fn create_inference_backend(
     let thread = std::thread::Builder::new()
         .name(format!("inference-worker-{backend_id}"))
         .spawn(move || {
-            InferenceEngine::new(backend_id, model_runner, scheduler_config).run(message_receiver);
+            InferenceWorker::new(backend_id, model_runner, scheduler_config).run(message_receiver);
         })
         .context(format!(
             "failed to start the model runner inference backend {backend_id}"
@@ -378,9 +382,11 @@ fn normalize_activation_dtype(
 mod tests {
     use super::get_effective_context_length;
     use super::normalize_generate_text_request;
-    use super::InferenceEngineMessage;
+    use super::InferenceWorkerMessage;
     use super::ModelRunnerMetadata;
     use super::ModelRunnerRpcService;
+    use crate::model_runner::RequestOrchestratorConfig;
+    use crate::model_runner::RequestRoutingPolicy;
     use crate::proto::model_runner::model_runner_service_server::ModelRunnerService;
     use crate::proto::model_runner::GenerateTextRequest;
     use crate::proto::model_runner::GetModelMetadataResponse;
@@ -417,7 +423,7 @@ mod tests {
             let (message_sender, mut message_receiver) = mpsc::channel(1);
             message_senders.push(message_sender);
             tokio::spawn(async move {
-                let Some(InferenceEngineMessage::GetPrefixCacheTelemetry { response_sender }) =
+                let Some(InferenceWorkerMessage::GetPrefixCacheTelemetry { response_sender }) =
                     message_receiver.recv().await
                 else {
                     panic!("expected a prefix-cache telemetry query");
@@ -442,8 +448,12 @@ mod tests {
                 kv_cache_token_capacity: 128,
             },
             message_senders,
+            RequestOrchestratorConfig {
+                routing_policy: RequestRoutingPolicy::RoundRobin,
+            },
             shutdown,
-        );
+        )
+        .unwrap();
 
         let response = service
             .get_prefix_cache_telemetry(Request::new(GetPrefixCacheTelemetryRequest {}))

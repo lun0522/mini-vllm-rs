@@ -11,15 +11,22 @@ flowchart LR
     Main["Main process<br/>client.rs"] -->|Start and stop| Rpc["Model-runner process<br/>server/mod.rs"]
     Handler[Request-handler process] -->|Token-level RPC| Rpc
 
+    Rpc --> Orchestrator["RequestOrchestrator<br/>Backend decision only"]
+    Orchestrator -->|Selected backend index| Rpc
     Rpc -->|Bounded queue per backend| Backends["Inference backend(s)<br/>CPU and/or GPU<br/>Dedicated thread each"]
-    Backends --> Engine["InferenceEngine<br/>Scheduler + request manager"]
-    Engine --> Models["Target + optional draft model<br/>Independent KV caches"]
+    Backends --> Worker["InferenceWorker<br/>Scheduler + request manager"]
+    Worker --> Models["Target + optional draft model<br/>Independent KV caches"]
 ```
 
 CPU-only and GPU-only modes create one backend. Mixed mode creates both and
-routes whole requests between their bounded queues in round-robin order. Each
-backend has its own inference thread, scheduler, loaded models, and KV caches;
-a request is never split across devices.
+routes whole requests between their bounded queues according to the configured
+request-routing policy. The initial `round-robin` policy selects backends in
+cyclic order. Each backend has its own inference thread, scheduler, loaded
+models, and KV caches; a request is never split across devices.
+
+The request orchestrator owns only the configured backend-selection policy
+state and returns a backend index. The RPC service retains ownership of the
+backend queues and dispatches each request according to that decision.
 
 The server binds its Unix socket only after every configured backend has loaded
 its models, making the socket a readiness signal. After startup, inference
@@ -32,8 +39,9 @@ through the lifecycle client.
 | --- | --- |
 | `client.rs` | Starts and stops the process, waits for readiness, and owns socket cleanup. |
 | `server/cli.rs` | Receives model paths, device mode, cache settings, and scheduler settings from the main process. |
-| `server/mod.rs` | Serves tonic RPCs, validates request capacity, and routes requests to inference backends. |
-| `server/inference_engine.rs` | Coordinates admission, scheduled execution, event delivery, timing, and cleanup for one backend. |
+| `server/mod.rs` | Serves tonic RPCs, validates request capacity, and dispatches requests to inference backends. |
+| `server/request_orchestrator.rs` | Selects an inference backend for each request without owning or dispatching through backend queues. |
+| `server/inference_worker.rs` | Coordinates admission, scheduled execution, event delivery, timing, and cleanup for one backend. |
 | `server/request_manager.rs` | Owns request payloads, resumable execution state, response channels, and lifecycle timing. |
 | `server/scheduler.rs` | Owns scheduling metadata and applies active-request, KV-cache reservation, and token-budget limits. |
 | `server/prefix_cache_flight.rs` | Coordinates exact-input single flights and tracks whether followers wait for leader completion or prefix publication. |
@@ -52,34 +60,37 @@ returns token IDs followed by final generation statistics.
 sequenceDiagram
     participant Handler as Request handler
     participant Rpc as RPC server
-    participant Engine as Inference engine
+    participant Orchestrator as Request orchestrator
+    participant Worker as Inference worker
     participant Scheduler
     participant Runner as Model runner
     participant Models as Target / draft models
 
     Handler->>Rpc: GenerateText(token IDs)
-    Rpc->>Rpc: Validate capacity and select backend
-    Rpc->>Engine: Queue request
-    Engine->>Scheduler: Add scheduling metadata
-    Scheduler-->>Engine: Admit request when a slot is available
-    Engine->>Runner: Start request and restore cached prefixes
+    Rpc->>Rpc: Validate capacity
+    Rpc->>Orchestrator: Request backend decision
+    Orchestrator-->>Rpc: Selected backend index
+    Rpc->>Worker: Queue request on selected backend
+    Worker->>Scheduler: Add scheduling metadata
+    Scheduler-->>Worker: Admit request when a slot is available
+    Worker->>Runner: Start request and restore cached prefixes
     loop Until completion or cancellation
-        Scheduler-->>Engine: Select requests and token budgets
-        Engine->>Runner: Execute scheduled request batch
+        Scheduler-->>Worker: Select requests and token budgets
+        Worker->>Runner: Execute scheduled request batch
         Runner->>Models: Run prefill, decode, or verification
         Models-->>Runner: Return logits
-        Runner-->>Engine: Return generated tokens and updated phases
-        Engine-->>Rpc: Token-ID events
+        Runner-->>Worker: Return generated tokens and updated phases
+        Worker-->>Rpc: Token-ID events
         Rpc-->>Handler: Stream token-ID events
     end
     alt Request completes
-        Engine->>Runner: Finish request and release active cache state
-        Runner-->>Engine: Generation statistics
-        Engine-->>Rpc: Final statistics event
+        Worker->>Runner: Finish request and release active cache state
+        Runner-->>Worker: Generation statistics
+        Worker-->>Rpc: Final statistics event
         Rpc-->>Handler: Final statistics event
     else Cancellation or execution failure
-        Engine->>Runner: Abort request and release cache state
-        Engine-->>Rpc: gRPC error
+        Worker->>Runner: Abort request and release cache state
+        Worker-->>Rpc: gRPC error
         Rpc-->>Handler: gRPC error
     end
 ```
@@ -135,7 +146,7 @@ first-come-first-served or shortest-prefill-first. Long prefills can be split
 across scheduling iterations.
 
 Paged KV caching supports multiple active requests and continuous batching. A
-contiguous cache permits only one active request, so the inference engine
+contiguous cache permits only one active request, so the inference worker
 automatically limits its scheduler accordingly.
 
 ## Speculative decoding

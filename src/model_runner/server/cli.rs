@@ -2,6 +2,7 @@ use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
 use crate::proto::inference_config::DraftModelRunnerConfig;
 use crate::proto::inference_config::KvCacheConfig as KvCacheConfigProto;
+use crate::proto::inference_config::RequestOrchestratorConfig as RequestOrchestratorConfigProto;
 use crate::proto::inference_config::SchedulerConfig as SchedulerConfigProto;
 use argh::FromArgs;
 use std::path::PathBuf;
@@ -27,6 +28,9 @@ pub(crate) struct ModelRunnerProcessArgs {
     /// textproto scheduler configuration
     #[argh(option)]
     pub(super) scheduler_config: SchedulerConfigProto,
+    /// textproto request orchestrator configuration
+    #[argh(option)]
+    pub(super) request_orchestrator_config: RequestOrchestratorConfigProto,
     /// directory where a Chrome trace is written
     #[argh(option)]
     pub(crate) trace_directory: Option<PathBuf>,

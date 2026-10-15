@@ -227,7 +227,7 @@ impl ModelRunner {
     /// Publishes complete target and draft prefix pages without finalizing the request.
     ///
     /// Publication policies may call this internally while coordination policies call it through
-    /// the inference engine. Repeated calls are safe: each call publishes only complete pages not
+    /// the inference worker. Repeated calls are safe: each call publishes only complete pages not
     /// previously published by the request.
     pub(super) fn publish_completed_prefix(
         &mut self,

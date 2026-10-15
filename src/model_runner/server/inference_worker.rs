@@ -26,18 +26,18 @@ use super::request_manager::RequestOutcome;
 use super::scheduler::Scheduler;
 use super::scheduler::SchedulingDecision;
 use super::text_generation;
-use super::InferenceEngineMessage;
 use super::InferenceRequest;
+use super::InferenceWorkerMessage;
 
 /// Coordinates request storage, scheduling, model execution, and result delivery.
-pub(super) struct InferenceEngine {
+pub(super) struct InferenceWorker {
     backend_id: usize,
     model_runner: ModelRunner,
     request_manager: RequestManager,
     scheduler: Scheduler,
 }
 
-impl InferenceEngine {
+impl InferenceWorker {
     pub(super) fn new(
         backend_id: usize,
         model_runner: ModelRunner,
@@ -54,32 +54,32 @@ impl InferenceEngine {
         }
     }
 
-    pub(super) fn run(mut self, mut message_receiver: mpsc::Receiver<InferenceEngineMessage>) {
+    pub(super) fn run(mut self, mut message_receiver: mpsc::Receiver<InferenceWorkerMessage>) {
         loop {
             if self.scheduler.is_vacant() {
                 let Some(message) = message_receiver.blocking_recv() else {
                     break;
                 };
                 if let Err(error) = self.handle_message(message) {
-                    error!("Inference engine failed to handle a message: {error:#}");
+                    error!("Inference worker failed to handle a message: {error:#}");
                     continue;
                 }
             }
             while let Ok(message) = message_receiver.try_recv() {
                 if let Err(error) = self.handle_message(message) {
-                    error!("Inference engine failed to handle a message: {error:#}");
+                    error!("Inference worker failed to handle a message: {error:#}");
                 }
             }
             if let Err(error) = self.process_requests() {
-                error!("Inference engine failed to process requests: {error:#}");
+                error!("Inference worker failed to process requests: {error:#}");
             }
         }
     }
 
-    fn handle_message(&mut self, message: InferenceEngineMessage) -> Result<()> {
+    fn handle_message(&mut self, message: InferenceWorkerMessage) -> Result<()> {
         match message {
-            InferenceEngineMessage::Generate(request) => self.enqueue_request(request),
-            InferenceEngineMessage::GetPrefixCacheTelemetry { response_sender } => {
+            InferenceWorkerMessage::Generate(request) => self.enqueue_request(request),
+            InferenceWorkerMessage::GetPrefixCacheTelemetry { response_sender } => {
                 let telemetry = self.model_runner.prefix_cache_telemetry();
                 let _ = response_sender.send(InferenceBackendPrefixCacheTelemetry {
                     backend_id: self.backend_id as u64,
@@ -128,7 +128,7 @@ impl InferenceEngine {
         // decode, so synchronize the scheduler with the execution state's actual initial phase.
         self.handle_generation_phase(request_id, started_request.generation_phase)?;
         info!(
-            "Engine state (backend_id={}): request_id={} status=started input_tokens={} \
+            "Worker state (backend_id={}): request_id={} status=started input_tokens={} \
              generation_phase={} ignore_eos_tokens={} queue_us={}",
             self.backend_id,
             request_id,
@@ -232,7 +232,7 @@ impl InferenceEngine {
         }
     }
 
-    /// Removes an aborted request from engine state and reports its error to the client.
+    /// Removes an aborted request from worker state and reports its error to the client.
     /// Any allocated model state must already have been released.
     fn finalize_request_abort(&mut self, request_id: u64, error: anyhow::Error) -> Result<()> {
         self.scheduler.remove_active_request(request_id)?;
@@ -261,7 +261,7 @@ impl InferenceEngine {
                 );
                 let draft_stats = result.stats.draft_stats.as_ref();
                 info!(
-                    "Engine state (backend_id={}): request_id={} status=completed finish_reason={} \
+                    "Worker state (backend_id={}): request_id={} status=completed finish_reason={} \
                      input_tokens={} output_tokens={} queue_us={} prefill_us={} ttft_us={} \
                      decode_us={} completion_us={} \
                      target_cached_tokens={} target_newly_indexed_tokens={} \
@@ -308,7 +308,7 @@ impl InferenceEngine {
             Err(error) => {
                 let status = generation_error_status(error);
                 info!(
-                    "Engine state (backend_id={}): request_id={} status={} input_tokens={} \
+                    "Worker state (backend_id={}): request_id={} status={} input_tokens={} \
                      output_tokens={} queue_us={} ttft_us={}",
                     self.backend_id,
                     request_id,
