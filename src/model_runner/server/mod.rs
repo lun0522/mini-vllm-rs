@@ -36,10 +36,11 @@ use tonic::Status;
 
 mod cli;
 mod draft_token_count;
+mod generation_stats;
 mod inference_worker;
 mod kv_cache;
+mod model_executor;
 mod model_instance;
-mod model_runner;
 mod prefix_cache_flight;
 mod request_manager;
 mod request_orchestrator;
@@ -49,9 +50,9 @@ mod text_generation;
 pub(crate) use cli::ModelRunnerProcessArgs;
 use draft_token_count::DraftTokenCountPolicy;
 use inference_worker::InferenceWorker;
-use model_runner::DraftModelRunnerConfig;
-use model_runner::ModelRunner;
-use model_runner::ModelRunnerMetadata;
+use model_executor::DraftModelConfig;
+use model_executor::ModelExecutor;
+use model_executor::ModelExecutorMetadata;
 use request_orchestrator::RequestOrchestrator;
 
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_MODEL_RUNNER";
@@ -59,13 +60,13 @@ const INFERENCE_MESSAGE_QUEUE_CAPACITY: usize = 32;
 const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
 
 struct InferenceBackend {
-    metadata: ModelRunnerMetadata,
+    metadata: ModelExecutorMetadata,
     thread: JoinHandle<()>,
     message_sender: mpsc::Sender<InferenceWorkerMessage>,
 }
 
 struct InferenceBackends {
-    metadata: ModelRunnerMetadata,
+    metadata: ModelExecutorMetadata,
     threads: Vec<JoinHandle<()>>,
     message_senders: Vec<mpsc::Sender<InferenceWorkerMessage>>,
 }
@@ -124,7 +125,7 @@ async fn run_server(args: ModelRunnerProcessArgs) -> Result<()> {
 }
 
 struct ModelRunnerRpcService {
-    metadata: ModelRunnerMetadata,
+    metadata: ModelExecutorMetadata,
     inference_message_senders: Vec<mpsc::Sender<InferenceWorkerMessage>>,
     request_orchestrator: RequestOrchestrator,
     shutdown: RpcShutdown,
@@ -132,7 +133,7 @@ struct ModelRunnerRpcService {
 
 impl ModelRunnerRpcService {
     pub fn new(
-        metadata: ModelRunnerMetadata,
+        metadata: ModelExecutorMetadata,
         inference_message_senders: Vec<mpsc::Sender<InferenceWorkerMessage>>,
         request_orchestrator_config: RequestOrchestratorConfig,
         shutdown: RpcShutdown,
@@ -227,7 +228,7 @@ fn create_inference_backends(
     args: &ModelRunnerProcessArgs,
     inference_devices: &[InferenceDevice],
 ) -> Result<InferenceBackends> {
-    let mut maybe_metadata: Option<ModelRunnerMetadata> = None;
+    let mut maybe_metadata: Option<ModelExecutorMetadata> = None;
     let mut threads = Vec::with_capacity(inference_devices.len());
     let mut message_senders = Vec::with_capacity(inference_devices.len());
     for (index, device) in inference_devices.iter().enumerate() {
@@ -265,20 +266,21 @@ fn create_inference_backend(
         .as_ref()
         .map(create_draft_model_config)
         .transpose()?;
-    let model_runner = ModelRunner::new(
+    let model_executor = ModelExecutor::new(
         &args.model_path,
         draft_model_config,
         inference_device,
         activation_dtype,
         KvCacheConfig::from(args.kv_cache_config),
     )?;
-    let metadata = model_runner.metadata();
+    let metadata = model_executor.metadata();
     let (message_sender, message_receiver) = mpsc::channel(INFERENCE_MESSAGE_QUEUE_CAPACITY);
     let scheduler_config = SchedulerConfig::from(args.scheduler_config);
     let thread = std::thread::Builder::new()
         .name(format!("inference-worker-{backend_id}"))
         .spawn(move || {
-            InferenceWorker::new(backend_id, model_runner, scheduler_config).run(message_receiver);
+            InferenceWorker::new(backend_id, model_executor, scheduler_config)
+                .run(message_receiver);
         })
         .context(format!(
             "failed to start the model runner inference backend {backend_id}"
@@ -290,15 +292,13 @@ fn create_inference_backend(
     })
 }
 
-fn create_draft_model_config(
-    config: &DraftModelRunnerConfigProto,
-) -> Result<DraftModelRunnerConfig> {
+fn create_draft_model_config(config: &DraftModelRunnerConfigProto) -> Result<DraftModelConfig> {
     config.validate()?;
     let token_count_policy_proto: &DraftTokenCountPolicyProto = config
         .token_count_policy
         .as_ref()
         .expect("validated draft model runner configuration should contain a token-count policy");
-    Ok(DraftModelRunnerConfig {
+    Ok(DraftModelConfig {
         model_path: config.model_path.clone().into(),
         token_count_policy: DraftTokenCountPolicy::try_from(token_count_policy_proto)?,
     })
@@ -383,7 +383,7 @@ mod tests {
     use super::get_effective_context_length;
     use super::normalize_generate_text_request;
     use super::InferenceWorkerMessage;
-    use super::ModelRunnerMetadata;
+    use super::ModelExecutorMetadata;
     use super::ModelRunnerRpcService;
     use crate::model_runner::RequestOrchestratorConfig;
     use crate::model_runner::RequestRoutingPolicy;
@@ -443,7 +443,7 @@ mod tests {
         }
         let (shutdown, _shutdown_receiver) = RpcShutdown::channel();
         let service = ModelRunnerRpcService::new(
-            ModelRunnerMetadata {
+            ModelExecutorMetadata {
                 model_metadata: metadata(32, None),
                 kv_cache_token_capacity: 128,
             },

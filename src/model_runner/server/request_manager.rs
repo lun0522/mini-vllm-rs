@@ -12,9 +12,9 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tonic::Status;
 
+use super::generation_stats::TextGenerationStats;
 use super::scheduler::ScheduledRequest;
 use super::text_generation;
-use super::text_generation::CompletedGeneration;
 use super::text_generation::GenerationPhase;
 use super::text_generation::GenerationStep;
 use super::text_generation::RequestExecutionState;
@@ -77,7 +77,7 @@ pub(super) struct StartedRequest {
 pub(super) struct RequestOutcome {
     pub(super) context: RequestContext,
     pub(super) metrics: RequestExecutionMetrics,
-    pub(super) result: Result<CompletedGeneration>,
+    pub(super) result: Result<TextGenerationStats>,
 }
 
 pub(super) struct RequestExecutionResult {
@@ -243,7 +243,7 @@ impl RequestManager {
     pub(super) fn finish_request(
         &mut self,
         request_id: u64,
-        complete_execution: impl FnOnce(RequestExecutionState) -> Result<CompletedGeneration>,
+        complete_execution: impl FnOnce(RequestExecutionState) -> Result<TextGenerationStats>,
     ) -> Result<RequestOutcome> {
         let request = self.remove_request(request_id)?;
         let RequestState::Executing {
@@ -463,6 +463,7 @@ fn send_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_runner::server::generation_stats::GenerationFinishReason;
     use crate::model_runner::server::text_generation::PrefillStartPositions;
 
     fn request(
@@ -540,7 +541,7 @@ mod tests {
             Ok(vec![GenerationStep {
                 output_token_ids: Vec::new(),
                 generation_phase: GenerationPhase::Finished {
-                    finish_reason: text_generation::GenerationFinishReason::MaxNewTokensReached,
+                    finish_reason: GenerationFinishReason::MaxNewTokensReached,
                 },
             }])
         });

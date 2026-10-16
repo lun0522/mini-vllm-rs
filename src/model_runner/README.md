@@ -45,9 +45,10 @@ through the lifecycle client.
 | `server/request_manager.rs` | Owns request payloads, resumable execution state, response channels, and lifecycle timing. |
 | `server/scheduler.rs` | Owns scheduling metadata and applies active-request, KV-cache reservation, and token-budget limits. |
 | `server/prefix_cache_flight.rs` | Coordinates exact-input single flights and tracks whether followers wait for leader completion or prefix publication. |
-| `server/model_runner.rs` | Owns the target and optional draft model instances and manages their request lifecycles. |
+| `server/model_executor.rs` | Owns the target and optional draft model instances and manages their request lifecycles. |
 | `server/model_instance.rs` | Pairs one loaded model with its request-aware KV-cache manager. |
-| `server/text_generation.rs` | Implements resumable prefill, ordinary decoding, speculative decoding, sampling, and statistics. |
+| `server/text_generation.rs` | Implements resumable prefill, ordinary decoding, speculative decoding, and sampling. |
+| `server/generation_stats.rs` | Defines generation outcomes and execution, draft-model, and prefix-cache statistics. |
 | [`server/kv_cache/`](server/kv_cache/README.md) | Implements contiguous and paged storage, prefix reuse, and per-request cache state. |
 
 Tokenization, tokenizer compatibility checks, and incremental text decoding
@@ -63,7 +64,7 @@ sequenceDiagram
     participant Orchestrator as Request orchestrator
     participant Worker as Inference worker
     participant Scheduler
-    participant Runner as Model runner
+    participant Executor as Model executor
     participant Models as Target / draft models
 
     Handler->>Rpc: GenerateText(token IDs)
@@ -73,23 +74,23 @@ sequenceDiagram
     Rpc->>Worker: Queue request on selected backend
     Worker->>Scheduler: Add scheduling metadata
     Scheduler-->>Worker: Admit request when a slot is available
-    Worker->>Runner: Start request and restore cached prefixes
+    Worker->>Executor: Start request and restore cached prefixes
     loop Until completion or cancellation
         Scheduler-->>Worker: Select requests and token budgets
-        Worker->>Runner: Execute scheduled request batch
-        Runner->>Models: Run prefill, decode, or verification
-        Models-->>Runner: Return logits
-        Runner-->>Worker: Return generated tokens and updated phases
+        Worker->>Executor: Execute scheduled request batch
+        Executor->>Models: Run prefill, decode, or verification
+        Models-->>Executor: Return logits
+        Executor-->>Worker: Return generated tokens and updated phases
         Worker-->>Rpc: Token-ID events
         Rpc-->>Handler: Stream token-ID events
     end
     alt Request completes
-        Worker->>Runner: Finish request and release active cache state
-        Runner-->>Worker: Generation statistics
+        Worker->>Executor: Finish request and release active cache state
+        Executor-->>Worker: Generation statistics
         Worker-->>Rpc: Final statistics event
         Rpc-->>Handler: Final statistics event
     else Cancellation or execution failure
-        Worker->>Runner: Abort request and release cache state
+        Worker->>Executor: Abort request and release cache state
         Worker-->>Rpc: gRPC error
         Rpc-->>Handler: gRPC error
     end

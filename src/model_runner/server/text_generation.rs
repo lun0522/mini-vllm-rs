@@ -1,7 +1,6 @@
 use crate::models::ForwardInput;
 use crate::models::ModelRole;
 use crate::proto::model_runner::GenerateTextRequest;
-use crate::proto::model_runner::TextGenerationFinishReason;
 use anyhow::bail;
 use anyhow::ensure;
 use anyhow::Context;
@@ -18,6 +17,10 @@ use std::time::Duration;
 use std::time::Instant;
 
 use super::draft_token_count::DraftTokenCountController;
+use super::generation_stats::DraftGenerationStats;
+use super::generation_stats::GenerationExecutionStats;
+use super::generation_stats::GenerationFinishReason;
+use super::generation_stats::PrefixTokenCounts;
 use super::model_instance::ModelInstance;
 
 #[derive(Debug)]
@@ -30,30 +33,6 @@ impl fmt::Display for GenerationCancelled {
 }
 
 impl Error for GenerationCancelled {}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum GenerationFinishReason {
-    EndOfSequenceToken,
-    MaxNewTokensReached,
-}
-
-impl From<GenerationFinishReason> for TextGenerationFinishReason {
-    fn from(finish_reason: GenerationFinishReason) -> Self {
-        match finish_reason {
-            GenerationFinishReason::EndOfSequenceToken => Self::EndOfSequenceToken,
-            GenerationFinishReason::MaxNewTokensReached => Self::MaxNewTokensReached,
-        }
-    }
-}
-
-impl fmt::Display for GenerationFinishReason {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EndOfSequenceToken => formatter.write_str("end_of_sequence_token"),
-            Self::MaxNewTokensReached => formatter.write_str("max_new_tokens_reached"),
-        }
-    }
-}
 
 #[derive(Clone, Copy)]
 pub(super) enum GenerationPhase {
@@ -177,51 +156,10 @@ pub(super) struct PrefillStartPositions {
     pub(super) draft: Option<usize>,
 }
 
-pub(super) struct CompletedGeneration {
-    pub(super) cached_sequence_token_ids: Vec<u32>,
-    pub(super) stats: TextGenerationStats,
-}
-
-impl CompletedGeneration {
-    // TODO: Revisit this post-construction enrichment when adding incremental prefix-cache
-    // publication. Completion should then combine the finished generation with cache telemetry
-    // accumulated throughout the request.
-    pub(super) fn with_newly_indexed_token_counts(
-        mut self,
-        target: usize,
-        draft: Option<usize>,
-    ) -> Self {
-        self.stats
-            .target_prefix_cache_stats
-            .newly_indexed_token_count = target;
-        if let Some(draft_stats) = self.stats.draft_stats.as_mut() {
-            draft_stats.prefix_cache_stats.newly_indexed_token_count =
-                draft.expect("draft generation stats require draft KV-cache finish token count");
-        }
-        self
-    }
-}
-
-pub(super) struct TextGenerationStats {
-    pub(super) finish_reason: GenerationFinishReason,
-    pub(super) input_token_count: u64,
-    pub(super) output_token_count: u64,
-    pub(super) target_prefix_cache_stats: PrefixCacheGenerationStats,
-    pub(super) draft_stats: Option<DraftGenerationStats>,
-    pub(super) prefill_duration: Duration,
-    pub(super) decode_duration: Duration,
-}
-
-pub(super) struct PrefixCacheGenerationStats {
-    pub(super) restored_token_count: usize,
-    pub(super) newly_indexed_token_count: usize,
-}
-
-pub(super) struct DraftGenerationStats {
-    pub(super) prefix_cache_stats: PrefixCacheGenerationStats,
-    pub(super) accepted_token_count: usize,
-    pub(super) proposed_token_count: usize,
-    pub(super) selected_token_count_histogram: BTreeMap<usize, usize>,
+pub(super) struct GenerationOutput {
+    pub(super) committed_token_ids: Vec<u32>,
+    pub(super) execution_stats: GenerationExecutionStats,
+    pub(super) restored_prefix_token_counts: PrefixTokenCounts,
 }
 
 struct DraftTokenCountState {
@@ -556,31 +494,20 @@ impl RequestExecutionState {
         })
     }
 
-    pub(super) fn into_completed_generation(self) -> Result<CompletedGeneration> {
+    pub(super) fn into_generation_output(self) -> Result<GenerationOutput> {
         let GenerationPhase::Finished { finish_reason } = self.generation_phase else {
             bail!("generation request is not finished")
         };
         let output_token_count = self.tokens.len() - self.input_token_count;
-        let stats = TextGenerationStats {
+        let execution_stats = GenerationExecutionStats {
             finish_reason,
             input_token_count: u64::try_from(self.input_token_count)
                 .context("input token count does not fit in u64")?,
             output_token_count: u64::try_from(output_token_count)
                 .context("output token count does not fit in u64")?,
-            target_prefix_cache_stats: PrefixCacheGenerationStats {
-                restored_token_count: self.prefill_initial_positions.target,
-                newly_indexed_token_count: 0,
-            },
             draft_stats: self
                 .draft_token_count_state
                 .map(|state| DraftGenerationStats {
-                    prefix_cache_stats: PrefixCacheGenerationStats {
-                        restored_token_count: self
-                            .prefill_initial_positions
-                            .draft
-                            .expect("draft token-count state requires a draft prefill position"),
-                        newly_indexed_token_count: 0,
-                    },
                     accepted_token_count: state.accepted_token_count,
                     proposed_token_count: state.proposed_token_count,
                     selected_token_count_histogram: state.selected_token_count_histogram,
@@ -588,9 +515,13 @@ impl RequestExecutionState {
             prefill_duration: self.prefill_duration,
             decode_duration: self.decode_duration,
         };
-        Ok(CompletedGeneration {
-            cached_sequence_token_ids: self.tokens,
-            stats,
+        Ok(GenerationOutput {
+            committed_token_ids: self.tokens,
+            execution_stats,
+            restored_prefix_token_counts: PrefixTokenCounts {
+                target: self.prefill_initial_positions.target,
+                draft: self.prefill_initial_positions.draft,
+            },
         })
     }
 
@@ -1853,7 +1784,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_generation_records_the_finish_reason() {
+    fn generation_output_records_the_finish_reason() {
         for finish_reason in [
             GenerationFinishReason::EndOfSequenceToken,
             GenerationFinishReason::MaxNewTokensReached,
@@ -1862,9 +1793,9 @@ mod tests {
             execution_state.draft_token_count_state = None;
             execution_state.generation_phase = GenerationPhase::Finished { finish_reason };
 
-            let completed = execution_state.into_completed_generation().unwrap();
+            let output = execution_state.into_generation_output().unwrap();
 
-            assert_eq!(completed.stats.finish_reason, finish_reason);
+            assert_eq!(output.execution_stats.finish_reason, finish_reason);
         }
     }
 
@@ -1873,7 +1804,7 @@ mod tests {
         let execution_state = create_test_execution_state(vec![1], vec![]);
 
         let error = execution_state
-            .into_completed_generation()
+            .into_generation_output()
             .err()
             .expect("unfinished generation should not produce a result")
             .to_string();

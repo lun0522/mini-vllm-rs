@@ -18,20 +18,24 @@ use std::path::PathBuf;
 
 use super::draft_token_count::DraftTokenCountController;
 use super::draft_token_count::DraftTokenCountPolicy;
+use super::generation_stats::PrefixCacheGenerationStats;
+use super::generation_stats::PrefixCacheModelStats;
+use super::generation_stats::PrefixTokenCounts;
+use super::generation_stats::TextGenerationStats;
 use super::kv_cache::create_kv_cache;
 use super::kv_cache::KvCacheGeometry;
 use super::kv_cache::PrefixCacheTelemetry;
 use super::model_instance::ModelInstance;
 use super::text_generation;
 
-pub(super) struct ModelRunnerMetadata {
+pub(super) struct ModelExecutorMetadata {
     pub model_metadata: GetModelMetadataResponse,
     /// Minimum target/draft KV-cache token capacity. Request validation uses this
     /// shared limit because speculative generation must keep every sequence in both caches.
     pub kv_cache_token_capacity: usize,
 }
 
-pub(super) struct DraftModelRunnerConfig {
+pub(super) struct DraftModelConfig {
     pub(super) model_path: PathBuf,
     pub(super) token_count_policy: DraftTokenCountPolicy,
 }
@@ -41,27 +45,22 @@ struct DraftModel {
     token_count_policy: DraftTokenCountPolicy,
 }
 
-struct NewlyIndexedTokenCounts {
-    target: usize,
-    draft: Option<usize>,
-}
-
-pub(super) struct ModelRunnerPrefixCacheTelemetry {
+pub(super) struct ModelExecutorPrefixCacheTelemetry {
     pub(super) target: Option<PrefixCacheTelemetry>,
     pub(super) draft: Option<PrefixCacheTelemetry>,
 }
 
 /// Owns the loaded models and executes requests on the inference thread.
-pub(super) struct ModelRunner {
+pub(super) struct ModelExecutor {
     target: ModelInstance,
     draft: Option<DraftModel>,
     prefix_cache_publication_policy: PrefixCachePublicationPolicy,
 }
 
-impl ModelRunner {
+impl ModelExecutor {
     pub(super) fn new(
         model_path: &Path,
-        draft_model_config: Option<DraftModelRunnerConfig>,
+        draft_model_config: Option<DraftModelConfig>,
         inference_device: InferenceDevice,
         activation_dtype: ActivationDType,
         kv_cache_config: KvCacheConfig,
@@ -116,14 +115,14 @@ impl ModelRunner {
         })
     }
 
-    pub(super) fn metadata(&self) -> ModelRunnerMetadata {
+    pub(super) fn metadata(&self) -> ModelExecutorMetadata {
         let target_model = self.target.model_metadata();
         let draft_model = self
             .draft
             .as_ref()
             .map(|draft| draft.model.model_metadata());
         let kv_cache_token_capacity = self.kv_cache_geometry().token_capacity;
-        ModelRunnerMetadata {
+        ModelExecutorMetadata {
             model_metadata: GetModelMetadataResponse {
                 target_model: Some(target_model),
                 draft_model,
@@ -136,8 +135,8 @@ impl ModelRunner {
         self.target.supports_multiple_active_requests()
     }
 
-    pub(super) fn prefix_cache_telemetry(&self) -> ModelRunnerPrefixCacheTelemetry {
-        ModelRunnerPrefixCacheTelemetry {
+    pub(super) fn prefix_cache_telemetry(&self) -> ModelExecutorPrefixCacheTelemetry {
+        ModelExecutorPrefixCacheTelemetry {
             target: self.target.prefix_cache_telemetry(),
             draft: self
                 .draft
@@ -247,9 +246,9 @@ impl ModelRunner {
     pub(super) fn finish_request(
         &mut self,
         execution_state: text_generation::RequestExecutionState,
-    ) -> Result<text_generation::CompletedGeneration> {
+    ) -> Result<TextGenerationStats> {
         let request_id = execution_state.request_id();
-        let result = match execution_state.into_completed_generation() {
+        let output = match execution_state.into_generation_output() {
             Ok(result) => result,
             Err(error) => {
                 if let Err(cleanup_error) = self.abort_request(request_id) {
@@ -261,7 +260,7 @@ impl ModelRunner {
             }
         };
         let newly_indexed_token_counts =
-            match self.finalize_model_instances(request_id, &result.cached_sequence_token_ids) {
+            match self.finalize_model_instances(request_id, &output.committed_token_ids) {
                 Ok(token_counts) => token_counts,
                 Err(error) => {
                     if let Err(cleanup_error) = self.abort_request(request_id) {
@@ -272,10 +271,24 @@ impl ModelRunner {
                     return Err(error);
                 }
             };
-        Ok(result.with_newly_indexed_token_counts(
-            newly_indexed_token_counts.target,
-            newly_indexed_token_counts.draft,
-        ))
+        Ok(TextGenerationStats {
+            execution: output.execution_stats,
+            prefix_cache: PrefixCacheGenerationStats {
+                target: PrefixCacheModelStats {
+                    restored_token_count: output.restored_prefix_token_counts.target,
+                    newly_indexed_token_count: newly_indexed_token_counts.target,
+                },
+                draft: output
+                    .restored_prefix_token_counts
+                    .draft
+                    .map(|restored_token_count| PrefixCacheModelStats {
+                        restored_token_count,
+                        newly_indexed_token_count: newly_indexed_token_counts.draft.expect(
+                            "draft prefix restoration requires draft KV-cache finalization",
+                        ),
+                    }),
+            },
+        })
     }
 
     pub(super) fn abort_request(&mut self, request_id: u64) -> Result<()> {
@@ -305,14 +318,14 @@ impl ModelRunner {
         &mut self,
         request_id: u64,
         token_ids: &[u32],
-    ) -> Result<NewlyIndexedTokenCounts> {
+    ) -> Result<PrefixTokenCounts> {
         let target_result = self.target.finish_request(request_id, token_ids);
         let draft_result = self
             .draft
             .as_mut()
             .map(|draft| draft.model.finish_request(request_id, token_ids))
             .transpose();
-        Ok(NewlyIndexedTokenCounts {
+        Ok(PrefixTokenCounts {
             target: target_result?,
             draft: draft_result?,
         })
@@ -445,16 +458,16 @@ mod tests {
         Ok(ModelInstance::new(model, cache))
     }
 
-    fn test_model_runner(policy: PrefixCachePublicationPolicy) -> Result<ModelRunner> {
-        Ok(ModelRunner {
+    fn test_model_executor(policy: PrefixCachePublicationPolicy) -> Result<ModelExecutor> {
+        Ok(ModelExecutor {
             target: test_model_instance(/* next_token */ 1)?,
             draft: None,
             prefix_cache_publication_policy: policy,
         })
     }
 
-    fn speculative_test_model_runner() -> Result<ModelRunner> {
-        Ok(ModelRunner {
+    fn speculative_test_model_executor() -> Result<ModelExecutor> {
+        Ok(ModelExecutor {
             target: test_model_instance(/* next_token */ 1)?,
             draft: Some(DraftModel {
                 model: test_model_instance(/* next_token */ 0)?,
@@ -477,19 +490,19 @@ mod tests {
         }
     }
 
-    fn current_indexed_token_count(model_runner: &ModelRunner) -> usize {
-        model_runner
+    fn current_indexed_token_count(model_executor: &ModelExecutor) -> usize {
+        model_executor
             .target
             .prefix_cache_telemetry()
             .expect("test cache should have prefix caching enabled")
             .current_indexed_token_count
     }
 
-    fn draft_current_indexed_token_count(model_runner: &ModelRunner) -> usize {
-        model_runner
+    fn draft_current_indexed_token_count(model_executor: &ModelExecutor) -> usize {
+        model_executor
             .draft
             .as_ref()
-            .expect("test model runner should have a draft model")
+            .expect("test model executor should have a draft model")
             .model
             .prefix_cache_telemetry()
             .expect("test cache should have prefix caching enabled")
@@ -498,103 +511,84 @@ mod tests {
 
     #[test]
     fn completion_policy_publishes_only_when_finishing() -> Result<()> {
-        let mut model_runner =
-            test_model_runner(PrefixCachePublicationPolicy::OnRequestCompletion)?;
-        let execution_state = model_runner.start_request(test_request())?;
+        let mut model_executor =
+            test_model_executor(PrefixCachePublicationPolicy::OnRequestCompletion)?;
+        let execution_state = model_executor.start_request(test_request())?;
         let mut batch = text_generation::RequestExecutionBatch::with_capacity(1);
         batch.push(Box::new(execution_state), /* token_budget */ 5);
 
-        model_runner.run_steps(&mut batch)?;
-        assert_eq!(current_indexed_token_count(&model_runner), 0);
+        model_executor.run_steps(&mut batch)?;
+        assert_eq!(current_indexed_token_count(&model_executor), 0);
 
         let execution_state = *batch
             .into_execution_states()
             .next()
             .expect("test batch should contain one request");
-        let completed = model_runner.finish_request(execution_state)?;
-        assert_eq!(
-            completed
-                .stats
-                .target_prefix_cache_stats
-                .newly_indexed_token_count,
-            4
-        );
-        assert_eq!(current_indexed_token_count(&model_runner), 4);
+        let stats = model_executor.finish_request(execution_state)?;
+        assert_eq!(stats.prefix_cache.target.newly_indexed_token_count, 4);
+        assert_eq!(current_indexed_token_count(&model_executor), 4);
         Ok(())
     }
 
     #[test]
     fn incremental_policy_publishes_new_complete_pages_after_each_step() -> Result<()> {
-        let mut model_runner = test_model_runner(PrefixCachePublicationPolicy::Incremental)?;
-        let execution_state = model_runner.start_request(test_request())?;
+        let mut model_executor = test_model_executor(PrefixCachePublicationPolicy::Incremental)?;
+        let execution_state = model_executor.start_request(test_request())?;
         let mut batch = text_generation::RequestExecutionBatch::with_capacity(1);
         batch.push(Box::new(execution_state), /* token_budget */ 2);
 
-        model_runner.run_steps(&mut batch)?;
-        assert_eq!(current_indexed_token_count(&model_runner), 2);
+        model_executor.run_steps(&mut batch)?;
+        assert_eq!(current_indexed_token_count(&model_executor), 2);
 
-        model_runner.run_steps(&mut batch)?;
-        assert_eq!(current_indexed_token_count(&model_runner), 4);
+        model_executor.run_steps(&mut batch)?;
+        assert_eq!(current_indexed_token_count(&model_executor), 4);
 
         // The final one-token prefill fragment does not complete another two-token page.
-        model_runner.run_steps(&mut batch)?;
-        assert_eq!(current_indexed_token_count(&model_runner), 4);
+        model_executor.run_steps(&mut batch)?;
+        assert_eq!(current_indexed_token_count(&model_executor), 4);
 
         let execution_state = *batch
             .into_execution_states()
             .next()
             .expect("test batch should contain one request");
-        let completed = model_runner.finish_request(execution_state)?;
-        assert_eq!(
-            completed
-                .stats
-                .target_prefix_cache_stats
-                .newly_indexed_token_count,
-            4
-        );
-        assert_eq!(current_indexed_token_count(&model_runner), 4);
+        let stats = model_executor.finish_request(execution_state)?;
+        assert_eq!(stats.prefix_cache.target.newly_indexed_token_count, 4);
+        assert_eq!(current_indexed_token_count(&model_executor), 4);
         Ok(())
     }
 
     #[test]
     fn incremental_policy_publishes_after_speculative_rollback() -> Result<()> {
-        let mut model_runner = speculative_test_model_runner()?;
+        let mut model_executor = speculative_test_model_executor()?;
         let mut request = test_request();
         request.max_new_tokens = 1;
-        let execution_state = model_runner.start_request(request)?;
+        let execution_state = model_executor.start_request(request)?;
         let mut batch = text_generation::RequestExecutionBatch::with_capacity(1);
         batch.push(Box::new(execution_state), /* token_budget */ 4);
 
         // Speculative prefill caches and publishes the first four input tokens in both models.
-        model_runner.run_steps(&mut batch)?;
-        assert_eq!(current_indexed_token_count(&model_runner), 4);
-        assert_eq!(draft_current_indexed_token_count(&model_runner), 4);
+        model_executor.run_steps(&mut batch)?;
+        assert_eq!(current_indexed_token_count(&model_executor), 4);
+        assert_eq!(draft_current_indexed_token_count(&model_executor), 4);
 
         // The draft proposes token 0 while the target selects token 1. Verification temporarily
         // appends the rejected proposal, then truncates both caches to five tokens. Publication
         // must therefore leave the four-token complete prefix unchanged.
-        model_runner.run_steps(&mut batch)?;
-        assert_eq!(current_indexed_token_count(&model_runner), 4);
-        assert_eq!(draft_current_indexed_token_count(&model_runner), 4);
+        model_executor.run_steps(&mut batch)?;
+        assert_eq!(current_indexed_token_count(&model_executor), 4);
+        assert_eq!(draft_current_indexed_token_count(&model_executor), 4);
 
         let execution_state = *batch
             .into_execution_states()
             .next()
             .expect("test batch should contain one request");
-        let completed = model_runner.finish_request(execution_state)?;
+        let stats = model_executor.finish_request(execution_state)?;
+        assert_eq!(stats.prefix_cache.target.newly_indexed_token_count, 4);
         assert_eq!(
-            completed
-                .stats
-                .target_prefix_cache_stats
-                .newly_indexed_token_count,
-            4
-        );
-        assert_eq!(
-            completed
-                .stats
-                .draft_stats
+            stats
+                .prefix_cache
+                .draft
                 .expect("speculative generation should report draft stats")
-                .prefix_cache_stats
                 .newly_indexed_token_count,
             4
         );
@@ -603,33 +597,33 @@ mod tests {
 
     #[test]
     fn publishes_target_and_draft_prefixes_at_their_independent_progress() -> Result<()> {
-        let mut model_runner = speculative_test_model_runner()?;
+        let mut model_executor = speculative_test_model_executor()?;
         let request_id = 1;
-        model_runner.prepare_model_instances(request_id)?;
+        model_executor.prepare_model_instances(request_id)?;
 
         let target_input = ForwardInput {
             request_id,
             input: Tensor::new(&[[1u32, 2, 3, 4]], &Device::Cpu)?,
             start_position: 0,
         };
-        model_runner.target.forward(&[target_input])?;
+        model_executor.target.forward(&[target_input])?;
         let draft_input = ForwardInput {
             request_id,
             input: Tensor::new(&[[1u32, 2]], &Device::Cpu)?,
             start_position: 0,
         };
-        model_runner
+        model_executor
             .draft
             .as_mut()
             .expect("test model runner should have a draft model")
             .model
             .forward(&[draft_input])?;
 
-        model_runner.publish_completed_prefix(request_id, &[1, 2, 3, 4])?;
+        model_executor.publish_completed_prefix(request_id, &[1, 2, 3, 4])?;
 
-        assert_eq!(current_indexed_token_count(&model_runner), 4);
-        assert_eq!(draft_current_indexed_token_count(&model_runner), 2);
-        model_runner.abort_request(request_id)?;
+        assert_eq!(current_indexed_token_count(&model_executor), 4);
+        assert_eq!(draft_current_indexed_token_count(&model_executor), 2);
+        model_executor.abort_request(request_id)?;
         Ok(())
     }
 

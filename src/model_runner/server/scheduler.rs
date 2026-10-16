@@ -408,7 +408,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_runner::server::text_generation::GenerationFinishReason;
+    use crate::model_runner::server::generation_stats::GenerationFinishReason;
     use crate::model_runner::PrefixCacheCoordinationPolicy;
 
     fn scheduler_with_token_budget(

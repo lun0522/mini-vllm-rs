@@ -6,7 +6,7 @@ use crate::proto::model_runner::InferenceBackendPrefixCacheTelemetry;
 use crate::proto::model_runner::PrefixCacheStats;
 use crate::proto::model_runner::PrefixCacheTelemetry as PrefixCacheTelemetryProto;
 use crate::proto::model_runner::TextGenerationFinishReason;
-use crate::proto::model_runner::TextGenerationStats;
+use crate::proto::model_runner::TextGenerationStats as TextGenerationStatsProto;
 use anyhow::Context;
 use anyhow::Result;
 use log::error;
@@ -18,8 +18,11 @@ use thousands::Separable;
 use tokio::sync::mpsc;
 use tonic::Status;
 
+use super::generation_stats::DraftGenerationStats;
+use super::generation_stats::PrefixCacheModelStats;
+use super::generation_stats::TextGenerationStats;
 use super::kv_cache::PrefixCacheTelemetry;
-use super::model_runner::ModelRunner;
+use super::model_executor::ModelExecutor;
 use super::request_manager::RequestExecutionResult;
 use super::request_manager::RequestManager;
 use super::request_manager::RequestOutcome;
@@ -32,7 +35,7 @@ use super::InferenceWorkerMessage;
 /// Coordinates request storage, scheduling, model execution, and result delivery.
 pub(super) struct InferenceWorker {
     backend_id: usize,
-    model_runner: ModelRunner,
+    model_executor: ModelExecutor,
     request_manager: RequestManager,
     scheduler: Scheduler,
 }
@@ -40,15 +43,15 @@ pub(super) struct InferenceWorker {
 impl InferenceWorker {
     pub(super) fn new(
         backend_id: usize,
-        model_runner: ModelRunner,
+        model_executor: ModelExecutor,
         scheduler_config: SchedulerConfig,
     ) -> Self {
-        let scheduler_config = normalize_scheduler_config(&model_runner, scheduler_config);
-        let kv_cache_geometry = model_runner.kv_cache_geometry();
+        let scheduler_config = normalize_scheduler_config(&model_executor, scheduler_config);
+        let kv_cache_geometry = model_executor.kv_cache_geometry();
         info!("Scheduler config: {scheduler_config}");
         Self {
             backend_id,
-            model_runner,
+            model_executor,
             request_manager: RequestManager::new(),
             scheduler: Scheduler::new(scheduler_config, kv_cache_geometry),
         }
@@ -80,7 +83,7 @@ impl InferenceWorker {
         match message {
             InferenceWorkerMessage::Generate(request) => self.enqueue_request(request),
             InferenceWorkerMessage::GetPrefixCacheTelemetry { response_sender } => {
-                let telemetry = self.model_runner.prefix_cache_telemetry();
+                let telemetry = self.model_executor.prefix_cache_telemetry();
                 let _ = response_sender.send(InferenceBackendPrefixCacheTelemetry {
                     backend_id: self.backend_id as u64,
                     target: telemetry.target.map(PrefixCacheTelemetryProto::from),
@@ -120,9 +123,9 @@ impl InferenceWorker {
 
     fn start_request(&mut self, request_id: u64) -> Result<()> {
         let started_request = {
-            let model_runner = &mut self.model_runner;
+            let model_executor = &mut self.model_executor;
             self.request_manager
-                .start_execution(request_id, |request| model_runner.start_request(request))?
+                .start_execution(request_id, |request| model_executor.start_request(request))?
         };
         // Cache restoration during startup may shorten prefill or move the request directly into
         // decode, so synchronize the scheduler with the execution state's actual initial phase.
@@ -147,11 +150,11 @@ impl InferenceWorker {
         &mut self,
         scheduling_decision: SchedulingDecision,
     ) -> Result<()> {
-        let model_runner = &mut self.model_runner;
+        let model_executor = &mut self.model_executor;
         let results = self
             .request_manager
             .advance_executions(&scheduling_decision.requests, |execution_batch| {
-                model_runner.run_steps(execution_batch)
+                model_executor.run_steps(execution_batch)
             });
         for RequestExecutionResult { request_id, result } in results {
             match result {
@@ -183,11 +186,11 @@ impl InferenceWorker {
             return Ok(());
         }
 
-        let model_runner = &mut self.model_runner;
+        let model_executor = &mut self.model_executor;
         let request_outcome = self
             .request_manager
             .finish_request(request_id, |execution_state| {
-                model_runner.finish_request(execution_state)
+                model_executor.finish_request(execution_state)
             })?;
         self.report_request_outcome(request_id, &request_outcome);
         if request_outcome.result.is_ok() {
@@ -212,7 +215,7 @@ impl InferenceWorker {
         }
 
         let committed_token_ids = self.request_manager.committed_token_ids(request_id)?;
-        self.model_runner
+        self.model_executor
             .publish_completed_prefix(request_id, committed_token_ids)?;
         self.scheduler.release_prefix_flight(request_id)
     }
@@ -224,7 +227,7 @@ impl InferenceWorker {
 
     /// Releases model state and attaches any cleanup failure to the execution error.
     fn abort_model_execution(&mut self, request_id: u64, error: anyhow::Error) -> anyhow::Error {
-        match self.model_runner.abort_request(request_id) {
+        match self.model_executor.abort_request(request_id) {
             Ok(()) => error,
             Err(cleanup_error) => {
                 error.context(format!("request cleanup also failed: {cleanup_error:#}"))
@@ -251,15 +254,15 @@ impl InferenceWorker {
         let ttft_as_micros_string =
             elapsed_microseconds_string(queued_at, request_outcome.metrics.first_token_at);
         match &request_outcome.result {
-            Ok(result) => {
+            Ok(stats) => {
                 let client_stats = create_client_facing_generation_stats(
-                    &result.stats,
+                    stats,
                     queued_at,
                     request_outcome.metrics.first_token_at,
                     request_outcome.metrics.last_token_at,
                     completed_at,
                 );
-                let draft_stats = result.stats.draft_stats.as_ref();
+                let draft_stats = stats.execution.draft_stats.as_ref();
                 info!(
                     "Worker state (backend_id={}): request_id={} status=completed finish_reason={} \
                      input_tokens={} output_tokens={} queue_us={} prefill_us={} ttft_us={} \
@@ -269,18 +272,18 @@ impl InferenceWorker {
                      draft_proposed={} draft_selected_histogram={}",
                     self.backend_id,
                     request_id,
-                    result.stats.finish_reason,
-                    result.stats.input_token_count,
-                    result.stats.output_token_count,
+                    stats.execution.finish_reason,
+                    stats.execution.input_token_count,
+                    stats.execution.output_token_count,
                     queue_duration.as_micros().separate_with_commas(),
-                    result
-                        .stats
+                    stats
+                        .execution
                         .prefill_duration
                         .as_micros()
                         .separate_with_commas(),
                     ttft_as_micros_string,
-                    result
-                        .stats
+                    stats
+                        .execution
                         .decode_duration
                         .as_micros()
                         .separate_with_commas(),
@@ -288,16 +291,24 @@ impl InferenceWorker {
                         .duration_since(queued_at)
                         .as_micros()
                         .separate_with_commas(),
-                    result.stats.target_prefix_cache_stats.restored_token_count,
-                    result
-                        .stats
-                        .target_prefix_cache_stats
+                    stats.prefix_cache.target.restored_token_count,
+                    stats
+                        .prefix_cache
+                        .target
                         .newly_indexed_token_count,
                     count_to_string(
-                        draft_stats.map(|stats| stats.prefix_cache_stats.restored_token_count)
+                        stats
+                            .prefix_cache
+                            .draft
+                            .as_ref()
+                            .map(|stats| stats.restored_token_count)
                     ),
                     count_to_string(
-                        draft_stats.map(|stats| stats.prefix_cache_stats.newly_indexed_token_count)
+                        stats
+                            .prefix_cache
+                            .draft
+                            .as_ref()
+                            .map(|stats| stats.newly_indexed_token_count)
                     ),
                     count_to_string(draft_stats.map(|stats| stats.accepted_token_count)),
                     count_to_string(draft_stats.map(|stats| stats.proposed_token_count)),
@@ -325,10 +336,10 @@ impl InferenceWorker {
 }
 
 fn normalize_scheduler_config(
-    model_runner: &ModelRunner,
+    model_executor: &ModelExecutor,
     mut scheduler_config: SchedulerConfig,
 ) -> SchedulerConfig {
-    if !model_runner.supports_multiple_active_requests()
+    if !model_executor.supports_multiple_active_requests()
         && scheduler_config.max_active_request_count > 1
     {
         warn!("Current KV cache type limits max_active_requests to 1");
@@ -349,18 +360,23 @@ fn generation_error_status(error: &anyhow::Error) -> Status {
 }
 
 fn create_client_facing_generation_stats(
-    stats: &text_generation::TextGenerationStats,
+    stats: &TextGenerationStats,
     queued_at: Instant,
     first_token_at: Option<Instant>,
     last_token_at: Option<Instant>,
     completed_at: Instant,
-) -> TextGenerationStats {
-    let draft_token_stats = stats.draft_stats.as_ref().map(DraftTokenStats::from);
-    let target_prefix_cache_stats = Some(PrefixCacheStats::from(&stats.target_prefix_cache_stats));
-    let draft_prefix_cache_stats = stats
+) -> TextGenerationStatsProto {
+    let draft_token_stats = stats
+        .execution
         .draft_stats
         .as_ref()
-        .map(|draft_stats| PrefixCacheStats::from(&draft_stats.prefix_cache_stats));
+        .map(DraftTokenStats::from);
+    let target_prefix_cache_stats = Some(PrefixCacheStats::from(&stats.prefix_cache.target));
+    let draft_prefix_cache_stats = stats
+        .prefix_cache
+        .draft
+        .as_ref()
+        .map(PrefixCacheStats::from);
     let timing = Some(create_generation_timing(
         stats,
         queued_at,
@@ -368,10 +384,10 @@ fn create_client_facing_generation_stats(
         last_token_at,
         completed_at,
     ));
-    TextGenerationStats {
-        finish_reason: TextGenerationFinishReason::from(stats.finish_reason) as i32,
-        input_token_count: stats.input_token_count,
-        output_token_count: stats.output_token_count,
+    TextGenerationStatsProto {
+        finish_reason: TextGenerationFinishReason::from(stats.execution.finish_reason) as i32,
+        input_token_count: stats.execution.input_token_count,
+        output_token_count: stats.execution.output_token_count,
         timing,
         draft_token_stats,
         target_prefix_cache_stats,
@@ -380,7 +396,7 @@ fn create_client_facing_generation_stats(
 }
 
 fn create_generation_timing(
-    stats: &text_generation::TextGenerationStats,
+    stats: &TextGenerationStats,
     queued_at: Instant,
     first_token_at: Option<Instant>,
     last_token_at: Option<Instant>,
@@ -393,8 +409,8 @@ fn create_generation_timing(
         time_to_last_token_microseconds: last_token_at.map_or(0, |last_token_at| {
             duration_to_microseconds(last_token_at.duration_since(queued_at))
         }),
-        prefill_duration_microseconds: duration_to_microseconds(stats.prefill_duration),
-        decode_duration_microseconds: duration_to_microseconds(stats.decode_duration),
+        prefill_duration_microseconds: duration_to_microseconds(stats.execution.prefill_duration),
+        decode_duration_microseconds: duration_to_microseconds(stats.execution.decode_duration),
         request_completion_latency_microseconds: duration_to_microseconds(
             completed_at.duration_since(queued_at),
         ),
@@ -421,7 +437,7 @@ fn count_to_string(count: Option<usize>) -> String {
     count.map_or_else(|| "none".to_owned(), |count| count.to_string())
 }
 
-fn draft_histogram_to_string(stats: Option<&text_generation::DraftGenerationStats>) -> String {
+fn draft_histogram_to_string(stats: Option<&DraftGenerationStats>) -> String {
     stats.map_or_else(
         || "none".to_owned(),
         |stats| {
@@ -449,8 +465,8 @@ impl From<PrefixCacheTelemetry> for PrefixCacheTelemetryProto {
     }
 }
 
-impl From<&text_generation::PrefixCacheGenerationStats> for PrefixCacheStats {
-    fn from(stats: &text_generation::PrefixCacheGenerationStats) -> Self {
+impl From<&PrefixCacheModelStats> for PrefixCacheStats {
+    fn from(stats: &PrefixCacheModelStats) -> Self {
         Self {
             restored_token_count: stats.restored_token_count as u64,
             newly_indexed_token_count: stats.newly_indexed_token_count as u64,
@@ -458,8 +474,8 @@ impl From<&text_generation::PrefixCacheGenerationStats> for PrefixCacheStats {
     }
 }
 
-impl From<&text_generation::DraftGenerationStats> for DraftTokenStats {
-    fn from(stats: &text_generation::DraftGenerationStats) -> Self {
+impl From<&DraftGenerationStats> for DraftTokenStats {
+    fn from(stats: &DraftGenerationStats) -> Self {
         Self {
             accepted_token_count: stats.accepted_token_count as u64,
             proposed_token_count: stats.proposed_token_count as u64,
@@ -480,6 +496,9 @@ impl From<&text_generation::DraftGenerationStats> for DraftTokenStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_runner::server::generation_stats::GenerationExecutionStats;
+    use crate::model_runner::server::generation_stats::GenerationFinishReason;
+    use crate::model_runner::server::generation_stats::PrefixCacheGenerationStats;
     use std::collections::BTreeMap;
 
     #[test]
@@ -493,17 +512,22 @@ mod tests {
 
     #[test]
     fn omits_draft_stats_for_target_only_generation() {
-        let stats = text_generation::TextGenerationStats {
-            finish_reason: text_generation::GenerationFinishReason::EndOfSequenceToken,
-            input_token_count: 3,
-            output_token_count: 2,
-            target_prefix_cache_stats: text_generation::PrefixCacheGenerationStats {
-                restored_token_count: 0,
-                newly_indexed_token_count: 0,
+        let stats = TextGenerationStats {
+            execution: GenerationExecutionStats {
+                finish_reason: GenerationFinishReason::EndOfSequenceToken,
+                input_token_count: 3,
+                output_token_count: 2,
+                draft_stats: None,
+                prefill_duration: Duration::ZERO,
+                decode_duration: Duration::ZERO,
             },
-            draft_stats: None,
-            prefill_duration: Duration::ZERO,
-            decode_duration: Duration::ZERO,
+            prefix_cache: PrefixCacheGenerationStats {
+                target: PrefixCacheModelStats {
+                    restored_token_count: 0,
+                    newly_indexed_token_count: 0,
+                },
+                draft: None,
+            },
         };
         let now = Instant::now();
 
@@ -521,25 +545,29 @@ mod tests {
 
     #[test]
     fn converts_draft_stats_with_a_sorted_histogram() {
-        let stats = text_generation::TextGenerationStats {
-            finish_reason: text_generation::GenerationFinishReason::MaxNewTokensReached,
-            input_token_count: 3,
-            output_token_count: 2,
-            target_prefix_cache_stats: text_generation::PrefixCacheGenerationStats {
-                restored_token_count: 16,
-                newly_indexed_token_count: 32,
+        let stats = TextGenerationStats {
+            execution: GenerationExecutionStats {
+                finish_reason: GenerationFinishReason::MaxNewTokensReached,
+                input_token_count: 3,
+                output_token_count: 2,
+                draft_stats: Some(DraftGenerationStats {
+                    accepted_token_count: 5,
+                    proposed_token_count: 8,
+                    selected_token_count_histogram: BTreeMap::from([(3, 2), (4, 1)]),
+                }),
+                prefill_duration: Duration::from_micros(123),
+                decode_duration: Duration::from_micros(456),
             },
-            draft_stats: Some(text_generation::DraftGenerationStats {
-                prefix_cache_stats: text_generation::PrefixCacheGenerationStats {
+            prefix_cache: PrefixCacheGenerationStats {
+                target: PrefixCacheModelStats {
+                    restored_token_count: 16,
+                    newly_indexed_token_count: 32,
+                },
+                draft: Some(PrefixCacheModelStats {
                     restored_token_count: 8,
                     newly_indexed_token_count: 24,
-                },
-                accepted_token_count: 5,
-                proposed_token_count: 8,
-                selected_token_count_histogram: BTreeMap::from([(3, 2), (4, 1)]),
-            }),
-            prefill_duration: Duration::from_micros(123),
-            decode_duration: Duration::from_micros(456),
+                }),
+            },
         };
         let now = Instant::now();
 
