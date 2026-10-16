@@ -75,7 +75,7 @@ impl MainProcessService for MainProcessRpcService {
 
 #[cfg(test)]
 mod tests {
-    use super::ControlServer;
+    use super::*;
     use crate::proto::main_process::main_process_service_client::MainProcessServiceClient;
     use crate::proto::main_process::Shutdown;
     use crate::utils::domain_socket;

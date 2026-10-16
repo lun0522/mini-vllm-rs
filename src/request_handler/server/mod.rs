@@ -235,8 +235,7 @@ fn premature_stream_end_status() -> Status {
 
 #[cfg(test)]
 mod tests {
-    use super::premature_stream_end_status;
-    use super::RequestId;
+    use super::*;
 
     #[test]
     fn request_id_returns_the_current_value_before_incrementing() {

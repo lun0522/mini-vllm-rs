@@ -26,11 +26,14 @@ use super::model_executor::ModelExecutor;
 use super::request_manager::RequestExecutionResult;
 use super::request_manager::RequestManager;
 use super::request_manager::RequestOutcome;
+use super::request_orchestrator::CacheAffinityState;
+use super::request_orchestrator::OperationalState;
 use super::scheduler::Scheduler;
 use super::scheduler::SchedulingDecision;
 use super::text_generation;
 use super::InferenceRequest;
 use super::InferenceWorkerMessage;
+use tokio::sync::watch;
 
 /// Coordinates request storage, scheduling, model execution, and result delivery.
 pub(super) struct InferenceWorker {
@@ -38,6 +41,8 @@ pub(super) struct InferenceWorker {
     model_executor: ModelExecutor,
     request_manager: RequestManager,
     scheduler: Scheduler,
+    operational_state_sender: watch::Sender<OperationalState>,
+    cache_affinity_state_sender: watch::Sender<CacheAffinityState>,
 }
 
 impl InferenceWorker {
@@ -45,6 +50,8 @@ impl InferenceWorker {
         backend_id: usize,
         model_executor: ModelExecutor,
         scheduler_config: SchedulerConfig,
+        operational_state_sender: watch::Sender<OperationalState>,
+        cache_affinity_state_sender: watch::Sender<CacheAffinityState>,
     ) -> Self {
         let scheduler_config = normalize_scheduler_config(&model_executor, scheduler_config);
         let kv_cache_geometry = model_executor.kv_cache_geometry();
@@ -54,10 +61,14 @@ impl InferenceWorker {
             model_executor,
             request_manager: RequestManager::new(),
             scheduler: Scheduler::new(scheduler_config, kv_cache_geometry),
+            operational_state_sender,
+            cache_affinity_state_sender,
         }
     }
 
     pub(super) fn run(mut self, mut message_receiver: mpsc::Receiver<InferenceWorkerMessage>) {
+        self.publish_operational_state();
+        self.publish_cache_affinity_state();
         loop {
             if self.scheduler.is_vacant() {
                 let Some(message) = message_receiver.blocking_recv() else {
@@ -106,6 +117,7 @@ impl InferenceWorker {
                     max_new_token_count,
                 )
             })?;
+        self.publish_operational_state();
         Ok(())
     }
 
@@ -194,10 +206,13 @@ impl InferenceWorker {
             })?;
         self.report_request_outcome(request_id, &request_outcome);
         if request_outcome.result.is_ok() {
-            self.scheduler.complete_request(request_id)
+            self.scheduler.complete_request(request_id)?;
         } else {
-            self.scheduler.abort_request(request_id)
+            self.scheduler.abort_request(request_id)?;
         }
+        self.publish_operational_state();
+        self.publish_cache_affinity_state();
+        Ok(())
     }
 
     /// Updates scheduling state and optionally publishes a completed prefix so requests with the
@@ -241,7 +256,29 @@ impl InferenceWorker {
         self.scheduler.remove_active_request(request_id)?;
         let request_outcome = self.request_manager.abort_request(request_id, error)?;
         self.report_request_outcome(request_id, &request_outcome);
-        self.scheduler.abort_request(request_id)
+        self.scheduler.abort_request(request_id)?;
+        self.publish_operational_state();
+        self.publish_cache_affinity_state();
+        Ok(())
+    }
+
+    fn publish_operational_state(&self) {
+        self.operational_state_sender
+            .send_replace(OperationalState {
+                request_count: self.scheduler.request_count(),
+            });
+    }
+
+    fn publish_cache_affinity_state(&self) {
+        let indexed_token_count = self
+            .model_executor
+            .prefix_cache_telemetry()
+            .target
+            .map_or(0, |telemetry| telemetry.current_indexed_token_count);
+        self.cache_affinity_state_sender
+            .send_replace(CacheAffinityState {
+                indexed_token_count,
+            });
     }
 
     fn report_request_outcome(&self, request_id: u64, request_outcome: &RequestOutcome) {

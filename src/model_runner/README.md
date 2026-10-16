@@ -15,6 +15,7 @@ flowchart LR
     Orchestrator -->|Selected backend index| Rpc
     Rpc -->|Bounded queue per backend| Backends["Inference backend(s)<br/>CPU and/or GPU<br/>Dedicated thread each"]
     Backends --> Worker["InferenceWorker<br/>Scheduler + request manager"]
+    Worker -->|Latest operational and cache-affinity state| Orchestrator
     Worker --> Models["Target + optional draft model<br/>Independent KV caches"]
 ```
 
@@ -27,6 +28,9 @@ models, and KV caches; a request is never split across devices.
 The request orchestrator owns only the configured backend-selection policy
 state and returns a backend index. The RPC service retains ownership of the
 backend queues and dispatches each request according to that decision.
+Workers publish replaceable operational and cache-affinity snapshots to the
+orchestrator at sparse request-lifecycle boundaries. The initial round-robin
+policy observes but does not yet use those snapshots.
 
 The server binds its Unix socket only after every configured backend has loaded
 its models, making the socket a readiness signal. After startup, inference
