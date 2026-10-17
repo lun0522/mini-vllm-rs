@@ -23,6 +23,8 @@ use anyhow::Context;
 use anyhow::Result;
 use log::info;
 use log::warn;
+use std::fmt;
+use std::num::NonZeroU64;
 use std::thread::JoinHandle;
 use std::time::Instant;
 use tokio::net::UnixListener;
@@ -64,6 +66,30 @@ use request_orchestrator::RequestRoutingContext;
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_MODEL_RUNNER";
 const INFERENCE_MESSAGE_QUEUE_CAPACITY: usize = 32;
 const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
+
+/// Identifies an inference backend with a one-based value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct BackendId(NonZeroU64);
+
+impl BackendId {
+    fn from_index(index: usize) -> Self {
+        let value = u64::try_from(index)
+            .expect("inference backend index does not fit in u64")
+            .checked_add(1)
+            .expect("inference backend ID exceeds u64");
+        Self(NonZeroU64::new(value).expect("one-based backend ID must be nonzero"))
+    }
+
+    fn index(self) -> usize {
+        usize::try_from(self.0.get() - 1).expect("inference backend index does not fit in usize")
+    }
+}
+
+impl fmt::Display for BackendId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
 
 struct InferenceBackend {
     metadata: ModelExecutorMetadata,
@@ -219,8 +245,12 @@ impl ModelRunnerService for ModelRunnerRpcService {
                 input_token_count: request.input_token_ids.len(),
                 max_new_token_count: request.max_new_tokens,
             });
+        info!(
+            "Request routing: request_id={request_id} backend_id={}",
+            routing_decision.backend_id
+        );
         let (event_sender, event_receiver) = mpsc::channel(GENERATION_EVENT_QUEUE_CAPACITY);
-        self.inference_message_senders[routing_decision.backend_index]
+        self.inference_message_senders[routing_decision.backend_id.index()]
             .send(InferenceWorkerMessage::Generate(InferenceRequest {
                 queued_at,
                 generate_text: request,
@@ -255,7 +285,7 @@ fn create_inference_backends(
     let mut threads = Vec::with_capacity(inference_devices.len());
     let mut channels = Vec::with_capacity(inference_devices.len());
     for (index, device) in inference_devices.iter().enumerate() {
-        let backend_id = index + 1;
+        let backend_id = BackendId::from_index(index);
         let inference_backend: InferenceBackend =
             create_inference_backend(backend_id, args, *device)?;
         if let Some(metadata) = maybe_metadata.as_mut() {
@@ -279,7 +309,7 @@ fn create_inference_backends(
 }
 
 fn create_inference_backend(
-    backend_id: usize,
+    backend_id: BackendId,
     args: &ModelRunnerProcessArgs,
     inference_device: InferenceDevice,
 ) -> Result<InferenceBackend> {
@@ -448,6 +478,16 @@ mod tests {
                 context_length,
                 ..Default::default()
             }),
+        }
+    }
+
+    #[test]
+    fn backend_ids_are_one_based_vector_positions() {
+        for index in 0..3 {
+            let backend_id = BackendId::from_index(index);
+
+            assert_eq!(backend_id.index(), index);
+            assert_eq!(backend_id.0.get(), index as u64 + 1);
         }
     }
 

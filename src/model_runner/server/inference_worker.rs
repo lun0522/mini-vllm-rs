@@ -31,13 +31,14 @@ use super::request_orchestrator::OperationalState;
 use super::scheduler::Scheduler;
 use super::scheduler::SchedulingDecision;
 use super::text_generation;
+use super::BackendId;
 use super::InferenceRequest;
 use super::InferenceWorkerMessage;
 use tokio::sync::watch;
 
 /// Coordinates request storage, scheduling, model execution, and result delivery.
 pub(super) struct InferenceWorker {
-    backend_id: usize,
+    backend_id: BackendId,
     model_executor: ModelExecutor,
     request_manager: RequestManager,
     scheduler: Scheduler,
@@ -47,7 +48,7 @@ pub(super) struct InferenceWorker {
 
 impl InferenceWorker {
     pub(super) fn new(
-        backend_id: usize,
+        backend_id: BackendId,
         model_executor: ModelExecutor,
         scheduler_config: SchedulerConfig,
         operational_state_sender: watch::Sender<OperationalState>,
@@ -96,7 +97,7 @@ impl InferenceWorker {
             InferenceWorkerMessage::GetPrefixCacheTelemetry { response_sender } => {
                 let telemetry = self.model_executor.prefix_cache_telemetry();
                 let _ = response_sender.send(InferenceBackendPrefixCacheTelemetry {
-                    backend_id: self.backend_id as u64,
+                    backend_id: self.backend_id.0.get(),
                     target: telemetry.target.map(PrefixCacheTelemetryProto::from),
                     draft: telemetry.draft.map(PrefixCacheTelemetryProto::from),
                 });

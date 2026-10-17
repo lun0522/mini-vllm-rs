@@ -14,6 +14,7 @@ use super::routing_policy::LeastEstimatedWorkPolicy;
 use super::routing_policy::LeastRequestsPolicy;
 use super::routing_policy::MostCachedPrefixPolicy;
 use super::routing_policy::RoundRobinPolicy;
+use super::BackendId;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct OperationalState {
@@ -46,7 +47,7 @@ pub(super) struct BackendStateReceivers {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RoutingDecision {
-    pub(super) backend_index: usize,
+    pub(super) backend_id: BackendId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,20 +81,28 @@ impl RequestOrchestrator {
             "request orchestration requires a backend"
         );
         info!("Request orchestrator config: {config}");
-        let policy: Box<dyn BackendRoutingPolicy> = match config.routing_policy {
+        let RequestOrchestratorConfig {
+            routing_policy,
+            throughput_profiles,
+        } = config;
+        let policy: Box<dyn BackendRoutingPolicy> = match routing_policy {
             RequestRoutingPolicy::RoundRobin => Box::new(RoundRobinPolicy::new(backend_count)),
             RequestRoutingPolicy::LeastRequests => {
                 Box::new(LeastRequestsPolicy::new(backend_state_receivers))
             }
-            RequestRoutingPolicy::LeastEstimatedWork => {
-                Box::new(LeastEstimatedWorkPolicy::new(backend_state_receivers))
-            }
+            RequestRoutingPolicy::LeastEstimatedWork => Box::new(LeastEstimatedWorkPolicy::new(
+                backend_state_receivers,
+                throughput_profiles,
+            )),
             RequestRoutingPolicy::MostCachedPrefix => {
                 Box::new(MostCachedPrefixPolicy::new(backend_state_receivers))
             }
-            RequestRoutingPolicy::CacheAwareLeastEstimatedWork => Box::new(
-                CacheAwareLeastEstimatedWorkPolicy::new(backend_state_receivers),
-            ),
+            RequestRoutingPolicy::CacheAwareLeastEstimatedWork => {
+                Box::new(CacheAwareLeastEstimatedWorkPolicy::new(
+                    backend_state_receivers,
+                    throughput_profiles,
+                ))
+            }
         };
         Ok(Self { policy })
     }

@@ -1,3 +1,4 @@
+use crate::model_runner::BackendThroughputProfile;
 use crate::model_runner::InferenceDevice;
 use std::cmp::Reverse;
 use std::sync::atomic::AtomicUsize;
@@ -10,11 +11,7 @@ use super::request_orchestrator::CacheAffinityState;
 use super::request_orchestrator::OperationalState;
 use super::request_orchestrator::RequestRoutingContext;
 use super::request_orchestrator::RoutingDecision;
-
-// Fixed throughput weights from the batched target-only Apple M2 benchmark in
-// benchmarks/metal_gemv_threshold.md: CPU 9.22 and GPU 16.25 output tokens/s.
-const CPU_THROUGHPUT_WEIGHT: u64 = 922;
-const GPU_THROUGHPUT_WEIGHT: u64 = 1_625;
+use super::BackendId;
 
 pub(super) trait BackendRoutingPolicy: Send + Sync {
     fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision;
@@ -36,9 +33,10 @@ impl RoundRobinPolicy {
 
 impl BackendRoutingPolicy for RoundRobinPolicy {
     fn route_request(&self, _request: RequestRoutingContext<'_>) -> RoutingDecision {
+        let backend_index =
+            self.next_backend_index.fetch_add(1, Ordering::Relaxed) % self.backend_count;
         RoutingDecision {
-            backend_index: self.next_backend_index.fetch_add(1, Ordering::Relaxed)
-                % self.backend_count,
+            backend_id: BackendId::from_index(backend_index),
         }
     }
 }
@@ -72,7 +70,7 @@ impl LeastRequestsPolicy {
 
 impl BackendRoutingPolicy for LeastRequestsPolicy {
     fn route_request(&self, _request: RequestRoutingContext<'_>) -> RoutingDecision {
-        let backend_index = route_by_score(
+        let backend_id = route_by_score(
             self.operational_state_receivers.len(),
             &self.selection_history,
             |backend_index| {
@@ -82,20 +80,24 @@ impl BackendRoutingPolicy for LeastRequestsPolicy {
                     .saturating_add(state.active_request_count)
             },
         );
-        RoutingDecision { backend_index }
+        RoutingDecision { backend_id }
     }
 }
 
 pub(super) struct LeastEstimatedWorkPolicy {
-    weighted_operational_state_receivers: Vec<WeightedOperationalStateReceiver>,
+    operational_state_receivers: Vec<BackendOperationalStateReceiver>,
+    throughput_profiles: BackendThroughputProfiles,
     selection_history: Mutex<BackendSelectionHistory>,
 }
 
 impl LeastEstimatedWorkPolicy {
-    pub(super) fn new(backend_state_receivers: Vec<BackendStateReceivers>) -> Self {
+    pub(super) fn new(
+        backend_state_receivers: Vec<BackendStateReceivers>,
+        throughput_profiles: Vec<BackendThroughputProfile>,
+    ) -> Self {
         let backend_count = backend_state_receivers.len();
         Self {
-            weighted_operational_state_receivers: backend_state_receivers
+            operational_state_receivers: backend_state_receivers
                 .into_iter()
                 .map(
                     |BackendStateReceivers {
@@ -104,13 +106,14 @@ impl LeastEstimatedWorkPolicy {
                          cache_affinity,
                      }| {
                         drop(cache_affinity);
-                        WeightedOperationalStateReceiver {
+                        BackendOperationalStateReceiver {
+                            device,
                             operational_state_receiver: operational,
-                            throughput_weight: estimate_throughput_weight(device),
                         }
                     },
                 )
                 .collect(),
+            throughput_profiles: BackendThroughputProfiles::new(throughput_profiles),
             selection_history: Mutex::new(BackendSelectionHistory::new(backend_count)),
         }
     }
@@ -124,21 +127,23 @@ impl BackendRoutingPolicy for LeastEstimatedWorkPolicy {
         //      + remaining maximum queued and active output tokens
         //      + the incoming request's input and maximum output tokens)
         //   / backend throughput
-        let backend_index = route_by_score(
-            self.weighted_operational_state_receivers.len(),
+        let backend_id = route_by_score(
+            self.operational_state_receivers.len(),
             &self.selection_history,
             |backend_index| {
-                let backend = &self.weighted_operational_state_receivers[backend_index];
+                let backend = &self.operational_state_receivers[backend_index];
                 let state = backend.operational_state_receiver.borrow();
                 EstimatedCompletionScore {
                     estimated_token_count: estimate_remaining_token_work(
                         &state, request, /* cached_prefix_token_count */ 0,
                     ),
-                    throughput_weight: backend.throughput_weight,
+                    throughput_weight: self
+                        .throughput_profiles
+                        .get_throughput_weight(request, backend.device),
                 }
             },
         );
-        RoutingDecision { backend_index }
+        RoutingDecision { backend_id }
     }
 }
 
@@ -162,7 +167,7 @@ impl MostCachedPrefixPolicy {
 
 impl BackendRoutingPolicy for MostCachedPrefixPolicy {
     fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision {
-        let backend_index = route_by_score(
+        let backend_id = route_by_score(
             self.cache_affinity_state_receivers.len(),
             &self.selection_history,
             |backend_index| {
@@ -173,27 +178,32 @@ impl BackendRoutingPolicy for MostCachedPrefixPolicy {
                 }))
             },
         );
-        RoutingDecision { backend_index }
+        RoutingDecision { backend_id }
     }
 }
 
 pub(super) struct CacheAwareLeastEstimatedWorkPolicy {
-    weighted_backend_state_receivers: Vec<WeightedBackendStateReceiver>,
+    backend_state_receivers: Vec<BackendStateReceiver>,
+    throughput_profiles: BackendThroughputProfiles,
     selection_history: Mutex<BackendSelectionHistory>,
 }
 
 impl CacheAwareLeastEstimatedWorkPolicy {
-    pub(super) fn new(backend_state_receivers: Vec<BackendStateReceivers>) -> Self {
+    pub(super) fn new(
+        backend_state_receivers: Vec<BackendStateReceivers>,
+        throughput_profiles: Vec<BackendThroughputProfile>,
+    ) -> Self {
         let backend_count = backend_state_receivers.len();
         Self {
-            weighted_backend_state_receivers: backend_state_receivers
+            backend_state_receivers: backend_state_receivers
                 .into_iter()
-                .map(|backend| WeightedBackendStateReceiver {
-                    throughput_weight: estimate_throughput_weight(backend.device),
+                .map(|backend| BackendStateReceiver {
+                    device: backend.device,
                     operational_state_receiver: backend.operational,
                     cache_affinity_state_receiver: backend.cache_affinity,
                 })
                 .collect(),
+            throughput_profiles: BackendThroughputProfiles::new(throughput_profiles),
             selection_history: Mutex::new(BackendSelectionHistory::new(backend_count)),
         }
     }
@@ -207,11 +217,11 @@ impl BackendRoutingPolicy for CacheAwareLeastEstimatedWorkPolicy {
         //      + remaining maximum queued and active output tokens
         //      + the incoming request's uncached input and maximum output tokens)
         //   / backend throughput
-        let backend_index = route_by_score(
-            self.weighted_backend_state_receivers.len(),
+        let backend_id = route_by_score(
+            self.backend_state_receivers.len(),
             &self.selection_history,
             |backend_index| {
-                let backend = &self.weighted_backend_state_receivers[backend_index];
+                let backend = &self.backend_state_receivers[backend_index];
                 let operational_state = backend.operational_state_receiver.borrow();
                 let cache_affinity_state = backend.cache_affinity_state_receiver.borrow();
                 let cached_prefix_token_count =
@@ -229,11 +239,13 @@ impl BackendRoutingPolicy for CacheAwareLeastEstimatedWorkPolicy {
                         request,
                         cached_prefix_token_count,
                     ),
-                    throughput_weight: backend.throughput_weight,
+                    throughput_weight: self
+                        .throughput_profiles
+                        .get_throughput_weight(request, backend.device),
                 }
             },
         );
-        RoutingDecision { backend_index }
+        RoutingDecision { backend_id }
     }
 }
 
@@ -257,7 +269,7 @@ fn route_by_score<Score: Ord>(
     backend_count: usize,
     selection_history: &Mutex<BackendSelectionHistory>,
     scorer: impl Fn(usize) -> Score,
-) -> usize {
+) -> BackendId {
     let mut selection_history = selection_history
         .lock()
         .expect("backend selection history mutex is poisoned");
@@ -270,25 +282,54 @@ fn route_by_score<Score: Ord>(
         })
         .expect("the orchestrator always has at least one backend");
     selection_history.record_selection(backend_index);
-    backend_index
+    BackendId::from_index(backend_index)
 }
 
-struct WeightedOperationalStateReceiver {
+struct BackendOperationalStateReceiver {
+    device: InferenceDevice,
     operational_state_receiver: watch::Receiver<OperationalState>,
-    throughput_weight: u64,
 }
 
-struct WeightedBackendStateReceiver {
+struct BackendStateReceiver {
+    device: InferenceDevice,
     operational_state_receiver: watch::Receiver<OperationalState>,
     cache_affinity_state_receiver: watch::Receiver<CacheAffinityState>,
-    throughput_weight: u64,
 }
 
-fn estimate_throughput_weight(device: InferenceDevice) -> u64 {
-    match device {
-        InferenceDevice::Cpu => CPU_THROUGHPUT_WEIGHT,
-        InferenceDevice::Gpu => GPU_THROUGHPUT_WEIGHT,
-        InferenceDevice::Mixed => unreachable!("an inference backend has one concrete device"),
+struct BackendThroughputProfiles {
+    profiles: Vec<BackendThroughputProfile>,
+}
+
+impl BackendThroughputProfiles {
+    fn new(profiles: Vec<BackendThroughputProfile>) -> Self {
+        Self { profiles }
+    }
+
+    /// Uses the measured workload with the smallest Manhattan distance from the request.
+    /// `min_by_key` preserves configuration order when multiple profiles are equally close.
+    fn get_throughput_weight(
+        &self,
+        request: RequestRoutingContext<'_>,
+        device: InferenceDevice,
+    ) -> u64 {
+        let input_token_count = u64::try_from(request.input_token_count).unwrap_or(u64::MAX);
+        let weights = self
+            .profiles
+            .iter()
+            .min_by_key(|profile| {
+                (profile.input_token_count.abs_diff(input_token_count) as u128).saturating_add(
+                    profile
+                        .max_output_token_count
+                        .abs_diff(request.max_new_token_count) as u128,
+                )
+            })
+            .expect("request orchestration requires at least one throughput profile")
+            .weights;
+        match device {
+            InferenceDevice::Cpu => weights.cpu,
+            InferenceDevice::Gpu => weights.gpu,
+            InferenceDevice::Mixed => unreachable!("an inference backend has one concrete device"),
+        }
     }
 }
 
@@ -343,6 +384,7 @@ impl BackendSelectionHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_runner::BackendThroughputWeights;
 
     fn backend_state_receiver(operational_state: OperationalState) -> BackendStateReceivers {
         backend_state_receiver_for_device(InferenceDevice::Cpu, operational_state)
@@ -368,6 +410,10 @@ mod tests {
             .collect()
     }
 
+    fn default_throughput_profiles() -> Vec<BackendThroughputProfile> {
+        vec![BackendThroughputProfile::default()]
+    }
+
     fn routing_context(estimated_token_count: u64) -> RequestRoutingContext<'static> {
         RequestRoutingContext {
             input_token_ids: &[],
@@ -380,11 +426,20 @@ mod tests {
     fn routes_requests_in_round_robin_order() {
         let policy = RoundRobinPolicy::new(2);
 
-        let backend_indices: Vec<_> = (0..5)
-            .map(|_| policy.route_request(routing_context(1)).backend_index)
+        let backend_ids: Vec<_> = (0..5)
+            .map(|_| policy.route_request(routing_context(1)).backend_id)
             .collect();
 
-        assert_eq!(backend_indices, vec![0, 1, 0, 1, 0]);
+        assert_eq!(
+            backend_ids,
+            vec![
+                BackendId::from_index(0),
+                BackendId::from_index(1),
+                BackendId::from_index(0),
+                BackendId::from_index(1),
+                BackendId::from_index(0),
+            ]
+        );
     }
 
     #[test]
@@ -392,7 +447,10 @@ mod tests {
         let policy = RoundRobinPolicy::new(1);
 
         for _ in 0..3 {
-            assert_eq!(policy.route_request(routing_context(1)).backend_index, 0);
+            assert_eq!(
+                policy.route_request(routing_context(1)).backend_id,
+                BackendId::from_index(0)
+            );
         }
     }
 
@@ -413,7 +471,10 @@ mod tests {
             }),
         ]);
 
-        assert_eq!(policy.route_request(routing_context(1)).backend_index, 0);
+        assert_eq!(
+            policy.route_request(routing_context(1)).backend_id,
+            BackendId::from_index(0)
+        );
 
         operational_sender.send_replace(OperationalState {
             queued_request_count: 2,
@@ -421,7 +482,10 @@ mod tests {
             ..Default::default()
         });
 
-        assert_eq!(policy.route_request(routing_context(1)).backend_index, 1);
+        assert_eq!(
+            policy.route_request(routing_context(1)).backend_id,
+            BackendId::from_index(1)
+        );
     }
 
     #[test]
@@ -439,82 +503,217 @@ mod tests {
             }),
         ]);
 
-        assert_eq!(policy.route_request(routing_context(1)).backend_index, 1);
+        assert_eq!(
+            policy.route_request(routing_context(1)).backend_id,
+            BackendId::from_index(1)
+        );
     }
 
     #[test]
     fn least_requests_breaks_ties_by_least_recent_selection() {
         let policy = LeastRequestsPolicy::new(backend_state_receivers(2));
 
-        let backend_indices: Vec<_> = (0..4)
-            .map(|_| policy.route_request(routing_context(1)).backend_index)
+        let backend_ids: Vec<_> = (0..4)
+            .map(|_| policy.route_request(routing_context(1)).backend_id)
             .collect();
 
-        assert_eq!(backend_indices, vec![0, 1, 0, 1]);
+        assert_eq!(
+            backend_ids,
+            vec![
+                BackendId::from_index(0),
+                BackendId::from_index(1),
+                BackendId::from_index(0),
+                BackendId::from_index(1),
+            ]
+        );
     }
 
     #[test]
     fn least_estimated_work_accounts_for_backend_throughput() {
-        let policy = LeastEstimatedWorkPolicy::new(vec![
-            backend_state_receiver_for_device(
-                InferenceDevice::Cpu,
-                OperationalState {
-                    queued_request_count: 0,
-                    active_request_count: 1,
-                    active_remaining_max_output_token_count: 100,
-                    ..Default::default()
-                },
-            ),
-            backend_state_receiver_for_device(
-                InferenceDevice::Gpu,
-                OperationalState {
-                    queued_request_count: 1,
-                    active_request_count: 1,
-                    queued_remaining_prefill_token_count: 50,
-                    active_remaining_max_output_token_count: 100,
-                    ..Default::default()
-                },
-            ),
-        ]);
+        let policy = LeastEstimatedWorkPolicy::new(
+            vec![
+                backend_state_receiver_for_device(
+                    InferenceDevice::Cpu,
+                    OperationalState {
+                        queued_request_count: 0,
+                        active_request_count: 1,
+                        active_remaining_max_output_token_count: 100,
+                        ..Default::default()
+                    },
+                ),
+                backend_state_receiver_for_device(
+                    InferenceDevice::Gpu,
+                    OperationalState {
+                        queued_request_count: 1,
+                        active_request_count: 1,
+                        queued_remaining_prefill_token_count: 50,
+                        active_remaining_max_output_token_count: 100,
+                        ..Default::default()
+                    },
+                ),
+            ],
+            default_throughput_profiles(),
+        );
 
         // CPU: 200 / 9.22; GPU: 250 / 16.25, so the busier GPU still has less work.
-        assert_eq!(policy.route_request(routing_context(100)).backend_index, 1);
+        assert_eq!(
+            policy.route_request(routing_context(100)).backend_id,
+            BackendId::from_index(1)
+        );
+    }
+
+    #[test]
+    fn selects_the_nearest_throughput_profile_for_the_request_workload() {
+        let profiles = BackendThroughputProfiles::new(vec![
+            BackendThroughputProfile {
+                input_token_count: 128,
+                max_output_token_count: 32,
+                weights: BackendThroughputWeights { cpu: 1, gpu: 2 },
+            },
+            BackendThroughputProfile {
+                input_token_count: 128,
+                max_output_token_count: 256,
+                weights: BackendThroughputWeights { cpu: 3, gpu: 4 },
+            },
+            BackendThroughputProfile {
+                input_token_count: 512,
+                max_output_token_count: 32,
+                weights: BackendThroughputWeights { cpu: 5, gpu: 6 },
+            },
+        ]);
+        for (input_token_count, max_new_token_count, device, expected_weight) in [
+            (100, 50, InferenceDevice::Cpu, 1),
+            (100, 50, InferenceDevice::Gpu, 2),
+            (100, 220, InferenceDevice::Cpu, 3),
+            (450, 50, InferenceDevice::Gpu, 6),
+            // Equal-distance profiles preserve configuration order.
+            (128, 144, InferenceDevice::Cpu, 1),
+        ] {
+            let request = RequestRoutingContext {
+                input_token_ids: &[],
+                input_token_count,
+                max_new_token_count,
+            };
+
+            assert_eq!(
+                profiles.get_throughput_weight(request, device),
+                expected_weight,
+                "input_token_count={input_token_count}, max_new_token_count={max_new_token_count}"
+            );
+        }
+    }
+
+    #[test]
+    fn least_estimated_work_uses_the_selected_throughput_profile() {
+        let policy = LeastEstimatedWorkPolicy::new(
+            vec![
+                backend_state_receiver_for_device(
+                    InferenceDevice::Cpu,
+                    OperationalState::default(),
+                ),
+                backend_state_receiver_for_device(
+                    InferenceDevice::Gpu,
+                    OperationalState::default(),
+                ),
+            ],
+            vec![
+                BackendThroughputProfile {
+                    input_token_count: 10,
+                    max_output_token_count: 10,
+                    weights: BackendThroughputWeights { cpu: 10, gpu: 1 },
+                },
+                BackendThroughputProfile {
+                    input_token_count: 100,
+                    max_output_token_count: 100,
+                    weights: BackendThroughputWeights { cpu: 1, gpu: 10 },
+                },
+            ],
+        );
+
+        assert_eq!(
+            policy
+                .route_request(RequestRoutingContext {
+                    input_token_ids: &[],
+                    input_token_count: 10,
+                    max_new_token_count: 10,
+                })
+                .backend_id,
+            BackendId::from_index(0)
+        );
+        assert_eq!(
+            policy
+                .route_request(RequestRoutingContext {
+                    input_token_ids: &[],
+                    input_token_count: 100,
+                    max_new_token_count: 100,
+                })
+                .backend_id,
+            BackendId::from_index(1)
+        );
     }
 
     #[test]
     fn least_estimated_work_breaks_equal_scores_by_least_recent_selection() {
-        let policy = LeastEstimatedWorkPolicy::new(vec![
-            backend_state_receiver_for_device(InferenceDevice::Cpu, OperationalState::default()),
-            backend_state_receiver_for_device(InferenceDevice::Cpu, OperationalState::default()),
-        ]);
+        let policy = LeastEstimatedWorkPolicy::new(
+            vec![
+                backend_state_receiver_for_device(
+                    InferenceDevice::Cpu,
+                    OperationalState::default(),
+                ),
+                backend_state_receiver_for_device(
+                    InferenceDevice::Cpu,
+                    OperationalState::default(),
+                ),
+            ],
+            default_throughput_profiles(),
+        );
 
-        let backend_indices: Vec<_> = (0..4)
-            .map(|_| policy.route_request(routing_context(1)).backend_index)
+        let backend_ids: Vec<_> = (0..4)
+            .map(|_| policy.route_request(routing_context(1)).backend_id)
             .collect();
 
-        assert_eq!(backend_indices, vec![0, 1, 0, 1]);
+        assert_eq!(
+            backend_ids,
+            vec![
+                BackendId::from_index(0),
+                BackendId::from_index(1),
+                BackendId::from_index(0),
+                BackendId::from_index(1),
+            ]
+        );
     }
 
     #[test]
     fn most_cached_prefix_breaks_equal_matches_by_least_recent_selection() {
         let policy = MostCachedPrefixPolicy::new(backend_state_receivers(2));
 
-        let backend_indices: Vec<_> = (0..4)
-            .map(|_| policy.route_request(routing_context(1)).backend_index)
+        let backend_ids: Vec<_> = (0..4)
+            .map(|_| policy.route_request(routing_context(1)).backend_id)
             .collect();
 
-        assert_eq!(backend_indices, vec![0, 1, 0, 1]);
+        assert_eq!(
+            backend_ids,
+            vec![
+                BackendId::from_index(0),
+                BackendId::from_index(1),
+                BackendId::from_index(0),
+                BackendId::from_index(1),
+            ]
+        );
     }
 
     #[test]
     fn cache_aware_least_estimated_work_accounts_for_backend_load() {
-        let policy = CacheAwareLeastEstimatedWorkPolicy::new(vec![
-            backend_state_receiver(OperationalState {
-                active_remaining_prefill_token_count: 20,
-                ..Default::default()
-            }),
-            backend_state_receiver(OperationalState::default()),
-        ]);
+        let policy = CacheAwareLeastEstimatedWorkPolicy::new(
+            vec![
+                backend_state_receiver(OperationalState {
+                    active_remaining_prefill_token_count: 20,
+                    ..Default::default()
+                }),
+                backend_state_receiver(OperationalState::default()),
+            ],
+            default_throughput_profiles(),
+        );
         let request = RequestRoutingContext {
             input_token_ids: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             input_token_count: 10,
@@ -525,21 +724,27 @@ mod tests {
 
         // Backend 0: 20 existing + 10 input + 5 output = 35 tokens.
         // Backend 1: 10 input + 5 output = 15 tokens.
-        assert_eq!(decision.backend_index, 1);
+        assert_eq!(decision.backend_id, BackendId::from_index(1));
     }
 
     #[test]
     fn cache_aware_least_estimated_work_accounts_for_backend_throughput() {
-        let policy = CacheAwareLeastEstimatedWorkPolicy::new(vec![
-            backend_state_receiver_for_device(
-                InferenceDevice::Cpu,
-                OperationalState {
-                    active_remaining_prefill_token_count: 3,
-                    ..Default::default()
-                },
-            ),
-            backend_state_receiver_for_device(InferenceDevice::Gpu, OperationalState::default()),
-        ]);
+        let policy = CacheAwareLeastEstimatedWorkPolicy::new(
+            vec![
+                backend_state_receiver_for_device(
+                    InferenceDevice::Cpu,
+                    OperationalState {
+                        active_remaining_prefill_token_count: 3,
+                        ..Default::default()
+                    },
+                ),
+                backend_state_receiver_for_device(
+                    InferenceDevice::Gpu,
+                    OperationalState::default(),
+                ),
+            ],
+            default_throughput_profiles(),
+        );
         let request = RequestRoutingContext {
             input_token_ids: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             input_token_count: 10,
@@ -549,18 +754,72 @@ mod tests {
         let decision = policy.route_request(request);
 
         // CPU: 18 / 9.22; GPU: 15 / 16.25, so the GPU finishes first.
-        assert_eq!(decision.backend_index, 1);
+        assert_eq!(decision.backend_id, BackendId::from_index(1));
+    }
+
+    #[test]
+    fn cache_aware_least_estimated_work_uses_the_selected_throughput_profile() {
+        let policy = CacheAwareLeastEstimatedWorkPolicy::new(
+            vec![
+                backend_state_receiver_for_device(
+                    InferenceDevice::Cpu,
+                    OperationalState::default(),
+                ),
+                backend_state_receiver_for_device(
+                    InferenceDevice::Gpu,
+                    OperationalState::default(),
+                ),
+            ],
+            vec![
+                BackendThroughputProfile {
+                    input_token_count: 10,
+                    max_output_token_count: 10,
+                    weights: BackendThroughputWeights { cpu: 10, gpu: 1 },
+                },
+                BackendThroughputProfile {
+                    input_token_count: 100,
+                    max_output_token_count: 100,
+                    weights: BackendThroughputWeights { cpu: 1, gpu: 10 },
+                },
+            ],
+        );
+
+        for (input_token_count, max_new_token_count, expected_backend_index) in
+            [(10, 10, 0), (100, 100, 1)]
+        {
+            assert_eq!(
+                policy
+                    .route_request(RequestRoutingContext {
+                        input_token_ids: &[],
+                        input_token_count,
+                        max_new_token_count,
+                    })
+                    .backend_id,
+                BackendId::from_index(expected_backend_index)
+            );
+        }
     }
 
     #[test]
     fn cache_aware_least_estimated_work_breaks_equal_scores_by_least_recent_selection() {
-        let policy = CacheAwareLeastEstimatedWorkPolicy::new(backend_state_receivers(2));
+        let policy = CacheAwareLeastEstimatedWorkPolicy::new(
+            backend_state_receivers(2),
+            default_throughput_profiles(),
+        );
 
-        let backend_indices: Vec<_> = (0..4)
-            .map(|_| policy.route_request(routing_context(1)).backend_index)
+        let backend_ids: Vec<_> = (0..4)
+            .map(|_| policy.route_request(routing_context(1)).backend_id)
             .collect();
 
-        assert_eq!(backend_indices, vec![0, 1, 0, 1]);
+        assert_eq!(
+            backend_ids,
+            vec![
+                BackendId::from_index(0),
+                BackendId::from_index(1),
+                BackendId::from_index(0),
+                BackendId::from_index(1),
+            ]
+        );
     }
 
     #[test]
