@@ -129,9 +129,13 @@ The available request-routing policies are:
   the benchmark's Apple M2 and Qwen2.5 7B configuration and intentionally serve
   as a simple fixed-weight baseline rather than hardware-independent estimates.
 - `most-cached-prefix`, which selects the backend with the longest cached
-  complete-block prefix for the incoming request. Equal matches select the
-  least recently used backend. This policy requires prefix caching on every
-  backend and does not account for backend load.
+  complete-block prefix restorable for the incoming request. Equal matches
+  select the least recently used backend. This policy requires prefix caching
+  on every backend and does not account for backend load.
+- `cache-aware-least-estimated-work`, which uses the same load and throughput
+  estimate as `least-estimated-work` but excludes the incoming request's cached
+  complete-block prefix from its prefill work. Equal scores select the least
+  recently used backend. This policy requires prefix caching on every backend.
 
 Operational snapshots are intentionally approximate: requests still in a
 backend's message channel are not represented until its worker receives them,

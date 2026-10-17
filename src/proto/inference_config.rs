@@ -397,10 +397,16 @@ impl fmt::Display for RequestOrchestratorConfig {
 
 impl RequestRoutingPolicy {
     pub(crate) fn validate(self, kv_cache_type: KvCacheType) -> AnyhowResult<()> {
-        anyhow::ensure!(
-            self != Self::MostCachedPrefix || kv_cache_type == KvCacheType::PagedPrefix,
-            "most-cached-prefix routing requires paged-prefix KV caching"
-        );
+        if matches!(
+            self,
+            Self::MostCachedPrefix | Self::CacheAwareLeastEstimatedWork
+        ) {
+            anyhow::ensure!(
+                kv_cache_type == KvCacheType::PagedPrefix,
+                "{} routing requires paged-prefix KV caching",
+                self.cli_value()
+            );
+        }
         Ok(())
     }
 
@@ -411,6 +417,7 @@ impl RequestRoutingPolicy {
             Self::LeastRequests => "least-requests",
             Self::LeastEstimatedWork => "least-estimated-work",
             Self::MostCachedPrefix => "most-cached-prefix",
+            Self::CacheAwareLeastEstimatedWork => "cache-aware-least-estimated-work",
         }
     }
 }

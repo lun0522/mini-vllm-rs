@@ -9,6 +9,7 @@ use tokio::sync::watch;
 
 use super::kv_cache::PrefixCacheAffinitySnapshot;
 use super::routing_policy::BackendRoutingPolicy;
+use super::routing_policy::CacheAwareLeastEstimatedWorkPolicy;
 use super::routing_policy::LeastEstimatedWorkPolicy;
 use super::routing_policy::LeastRequestsPolicy;
 use super::routing_policy::MostCachedPrefixPolicy;
@@ -55,6 +56,14 @@ pub(super) struct RequestRoutingContext<'a> {
     pub(super) max_new_token_count: u64,
 }
 
+impl RequestRoutingContext<'_> {
+    pub(super) fn restorable_input_token_ids(&self) -> &[u32] {
+        self.input_token_ids
+            .split_last()
+            .map_or(&[], |(_, prefix)| prefix)
+    }
+}
+
 /// Selects an inference backend for each request without owning or dispatching to the backend.
 pub(super) struct RequestOrchestrator {
     policy: Box<dyn BackendRoutingPolicy>,
@@ -82,6 +91,9 @@ impl RequestOrchestrator {
             RequestRoutingPolicy::MostCachedPrefix => {
                 Box::new(MostCachedPrefixPolicy::new(backend_state_receivers))
             }
+            RequestRoutingPolicy::CacheAwareLeastEstimatedWork => Box::new(
+                CacheAwareLeastEstimatedWorkPolicy::new(backend_state_receivers),
+            ),
         };
         Ok(Self { policy })
     }
@@ -132,6 +144,17 @@ mod tests {
             input_token_count: 0,
             max_new_token_count: estimated_token_count,
         }
+    }
+
+    #[test]
+    fn excludes_the_final_input_token_from_cache_affinity_matching() {
+        let request = RequestRoutingContext {
+            input_token_ids: &[1, 2, 3],
+            input_token_count: 3,
+            max_new_token_count: 1,
+        };
+
+        assert_eq!(request.restorable_input_token_ids(), &[1, 2]);
     }
 
     #[test]

@@ -104,16 +104,9 @@ impl LeastEstimatedWorkPolicy {
                          cache_affinity,
                      }| {
                         drop(cache_affinity);
-                        let throughput_weight = match device {
-                            InferenceDevice::Cpu => CPU_THROUGHPUT_WEIGHT,
-                            InferenceDevice::Gpu => GPU_THROUGHPUT_WEIGHT,
-                            InferenceDevice::Mixed => {
-                                unreachable!("an inference backend has one concrete device")
-                            }
-                        };
                         WeightedOperationalStateReceiver {
                             operational_state_receiver: operational,
-                            throughput_weight,
+                            throughput_weight: estimate_throughput_weight(device),
                         }
                     },
                 )
@@ -137,14 +130,10 @@ impl BackendRoutingPolicy for LeastEstimatedWorkPolicy {
             |backend_index| {
                 let backend = &self.weighted_operational_state_receivers[backend_index];
                 let state = backend.operational_state_receiver.borrow();
-                let estimated_token_count = (state.queued_remaining_prefill_token_count as u128)
-                    .saturating_add(state.queued_remaining_max_output_token_count as u128)
-                    .saturating_add(state.active_remaining_prefill_token_count as u128)
-                    .saturating_add(state.active_remaining_max_output_token_count as u128)
-                    .saturating_add(request.input_token_count as u128)
-                    .saturating_add(request.max_new_token_count as u128);
                 EstimatedCompletionScore {
-                    estimated_token_count,
+                    estimated_token_count: estimate_remaining_token_work(
+                        &state, request, /* cached_prefix_token_count */ 0,
+                    ),
                     throughput_weight: backend.throughput_weight,
                 }
             },
@@ -179,12 +168,89 @@ impl BackendRoutingPolicy for MostCachedPrefixPolicy {
             |backend_index| {
                 let state = self.cache_affinity_state_receivers[backend_index].borrow();
                 Reverse(state.prefix_cache.as_ref().map_or(0, |prefix_cache| {
-                    prefix_cache.find_longest_prefix_token_count(request.input_token_ids)
+                    prefix_cache
+                        .find_longest_prefix_token_count(request.restorable_input_token_ids())
                 }))
             },
         );
         RoutingDecision { backend_index }
     }
+}
+
+pub(super) struct CacheAwareLeastEstimatedWorkPolicy {
+    weighted_backend_state_receivers: Vec<WeightedBackendStateReceiver>,
+    selection_history: Mutex<BackendSelectionHistory>,
+}
+
+impl CacheAwareLeastEstimatedWorkPolicy {
+    pub(super) fn new(backend_state_receivers: Vec<BackendStateReceivers>) -> Self {
+        let backend_count = backend_state_receivers.len();
+        Self {
+            weighted_backend_state_receivers: backend_state_receivers
+                .into_iter()
+                .map(|backend| WeightedBackendStateReceiver {
+                    throughput_weight: estimate_throughput_weight(backend.device),
+                    operational_state_receiver: backend.operational,
+                    cache_affinity_state_receiver: backend.cache_affinity,
+                })
+                .collect(),
+            selection_history: Mutex::new(BackendSelectionHistory::new(backend_count)),
+        }
+    }
+}
+
+impl BackendRoutingPolicy for CacheAwareLeastEstimatedWorkPolicy {
+    fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision {
+        // This uses the same conservative estimate as least-estimated-work, but excludes the
+        // reusable cached prefix from the incoming request's prefill work:
+        //   (remaining queued and active prefill tokens
+        //      + remaining maximum queued and active output tokens
+        //      + the incoming request's uncached input and maximum output tokens)
+        //   / backend throughput
+        let backend_index = route_by_score(
+            self.weighted_backend_state_receivers.len(),
+            &self.selection_history,
+            |backend_index| {
+                let backend = &self.weighted_backend_state_receivers[backend_index];
+                let operational_state = backend.operational_state_receiver.borrow();
+                let cache_affinity_state = backend.cache_affinity_state_receiver.borrow();
+                let cached_prefix_token_count =
+                    cache_affinity_state
+                        .prefix_cache
+                        .as_ref()
+                        .map_or(0, |prefix_cache| {
+                            prefix_cache.find_longest_prefix_token_count(
+                                request.restorable_input_token_ids(),
+                            )
+                        });
+                EstimatedCompletionScore {
+                    estimated_token_count: estimate_remaining_token_work(
+                        &operational_state,
+                        request,
+                        cached_prefix_token_count,
+                    ),
+                    throughput_weight: backend.throughput_weight,
+                }
+            },
+        );
+        RoutingDecision { backend_index }
+    }
+}
+
+fn estimate_remaining_token_work(
+    state: &OperationalState,
+    request: RequestRoutingContext<'_>,
+    cached_prefix_token_count: usize,
+) -> u128 {
+    let uncached_input_token_count = request
+        .input_token_count
+        .saturating_sub(cached_prefix_token_count);
+    (state.queued_remaining_prefill_token_count as u128)
+        .saturating_add(state.queued_remaining_max_output_token_count as u128)
+        .saturating_add(state.active_remaining_prefill_token_count as u128)
+        .saturating_add(state.active_remaining_max_output_token_count as u128)
+        .saturating_add(uncached_input_token_count as u128)
+        .saturating_add(request.max_new_token_count as u128)
 }
 
 fn route_by_score<Score: Ord>(
@@ -210,6 +276,20 @@ fn route_by_score<Score: Ord>(
 struct WeightedOperationalStateReceiver {
     operational_state_receiver: watch::Receiver<OperationalState>,
     throughput_weight: u64,
+}
+
+struct WeightedBackendStateReceiver {
+    operational_state_receiver: watch::Receiver<OperationalState>,
+    cache_affinity_state_receiver: watch::Receiver<CacheAffinityState>,
+    throughput_weight: u64,
+}
+
+fn estimate_throughput_weight(device: InferenceDevice) -> u64 {
+    match device {
+        InferenceDevice::Cpu => CPU_THROUGHPUT_WEIGHT,
+        InferenceDevice::Gpu => GPU_THROUGHPUT_WEIGHT,
+        InferenceDevice::Mixed => unreachable!("an inference backend has one concrete device"),
+    }
 }
 
 /// Orders estimated completion times represented as token-count/throughput ratios.
@@ -257,5 +337,42 @@ impl BackendSelectionHistory {
     fn record_selection(&mut self, backend_index: usize) {
         self.selection_epoch += 1;
         self.last_selected_epoch[backend_index] = self.selection_epoch;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_prefix_reduces_only_the_incoming_prefill_work() {
+        let state = OperationalState {
+            queued_remaining_prefill_token_count: 10,
+            queued_remaining_max_output_token_count: 20,
+            active_remaining_prefill_token_count: 30,
+            active_remaining_max_output_token_count: 40,
+            ..Default::default()
+        };
+        let request = RequestRoutingContext {
+            input_token_ids: &[1, 2, 3, 4, 5, 6],
+            input_token_count: 6,
+            max_new_token_count: 7,
+        };
+
+        assert_eq!(estimate_remaining_token_work(&state, request, 4), 109);
+    }
+
+    #[test]
+    fn cached_prefix_token_count_cannot_underflow_incoming_work() {
+        let request = RequestRoutingContext {
+            input_token_ids: &[1, 2],
+            input_token_count: 2,
+            max_new_token_count: 3,
+        };
+
+        assert_eq!(
+            estimate_remaining_token_work(&OperationalState::default(), request, 4),
+            3
+        );
     }
 }

@@ -49,6 +49,7 @@ pub(crate) enum RequestRoutingPolicy {
     LeastRequests,
     LeastEstimatedWork,
     MostCachedPrefix,
+    CacheAwareLeastEstimatedWork,
 }
 
 impl From<RequestRoutingPolicyProto> for RequestRoutingPolicy {
@@ -61,6 +62,9 @@ impl From<RequestRoutingPolicyProto> for RequestRoutingPolicy {
             RequestRoutingPolicyProto::LeastRequests => Self::LeastRequests,
             RequestRoutingPolicyProto::LeastEstimatedWork => Self::LeastEstimatedWork,
             RequestRoutingPolicyProto::MostCachedPrefix => Self::MostCachedPrefix,
+            RequestRoutingPolicyProto::CacheAwareLeastEstimatedWork => {
+                Self::CacheAwareLeastEstimatedWork
+            }
         }
     }
 }
@@ -72,6 +76,9 @@ impl From<RequestRoutingPolicy> for RequestRoutingPolicyProto {
             RequestRoutingPolicy::LeastRequests => Self::LeastRequests,
             RequestRoutingPolicy::LeastEstimatedWork => Self::LeastEstimatedWork,
             RequestRoutingPolicy::MostCachedPrefix => Self::MostCachedPrefix,
+            RequestRoutingPolicy::CacheAwareLeastEstimatedWork => {
+                Self::CacheAwareLeastEstimatedWork
+            }
         }
     }
 }
@@ -83,6 +90,7 @@ impl fmt::Display for RequestRoutingPolicy {
             Self::LeastRequests => "least-requests",
             Self::LeastEstimatedWork => "least-estimated-work",
             Self::MostCachedPrefix => "most-cached-prefix",
+            Self::CacheAwareLeastEstimatedWork => "cache-aware-least-estimated-work",
         })
     }
 }
@@ -555,6 +563,10 @@ mod tests {
                 "least-estimated-work",
             ),
             (RequestRoutingPolicy::MostCachedPrefix, "most-cached-prefix"),
+            (
+                RequestRoutingPolicy::CacheAwareLeastEstimatedWork,
+                "cache-aware-least-estimated-work",
+            ),
         ] {
             let config = RequestOrchestratorConfig { routing_policy };
 

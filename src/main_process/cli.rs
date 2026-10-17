@@ -378,6 +378,10 @@ mod tests {
                 "REQUEST_ROUTING_POLICY_MOST_CACHED_PREFIX",
                 RequestRoutingPolicyProto::MostCachedPrefix,
             ),
+            (
+                "REQUEST_ROUTING_POLICY_CACHE_AWARE_LEAST_ESTIMATED_WORK",
+                RequestRoutingPolicyProto::CacheAwareLeastEstimatedWork,
+            ),
         ] {
             let config = format!("routing_policy: {policy_name}");
             let args = MainProcessArgs::from_args(
@@ -541,6 +545,27 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "most-cached-prefix routing requires paged-prefix KV caching"
+        );
+
+        args.kv_cache_config.kv_cache_type = KvCacheTypeProto::PagedPrefix.into();
+        args.kv_cache_config.per_page_token_count = DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT as u32;
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_cache_aware_least_estimated_work_without_prefix_caching() {
+        let mut args = normalize(
+            MainProcessArgs::from_args(&["mini-vllm-rs"], &[])
+                .expect("default arguments should parse"),
+        );
+        args.request_orchestrator_config.routing_policy =
+            RequestRoutingPolicyProto::CacheAwareLeastEstimatedWork.into();
+
+        let error = args.validate().unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "cache-aware-least-estimated-work routing requires paged-prefix KV caching"
         );
 
         args.kv_cache_config.kv_cache_type = KvCacheTypeProto::PagedPrefix.into();
