@@ -47,6 +47,7 @@ impl fmt::Display for RequestOrchestratorConfig {
 pub(crate) enum RequestRoutingPolicy {
     RoundRobin,
     LeastRequests,
+    LeastEstimatedWork,
 }
 
 impl From<RequestRoutingPolicyProto> for RequestRoutingPolicy {
@@ -57,6 +58,7 @@ impl From<RequestRoutingPolicyProto> for RequestRoutingPolicy {
             ),
             RequestRoutingPolicyProto::RoundRobin => Self::RoundRobin,
             RequestRoutingPolicyProto::LeastRequests => Self::LeastRequests,
+            RequestRoutingPolicyProto::LeastEstimatedWork => Self::LeastEstimatedWork,
         }
     }
 }
@@ -66,6 +68,7 @@ impl From<RequestRoutingPolicy> for RequestRoutingPolicyProto {
         match policy {
             RequestRoutingPolicy::RoundRobin => Self::RoundRobin,
             RequestRoutingPolicy::LeastRequests => Self::LeastRequests,
+            RequestRoutingPolicy::LeastEstimatedWork => Self::LeastEstimatedWork,
         }
     }
 }
@@ -75,6 +78,7 @@ impl fmt::Display for RequestRoutingPolicy {
         formatter.write_str(match self {
             Self::RoundRobin => "round-robin",
             Self::LeastRequests => "least-requests",
+            Self::LeastEstimatedWork => "least-estimated-work",
         })
     }
 }
@@ -542,6 +546,10 @@ mod tests {
         for (routing_policy, expected_display) in [
             (RequestRoutingPolicy::RoundRobin, "round-robin"),
             (RequestRoutingPolicy::LeastRequests, "least-requests"),
+            (
+                RequestRoutingPolicy::LeastEstimatedWork,
+                "least-estimated-work",
+            ),
         ] {
             let config = RequestOrchestratorConfig { routing_policy };
 

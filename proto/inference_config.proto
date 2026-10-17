@@ -159,4 +159,6 @@ enum RequestRoutingPolicy {
   REQUEST_ROUTING_POLICY_ROUND_ROBIN = 1;
   // Assigns each request to the backend with the fewest queued and active requests.
   REQUEST_ROUTING_POLICY_LEAST_REQUESTS = 2;
+  // Assigns each request to the backend with the least benchmark-weighted work.
+  REQUEST_ROUTING_POLICY_LEAST_ESTIMATED_WORK = 3;
 }

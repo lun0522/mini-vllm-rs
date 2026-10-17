@@ -367,6 +367,10 @@ mod tests {
                 "REQUEST_ROUTING_POLICY_LEAST_REQUESTS",
                 RequestRoutingPolicyProto::LeastRequests,
             ),
+            (
+                "REQUEST_ROUTING_POLICY_LEAST_ESTIMATED_WORK",
+                RequestRoutingPolicyProto::LeastEstimatedWork,
+            ),
         ] {
             let config = format!("routing_policy: {policy_name}");
             let args = MainProcessArgs::from_args(

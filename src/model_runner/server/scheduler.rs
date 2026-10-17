@@ -15,6 +15,8 @@ use super::text_generation::GenerationPhase;
 struct RequestSchedulingMetadata {
     request_id: u64,
     max_required_page_count: usize,
+    max_new_token_count: usize,
+    generated_token_count: usize,
     phase: SchedulingPhase,
     is_blocked: bool,
 }
@@ -36,6 +38,17 @@ pub(super) struct ScheduledRequest {
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct SchedulingDecision {
     pub(super) requests: Vec<ScheduledRequest>,
+}
+
+/// Aggregates raw request load facts without assigning policy-specific costs to them.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct SchedulerLoadSnapshot {
+    pub(super) queued_request_count: usize,
+    pub(super) active_request_count: usize,
+    pub(super) queued_remaining_prefill_token_count: usize,
+    pub(super) queued_remaining_max_output_token_count: usize,
+    pub(super) active_remaining_prefill_token_count: usize,
+    pub(super) active_remaining_max_output_token_count: usize,
 }
 
 struct DecodeSchedulingResult {
@@ -98,6 +111,8 @@ impl Scheduler {
             max_required_page_count: self
                 .kv_cache_geometry
                 .get_required_page_count(max_cached_token_count),
+            max_new_token_count,
+            generated_token_count: 0,
             phase: SchedulingPhase::Prefill {
                 remaining_token_count: input_token_count,
             },
@@ -157,12 +172,25 @@ impl Scheduler {
         self.queued_requests.is_empty() && self.active_requests.is_empty()
     }
 
-    pub(super) fn queued_request_count(&self) -> usize {
-        self.queued_requests.len()
-    }
-
-    pub(super) fn active_request_count(&self) -> usize {
-        self.active_requests.len()
+    pub(super) fn create_load_snapshot(&self) -> SchedulerLoadSnapshot {
+        let mut snapshot = SchedulerLoadSnapshot {
+            queued_request_count: self.queued_requests.len(),
+            active_request_count: self.active_requests.len(),
+            ..Default::default()
+        };
+        for request in &self.queued_requests {
+            snapshot.queued_remaining_prefill_token_count +=
+                Self::remaining_prefill_token_count(request);
+            snapshot.queued_remaining_max_output_token_count +=
+                Self::remaining_max_output_token_count(request);
+        }
+        for request in &self.active_requests {
+            snapshot.active_remaining_prefill_token_count +=
+                Self::remaining_prefill_token_count(request);
+            snapshot.active_remaining_max_output_token_count +=
+                Self::remaining_max_output_token_count(request);
+        }
+        snapshot
     }
 
     /// Updates scheduling metadata and returns whether this transition requires prefix
@@ -178,6 +206,12 @@ impl Scheduler {
             .position(|request| request.request_id == request_id)
             .with_context(|| format!("active request {request_id} does not exist"))?;
         let scheduling_phase = self.active_requests[request_index].phase;
+        if let GenerationPhase::Decode {
+            generated_token_count,
+        } = generation_phase
+        {
+            self.active_requests[request_index].generated_token_count = generated_token_count;
+        }
         let next_scheduling_phase = match (generation_phase, scheduling_phase) {
             (GenerationPhase::Finished { .. }, _) => {
                 self.active_requests.remove(request_index);
@@ -384,6 +418,21 @@ impl Scheduler {
             .saturating_sub(reserved_page_count)
     }
 
+    fn remaining_prefill_token_count(request: &RequestSchedulingMetadata) -> usize {
+        match request.phase {
+            SchedulingPhase::Prefill {
+                remaining_token_count,
+            } => remaining_token_count,
+            SchedulingPhase::Decode => 0,
+        }
+    }
+
+    fn remaining_max_output_token_count(request: &RequestSchedulingMetadata) -> usize {
+        request
+            .max_new_token_count
+            .saturating_sub(request.generated_token_count)
+    }
+
     fn handle_request_termination(
         &mut self,
         request_id: u64,
@@ -443,6 +492,55 @@ mod tests {
         scheduling_policy: SchedulingPolicy,
     ) -> Scheduler {
         scheduler_with_token_budget(512, max_active_request_count, scheduling_policy)
+    }
+
+    #[test]
+    fn reports_remaining_queued_and_active_tokens() -> Result<()> {
+        let mut scheduler = scheduler(1, SchedulingPolicy::FirstComeFirstServed);
+        scheduler.enqueue_request(1, &[1, 2, 3, 4], 10)?;
+
+        assert_eq!(
+            scheduler.create_load_snapshot(),
+            SchedulerLoadSnapshot {
+                queued_request_count: 1,
+                queued_remaining_prefill_token_count: 4,
+                queued_remaining_max_output_token_count: 10,
+                ..Default::default()
+            }
+        );
+
+        assert_eq!(scheduler.admit_queued_requests(), vec![1]);
+        scheduler.update_request_phase(
+            1,
+            GenerationPhase::Prefill {
+                remaining_token_count: 2,
+            },
+        )?;
+        assert_eq!(
+            scheduler.create_load_snapshot(),
+            SchedulerLoadSnapshot {
+                active_request_count: 1,
+                active_remaining_prefill_token_count: 2,
+                active_remaining_max_output_token_count: 10,
+                ..Default::default()
+            }
+        );
+
+        scheduler.update_request_phase(
+            1,
+            GenerationPhase::Decode {
+                generated_token_count: 3,
+            },
+        )?;
+        assert_eq!(
+            scheduler.create_load_snapshot(),
+            SchedulerLoadSnapshot {
+                active_request_count: 1,
+                active_remaining_max_output_token_count: 7,
+                ..Default::default()
+            }
+        );
+        Ok(())
     }
 
     #[test]

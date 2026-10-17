@@ -45,6 +45,7 @@ mod model_instance;
 mod prefix_cache_flight;
 mod request_manager;
 mod request_orchestrator;
+mod routing_policy;
 mod scheduler;
 mod text_generation;
 
@@ -58,6 +59,7 @@ use request_orchestrator::BackendStateReceivers;
 use request_orchestrator::CacheAffinityState;
 use request_orchestrator::OperationalState;
 use request_orchestrator::RequestOrchestrator;
+use request_orchestrator::RequestRoutingContext;
 
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_MODEL_RUNNER";
 const INFERENCE_MESSAGE_QUEUE_CAPACITY: usize = 32;
@@ -210,7 +212,12 @@ impl ModelRunnerService for ModelRunnerRpcService {
         .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let request_id = request.request_id;
         let queued_at = Instant::now();
-        let routing_decision = self.request_orchestrator.route_request();
+        let routing_decision = self
+            .request_orchestrator
+            .route_request(RequestRoutingContext {
+                input_token_count: request.input_token_ids.len(),
+                max_new_token_count: request.max_new_tokens,
+            });
         let (event_sender, event_receiver) = mpsc::channel(GENERATION_EVENT_QUEUE_CAPACITY);
         self.inference_message_senders[routing_decision.backend_index]
             .send(InferenceWorkerMessage::Generate(InferenceRequest {
@@ -316,6 +323,7 @@ fn create_inference_backend(
         channels: InferenceBackendChannels {
             message_sender,
             state_receivers: BackendStateReceivers {
+                device: inference_device,
                 operational: operational_state_receiver,
                 cache_affinity: cache_affinity_state_receiver,
             },
@@ -451,6 +459,7 @@ mod tests {
         InferenceBackendChannels {
             message_sender,
             state_receivers: BackendStateReceivers {
+                device: InferenceDevice::Cpu,
                 operational,
                 cache_affinity,
             },

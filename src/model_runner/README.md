@@ -106,7 +106,10 @@ backend queues and dispatches each request according to that decision.
 Workers publish replaceable operational and cache-affinity snapshots to the
 orchestrator at sparse request-lifecycle boundaries:
 
-- Operational snapshots contain separate queued and active request counts.
+- Operational snapshots contain:
+  - Queued and active request counts.
+  - Queued and active remaining prefill-token counts.
+  - Queued and active remaining maximum output-token counts.
 - Cache-affinity snapshots remain separate so load-only policies do not depend
   on cache contents.
 
@@ -116,6 +119,15 @@ The available request-routing policies are:
   state.
 - `least-requests`, which selects the backend with the smallest sum of queued
   and active requests. Equal scores select the least recently used backend.
+- `least-estimated-work`, which divides each backend's estimated remaining
+  queued and active tokens, including the incoming request, by a fixed
+  benchmark-derived throughput weight. The CPU and GPU weights are 9.22 and
+  16.25 output tokens/s,
+  respectively, from the batched target-only results in
+  [`metal_gemv_threshold.md`](../../benchmarks/metal_gemv_threshold.md). Equal
+  scores select the least recently used backend. These weights are specific to
+  the benchmark's Apple M2 and Qwen2.5 7B configuration and intentionally serve
+  as a simple fixed-weight baseline rather than hardware-independent estimates.
 
 Operational snapshots are intentionally approximate: requests still in a
 backend's message channel are not represented until its worker receives them,

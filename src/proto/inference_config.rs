@@ -401,6 +401,7 @@ impl RequestRoutingPolicy {
             Self::Unspecified => "unspecified",
             Self::RoundRobin => "round-robin",
             Self::LeastRequests => "least-requests",
+            Self::LeastEstimatedWork => "least-estimated-work",
         }
     }
 }

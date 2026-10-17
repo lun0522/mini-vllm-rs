@@ -134,8 +134,9 @@ cargo run --release
     [Prefix-cache publication and coordination](src/model_runner/README.md#prefix-cache-publication-and-coordination)
     for how the policies interact.
 - `--request-orchestrator-config '<textproto>'` configures backend routing:
-  - `routing_policy`: Accepts `REQUEST_ROUTING_POLICY_ROUND_ROBIN`
-    or `REQUEST_ROUTING_POLICY_LEAST_REQUESTS`, and defaults to round robin.
+  - `routing_policy`: Accepts `REQUEST_ROUTING_POLICY_ROUND_ROBIN`,
+    `REQUEST_ROUTING_POLICY_LEAST_REQUESTS`, or
+    `REQUEST_ROUTING_POLICY_LEAST_ESTIMATED_WORK`, and defaults to round robin.
     See [Request orchestration](src/model_runner/README.md#request-orchestration)
     for policy behavior and state handling.
 - `--input-preprocessing-thread-count <count>` sets the request-handler

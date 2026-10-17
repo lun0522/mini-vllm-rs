@@ -263,10 +263,19 @@ impl InferenceWorker {
     }
 
     fn publish_operational_state(&self) {
+        let scheduler_load = self.scheduler.create_load_snapshot();
         self.operational_state_sender
             .send_replace(OperationalState {
-                queued_request_count: self.scheduler.queued_request_count(),
-                active_request_count: self.scheduler.active_request_count(),
+                queued_request_count: scheduler_load.queued_request_count,
+                active_request_count: scheduler_load.active_request_count,
+                queued_remaining_prefill_token_count: scheduler_load
+                    .queued_remaining_prefill_token_count,
+                queued_remaining_max_output_token_count: scheduler_load
+                    .queued_remaining_max_output_token_count,
+                active_remaining_prefill_token_count: scheduler_load
+                    .active_remaining_prefill_token_count,
+                active_remaining_max_output_token_count: scheduler_load
+                    .active_remaining_max_output_token_count,
             });
     }
 
