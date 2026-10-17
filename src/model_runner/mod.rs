@@ -4,6 +4,7 @@ pub(crate) mod server;
 use std::fmt;
 use std::str::FromStr;
 
+use crate::proto::inference_config::BackendThroughputProfile as BackendThroughputProfileProto;
 use crate::proto::inference_config::KvCacheConfig as KvCacheConfigProto;
 use crate::proto::inference_config::KvCacheType as KvCacheTypeProto;
 use crate::proto::inference_config::PrefixCacheCoordinationPolicy as PrefixCacheCoordinationPolicyProto;
@@ -16,15 +17,99 @@ use candle_core::DType;
 
 pub(crate) const DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT: usize = 16;
 
+// Preserve the CPU-to-GPU throughput ratio measured by the batched target-only
+// Apple M2 workload in benchmarks/metal_gemv_threshold.md. Its two prompts
+// contained 128 and 121 tokens and each generated 512 tokens; use 128 as the
+// representative input length for the fallback profile.
+pub(crate) const DEFAULT_THROUGHPUT_PROFILE_INPUT_TOKEN_COUNT: u64 = 128;
+pub(crate) const DEFAULT_THROUGHPUT_PROFILE_MAX_OUTPUT_TOKEN_COUNT: u64 = 512;
+pub(crate) const DEFAULT_CPU_THROUGHPUT_WEIGHT: u64 = 922;
+pub(crate) const DEFAULT_GPU_THROUGHPUT_WEIGHT: u64 = 1_625;
+
+/// Relative inference throughput by backend device; higher weights represent faster backends.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BackendThroughputWeights {
+    pub(crate) cpu: u64,
+    pub(crate) gpu: u64,
+}
+
+impl Default for BackendThroughputWeights {
+    fn default() -> Self {
+        Self {
+            cpu: DEFAULT_CPU_THROUGHPUT_WEIGHT,
+            gpu: DEFAULT_GPU_THROUGHPUT_WEIGHT,
+        }
+    }
+}
+
+/// Relative backend throughput measured for one representative request workload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BackendThroughputProfile {
+    pub(crate) input_token_count: u64,
+    pub(crate) max_output_token_count: u64,
+    pub(crate) weights: BackendThroughputWeights,
+}
+
+impl Default for BackendThroughputProfile {
+    fn default() -> Self {
+        Self {
+            input_token_count: DEFAULT_THROUGHPUT_PROFILE_INPUT_TOKEN_COUNT,
+            max_output_token_count: DEFAULT_THROUGHPUT_PROFILE_MAX_OUTPUT_TOKEN_COUNT,
+            weights: BackendThroughputWeights::default(),
+        }
+    }
+}
+
+impl From<BackendThroughputProfileProto> for BackendThroughputProfile {
+    fn from(profile: BackendThroughputProfileProto) -> Self {
+        Self {
+            input_token_count: profile.input_token_count,
+            max_output_token_count: profile.max_output_token_count,
+            weights: BackendThroughputWeights {
+                cpu: profile.cpu_throughput_weight,
+                gpu: profile.gpu_throughput_weight,
+            },
+        }
+    }
+}
+
+impl From<BackendThroughputProfile> for BackendThroughputProfileProto {
+    fn from(profile: BackendThroughputProfile) -> Self {
+        Self {
+            input_token_count: profile.input_token_count,
+            max_output_token_count: profile.max_output_token_count,
+            cpu_throughput_weight: profile.weights.cpu,
+            gpu_throughput_weight: profile.weights.gpu,
+        }
+    }
+}
+
+impl fmt::Display for BackendThroughputProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "input_token_count={}, max_output_token_count={}, cpu_throughput_weight={}, \
+             gpu_throughput_weight={}",
+            self.input_token_count, self.max_output_token_count, self.weights.cpu, self.weights.gpu,
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RequestOrchestratorConfig {
     pub(crate) routing_policy: RequestRoutingPolicy,
+    pub(crate) throughput_profiles: Vec<BackendThroughputProfile>,
 }
 
 impl From<RequestOrchestratorConfigProto> for RequestOrchestratorConfig {
     fn from(config: RequestOrchestratorConfigProto) -> Self {
         Self {
             routing_policy: config.routing_policy().into(),
+            throughput_profiles: config
+                .throughput_profiles
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -33,13 +118,22 @@ impl From<RequestOrchestratorConfig> for RequestOrchestratorConfigProto {
     fn from(config: RequestOrchestratorConfig) -> Self {
         Self {
             routing_policy: RequestRoutingPolicyProto::from(config.routing_policy).into(),
+            throughput_profiles: config
+                .throughput_profiles
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
 
 impl fmt::Display for RequestOrchestratorConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "routing_policy={}", self.routing_policy)
+        write!(formatter, "routing_policy={}", self.routing_policy)?;
+        for profile in &self.throughput_profiles {
+            write!(formatter, ", throughput_profile=({profile})")?;
+        }
+        Ok(())
     }
 }
 
@@ -568,14 +662,27 @@ mod tests {
                 "cache-aware-least-estimated-work",
             ),
         ] {
-            let config = RequestOrchestratorConfig { routing_policy };
+            let config = RequestOrchestratorConfig {
+                routing_policy,
+                throughput_profiles: vec![BackendThroughputProfile {
+                    input_token_count: 128,
+                    max_output_token_count: 64,
+                    weights: BackendThroughputWeights { cpu: 300, gpu: 400 },
+                }],
+            };
 
             assert_eq!(
                 config.to_string(),
-                format!("routing_policy={expected_display}")
+                format!(
+                    "routing_policy={expected_display}, \
+                     throughput_profile=(input_token_count=128, max_output_token_count=64, \
+                     cpu_throughput_weight=300, gpu_throughput_weight=400)"
+                )
             );
             assert_eq!(
-                RequestOrchestratorConfig::from(RequestOrchestratorConfigProto::from(config)),
+                RequestOrchestratorConfig::from(RequestOrchestratorConfigProto::from(
+                    config.clone(),
+                )),
                 config
             );
         }

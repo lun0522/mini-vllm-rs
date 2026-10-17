@@ -371,6 +371,28 @@ impl RequestOrchestratorConfig {
             routing_policy != RequestRoutingPolicy::Unspecified,
             "request routing policy must be specified"
         );
+        anyhow::ensure!(
+            !self.throughput_profiles.is_empty(),
+            "at least one backend throughput profile must be specified"
+        );
+        for (profile_index, profile) in self.throughput_profiles.iter().enumerate() {
+            anyhow::ensure!(
+                profile.input_token_count > 0,
+                "backend throughput profile {profile_index} input token count must be greater than 0"
+            );
+            anyhow::ensure!(
+                profile.max_output_token_count > 0,
+                "backend throughput profile {profile_index} maximum output token count must be greater than 0"
+            );
+            anyhow::ensure!(
+                profile.cpu_throughput_weight > 0,
+                "backend throughput profile {profile_index} CPU throughput weight must be greater than 0"
+            );
+            anyhow::ensure!(
+                profile.gpu_throughput_weight > 0,
+                "backend throughput profile {profile_index} GPU throughput weight must be greater than 0"
+            );
+        }
         Ok(())
     }
 }
@@ -391,7 +413,19 @@ impl fmt::Display for RequestOrchestratorConfig {
             formatter,
             "Request routing policy: {}",
             routing_policy.cli_value()
-        )
+        )?;
+        for profile in &self.throughput_profiles {
+            writeln!(
+                formatter,
+                "Backend throughput profile: input tokens={}, maximum output tokens={}, CPU \
+                 weight={}, GPU weight={}",
+                profile.input_token_count.separate_with_commas(),
+                profile.max_output_token_count.separate_with_commas(),
+                profile.cpu_throughput_weight.separate_with_commas(),
+                profile.gpu_throughput_weight.separate_with_commas(),
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -529,10 +563,35 @@ mod tests {
     fn validates_and_displays_request_orchestrator_configuration() {
         let config = RequestOrchestratorConfig {
             routing_policy: RequestRoutingPolicy::RoundRobin.into(),
+            throughput_profiles: vec![BackendThroughputProfile {
+                input_token_count: 128,
+                max_output_token_count: 512,
+                cpu_throughput_weight: 922,
+                gpu_throughput_weight: 1_625,
+            }],
         };
 
         assert!(config.validate().is_ok());
-        assert_eq!(config.to_string(), "Request routing policy: round-robin\n");
+        assert_eq!(
+            config.to_string(),
+            "Request routing policy: round-robin\n\
+             Backend throughput profile: input tokens=128, maximum output tokens=512, CPU \
+             weight=922, GPU weight=1,625\n"
+        );
+
+        let mut invalid = config.clone();
+        invalid.throughput_profiles[0].cpu_throughput_weight = 0;
+        assert_eq!(
+            invalid.validate().unwrap_err().to_string(),
+            "backend throughput profile 0 CPU throughput weight must be greater than 0"
+        );
+        invalid.throughput_profiles[0].cpu_throughput_weight = 922;
+        invalid.throughput_profiles[0].gpu_throughput_weight = 0;
+        assert_eq!(
+            invalid.validate().unwrap_err().to_string(),
+            "backend throughput profile 0 GPU throughput weight must be greater than 0"
+        );
+
         assert_eq!(
             RequestOrchestratorConfig::default()
                 .validate()

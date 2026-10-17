@@ -121,13 +121,16 @@ The available request-routing policies are:
   and active requests. Equal scores select the least recently used backend.
 - `least-estimated-work`, which divides each backend's estimated remaining
   queued and active tokens, including the incoming request, by a fixed
-  benchmark-derived throughput weight. The CPU and GPU weights are 9.22 and
-  16.25 output tokens/s,
-  respectively, from the batched target-only results in
+  throughput weight. The fallback profile represents a 128-input-token,
+  512-maximum-output-token workload with CPU/GPU weights of `922` and `1625`,
+  preserving the 9.22-to-16.25 throughput ratio from the batched target-only
+  results in
   [`metal_gemv_threshold.md`](../../benchmarks/metal_gemv_threshold.md). Equal
-  scores select the least recently used backend. These weights are specific to
+  scores select the least recently used backend. The defaults are specific to
   the benchmark's Apple M2 and Qwen2.5 7B configuration and intentionally serve
-  as a simple fixed-weight baseline rather than hardware-independent estimates.
+  as a simple baseline. The request-orchestrator configuration can carry
+  workload-specific throughput profiles from a different environment; profile
+  selection remains a separate routing-policy change.
 - `most-cached-prefix`, which selects the backend with the longest cached
   complete-block prefix restorable for the incoming request. Equal matches
   select the least recently used backend. This policy requires prefix caching

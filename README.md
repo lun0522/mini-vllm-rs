@@ -135,8 +135,15 @@ cargo run --release
     for how the policies interact.
 - `--request-orchestrator-config '<textproto>'` configures backend routing:
   - `routing_policy`: Accepts `REQUEST_ROUTING_POLICY_ROUND_ROBIN`,
-    `REQUEST_ROUTING_POLICY_LEAST_REQUESTS`, or
-    `REQUEST_ROUTING_POLICY_LEAST_ESTIMATED_WORK`, and defaults to round robin.
+    `REQUEST_ROUTING_POLICY_LEAST_REQUESTS`,
+    `REQUEST_ROUTING_POLICY_LEAST_ESTIMATED_WORK`,
+    `REQUEST_ROUTING_POLICY_MOST_CACHED_PREFIX`, or
+    `REQUEST_ROUTING_POLICY_CACHE_AWARE_LEAST_ESTIMATED_WORK`, and defaults to
+    round robin.
+  - `throughput_profiles`: Supplies benchmark-derived CPU and GPU weights for
+    representative input and maximum-output token counts. When omitted, it
+    defaults to a `128`-input, `512`-output profile with CPU/GPU weights of
+    `922` and `1625`, based on a previous Apple M2 benchmark.
     See [Request orchestration](src/model_runner/README.md#request-orchestration)
     for policy behavior and state handling.
 - `--input-preprocessing-thread-count <count>` sets the request-handler

@@ -125,6 +125,7 @@ mod tests {
             Vec::new(),
             RequestOrchestratorConfig {
                 routing_policy: RequestRoutingPolicy::RoundRobin,
+                throughput_profiles: vec![Default::default()],
             },
         )
         .err()

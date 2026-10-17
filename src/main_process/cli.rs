@@ -1,7 +1,12 @@
 use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
+use crate::model_runner::DEFAULT_CPU_THROUGHPUT_WEIGHT;
+use crate::model_runner::DEFAULT_GPU_THROUGHPUT_WEIGHT;
 use crate::model_runner::DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT;
+use crate::model_runner::DEFAULT_THROUGHPUT_PROFILE_INPUT_TOKEN_COUNT;
+use crate::model_runner::DEFAULT_THROUGHPUT_PROFILE_MAX_OUTPUT_TOKEN_COUNT;
 use crate::proto::inference_config::draft_token_count_policy::Policy;
+use crate::proto::inference_config::BackendThroughputProfile as BackendThroughputProfileProto;
 use crate::proto::inference_config::DraftModelConfig;
 use crate::proto::inference_config::DraftTokenCountPolicy;
 use crate::proto::inference_config::FixedDraftTokenCountPolicy;
@@ -153,6 +158,16 @@ fn default_scheduler_config() -> SchedulerConfigProto {
 fn default_request_orchestrator_config() -> RequestOrchestratorConfigProto {
     RequestOrchestratorConfigProto {
         routing_policy: DEFAULT_REQUEST_ROUTING_POLICY.into(),
+        throughput_profiles: vec![default_backend_throughput_profile()],
+    }
+}
+
+fn default_backend_throughput_profile() -> BackendThroughputProfileProto {
+    BackendThroughputProfileProto {
+        input_token_count: DEFAULT_THROUGHPUT_PROFILE_INPUT_TOKEN_COUNT,
+        max_output_token_count: DEFAULT_THROUGHPUT_PROFILE_MAX_OUTPUT_TOKEN_COUNT,
+        cpu_throughput_weight: DEFAULT_CPU_THROUGHPUT_WEIGHT,
+        gpu_throughput_weight: DEFAULT_GPU_THROUGHPUT_WEIGHT,
     }
 }
 
@@ -273,6 +288,12 @@ fn normalize_request_orchestrator_config(config: &mut RequestOrchestratorConfigP
         warn!("Request routing policy is unspecified; using default value round-robin");
         config.routing_policy = DEFAULT_REQUEST_ROUTING_POLICY.into();
     }
+    if config.throughput_profiles.is_empty() {
+        warn!("Backend throughput profiles are empty; using the default benchmark profile");
+        config
+            .throughput_profiles
+            .push(default_backend_throughput_profile());
+    }
 }
 
 #[cfg(test)]
@@ -383,7 +404,13 @@ mod tests {
                 RequestRoutingPolicyProto::CacheAwareLeastEstimatedWork,
             ),
         ] {
-            let config = format!("routing_policy: {policy_name}");
+            let config = format!(
+                "routing_policy: {policy_name} \
+                 throughput_profiles {{ input_token_count: 64 max_output_token_count: 16 \
+                 cpu_throughput_weight: 100 gpu_throughput_weight: 200 }} \
+                 throughput_profiles {{ input_token_count: 512 max_output_token_count: 128 \
+                 cpu_throughput_weight: 300 gpu_throughput_weight: 400 }}"
+            );
             let args = MainProcessArgs::from_args(
                 &["mini-vllm-rs"],
                 &["--request-orchestrator-config", &config],
@@ -393,6 +420,23 @@ mod tests {
             assert_eq!(
                 args.request_orchestrator_config.routing_policy,
                 expected_policy as i32
+            );
+            assert_eq!(
+                args.request_orchestrator_config.throughput_profiles,
+                vec![
+                    BackendThroughputProfileProto {
+                        input_token_count: 64,
+                        max_output_token_count: 16,
+                        cpu_throughput_weight: 100,
+                        gpu_throughput_weight: 200,
+                    },
+                    BackendThroughputProfileProto {
+                        input_token_count: 512,
+                        max_output_token_count: 128,
+                        cpu_throughput_weight: 300,
+                        gpu_throughput_weight: 400,
+                    },
+                ]
             );
         }
     }
@@ -506,6 +550,10 @@ mod tests {
         assert_eq!(
             config.routing_policy,
             RequestRoutingPolicyProto::RoundRobin as i32
+        );
+        assert_eq!(
+            config.throughput_profiles,
+            vec![default_backend_throughput_profile()]
         );
         assert!(config.validate().is_ok());
     }

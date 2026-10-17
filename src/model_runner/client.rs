@@ -142,7 +142,7 @@ fn spawn(
         .arg("--request-orchestrator-config")
         .arg(
             format_textproto(
-                &RequestOrchestratorConfigProto::from(config.request_orchestrator_config),
+                &RequestOrchestratorConfigProto::from(config.request_orchestrator_config.clone()),
                 "inference_config.RequestOrchestratorConfig",
             )
             .map_err(anyhow::Error::msg)?,

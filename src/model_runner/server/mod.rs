@@ -503,6 +503,7 @@ mod tests {
             inference_backends,
             RequestOrchestratorConfig {
                 routing_policy: RequestRoutingPolicy::RoundRobin,
+                throughput_profiles: vec![Default::default()],
             },
             shutdown,
         )
