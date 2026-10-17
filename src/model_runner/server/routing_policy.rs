@@ -1,10 +1,12 @@
 use crate::model_runner::InferenceDevice;
+use std::cmp::Reverse;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use tokio::sync::watch;
 
 use super::request_orchestrator::BackendStateReceivers;
+use super::request_orchestrator::CacheAffinityState;
 use super::request_orchestrator::OperationalState;
 use super::request_orchestrator::RequestRoutingContext;
 use super::request_orchestrator::RoutingDecision;
@@ -15,7 +17,7 @@ const CPU_THROUGHPUT_WEIGHT: u64 = 922;
 const GPU_THROUGHPUT_WEIGHT: u64 = 1_625;
 
 pub(super) trait BackendRoutingPolicy: Send + Sync {
-    fn route_request(&self, request: RequestRoutingContext) -> RoutingDecision;
+    fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision;
 }
 
 pub(super) struct RoundRobinPolicy {
@@ -33,7 +35,7 @@ impl RoundRobinPolicy {
 }
 
 impl BackendRoutingPolicy for RoundRobinPolicy {
-    fn route_request(&self, _request: RequestRoutingContext) -> RoutingDecision {
+    fn route_request(&self, _request: RequestRoutingContext<'_>) -> RoutingDecision {
         RoutingDecision {
             backend_index: self.next_backend_index.fetch_add(1, Ordering::Relaxed)
                 % self.backend_count,
@@ -69,7 +71,7 @@ impl LeastRequestsPolicy {
 }
 
 impl BackendRoutingPolicy for LeastRequestsPolicy {
-    fn route_request(&self, _request: RequestRoutingContext) -> RoutingDecision {
+    fn route_request(&self, _request: RequestRoutingContext<'_>) -> RoutingDecision {
         let backend_index = route_by_score(
             self.operational_state_receivers.len(),
             &self.selection_history,
@@ -122,7 +124,7 @@ impl LeastEstimatedWorkPolicy {
 }
 
 impl BackendRoutingPolicy for LeastEstimatedWorkPolicy {
-    fn route_request(&self, request: RequestRoutingContext) -> RoutingDecision {
+    fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision {
         // This is a conservative upper-bound estimate that assigns equal cost to prefill and
         // decode tokens:
         //   (remaining queued and active prefill tokens
@@ -145,6 +147,40 @@ impl BackendRoutingPolicy for LeastEstimatedWorkPolicy {
                     estimated_token_count,
                     throughput_weight: backend.throughput_weight,
                 }
+            },
+        );
+        RoutingDecision { backend_index }
+    }
+}
+
+pub(super) struct MostCachedPrefixPolicy {
+    cache_affinity_state_receivers: Vec<watch::Receiver<CacheAffinityState>>,
+    selection_history: Mutex<BackendSelectionHistory>,
+}
+
+impl MostCachedPrefixPolicy {
+    pub(super) fn new(backend_state_receivers: Vec<BackendStateReceivers>) -> Self {
+        let backend_count = backend_state_receivers.len();
+        Self {
+            cache_affinity_state_receivers: backend_state_receivers
+                .into_iter()
+                .map(|backend| backend.cache_affinity)
+                .collect(),
+            selection_history: Mutex::new(BackendSelectionHistory::new(backend_count)),
+        }
+    }
+}
+
+impl BackendRoutingPolicy for MostCachedPrefixPolicy {
+    fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision {
+        let backend_index = route_by_score(
+            self.cache_affinity_state_receivers.len(),
+            &self.selection_history,
+            |backend_index| {
+                let state = self.cache_affinity_state_receivers[backend_index].borrow();
+                Reverse(state.prefix_cache.as_ref().map_or(0, |prefix_cache| {
+                    prefix_cache.find_longest_prefix_token_count(request.input_token_ids)
+                }))
             },
         );
         RoutingDecision { backend_index }

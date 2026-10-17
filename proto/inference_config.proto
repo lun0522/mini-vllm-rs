@@ -161,4 +161,6 @@ enum RequestRoutingPolicy {
   REQUEST_ROUTING_POLICY_LEAST_REQUESTS = 2;
   // Assigns each request to the backend with the least benchmark-weighted work.
   REQUEST_ROUTING_POLICY_LEAST_ESTIMATED_WORK = 3;
+  // Assigns each request to the backend with the longest cached input prefix.
+  REQUEST_ROUTING_POLICY_MOST_CACHED_PREFIX = 4;
 }

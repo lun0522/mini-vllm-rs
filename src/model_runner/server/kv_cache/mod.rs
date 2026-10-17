@@ -15,6 +15,7 @@ mod request_state;
 mod utils;
 
 pub(super) use manager::KvCacheManager;
+pub(super) use prefix_index::PrefixCacheAffinitySnapshot;
 
 /// Describes the static layout of a model instance's KV cache.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,6 +75,13 @@ impl KvCacheBackend {
         match self {
             Self::Contiguous(_) => None,
             Self::Paged(cache) => cache.prefix_cache_telemetry(),
+        }
+    }
+
+    pub(super) fn create_cache_affinity_snapshot(&self) -> Option<PrefixCacheAffinitySnapshot> {
+        match self {
+            Self::Contiguous(_) => None,
+            Self::Paged(cache) => cache.create_cache_affinity_snapshot(),
         }
     }
 

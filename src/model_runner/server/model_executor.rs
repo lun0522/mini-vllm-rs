@@ -24,6 +24,7 @@ use super::generation_stats::PrefixTokenCounts;
 use super::generation_stats::TextGenerationStats;
 use super::kv_cache::create_kv_cache;
 use super::kv_cache::KvCacheGeometry;
+use super::kv_cache::PrefixCacheAffinitySnapshot;
 use super::kv_cache::PrefixCacheTelemetry;
 use super::model_instance::ModelInstance;
 use super::text_generation;
@@ -143,6 +144,11 @@ impl ModelExecutor {
                 .as_ref()
                 .and_then(|draft| draft.model.prefix_cache_telemetry()),
         }
+    }
+
+    /// Creates a routing snapshot from the target model's prefix cache.
+    pub(super) fn create_cache_affinity_snapshot(&self) -> Option<PrefixCacheAffinitySnapshot> {
+        self.target.create_cache_affinity_snapshot()
     }
 
     pub(super) fn kv_cache_geometry(&self) -> KvCacheGeometry {

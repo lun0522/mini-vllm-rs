@@ -52,6 +52,37 @@ impl IndexedPrefixBlock {
     }
 }
 
+/// Immutable, token-only view of a prefix index for cache-affinity routing.
+#[derive(Debug, Eq, PartialEq)]
+pub(in crate::model_runner::server) struct PrefixCacheAffinitySnapshot {
+    per_block_token_count: usize,
+    blocks_map: HashMap<PrefixBlockKey, PrefixBlockId>,
+}
+
+impl PrefixCacheAffinitySnapshot {
+    pub(in crate::model_runner::server) fn find_longest_prefix_token_count(
+        &self,
+        input_token_ids: &[u32],
+    ) -> usize {
+        let mut parent_id = None;
+        let mut matched_block_count = 0usize;
+        for token_ids in input_token_ids.chunks_exact(self.per_block_token_count) {
+            let key = PrefixBlockKey {
+                parent_id,
+                token_ids: token_ids.into(),
+            };
+            let Some(&block_id) = self.blocks_map.get(&key) else {
+                break;
+            };
+            parent_id = Some(block_id);
+            matched_block_count += 1;
+        }
+        matched_block_count
+            .checked_mul(self.per_block_token_count)
+            .expect("matched prefix token count must fit within cache capacity")
+    }
+}
+
 pub(super) struct PrefixBlockMatch {
     pub(super) page_ids_by_layer: Vec<Vec<PageId>>,
     pub(super) cursor: PrefixBlockCursor,
@@ -118,6 +149,17 @@ impl PrefixBlockIndex {
 
     pub(super) fn block_count(&self) -> usize {
         self.blocks_map.len()
+    }
+
+    pub(super) fn create_cache_affinity_snapshot(&self) -> PrefixCacheAffinitySnapshot {
+        PrefixCacheAffinitySnapshot {
+            per_block_token_count: self.per_block_token_count,
+            blocks_map: self
+                .blocks_map
+                .iter()
+                .map(|(key, block)| (key.clone(), block.block_id))
+                .collect(),
+        }
     }
 
     pub(super) fn find_longest_cached_prefix(
@@ -364,6 +406,55 @@ mod tests {
     #[test]
     fn rejects_a_zero_token_block_size() {
         assert!(PrefixBlockIndex::new(0).is_err());
+    }
+
+    #[test]
+    fn cache_affinity_snapshot_finds_the_longest_complete_cached_prefix() -> Result<()> {
+        let mut index = PrefixBlockIndex::new(2)?;
+        index_pages(
+            &mut index,
+            &PrefixBlockCursor::at_root(),
+            &[1, 2, 3, 4],
+            pages(&[&[10, 11]]),
+        )?;
+        index_pages(
+            &mut index,
+            &PrefixBlockCursor::at_root(),
+            &[1, 2, 5, 6],
+            pages(&[&[10, 12]]),
+        )?;
+
+        let snapshot = index.create_cache_affinity_snapshot();
+
+        assert_eq!(snapshot.find_longest_prefix_token_count(&[1, 2, 3, 4]), 4);
+        assert_eq!(snapshot.find_longest_prefix_token_count(&[1, 2, 5, 9]), 2);
+        assert_eq!(snapshot.find_longest_prefix_token_count(&[1, 9, 3, 4]), 0);
+        assert_eq!(snapshot.find_longest_prefix_token_count(&[1, 2, 3]), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn cache_affinity_snapshot_is_unchanged_when_the_index_changes() -> Result<()> {
+        let mut index = PrefixBlockIndex::new(2)?;
+        index_pages(
+            &mut index,
+            &PrefixBlockCursor::at_root(),
+            &[1, 2],
+            pages(&[&[10]]),
+        )?;
+        let old_snapshot = index.create_cache_affinity_snapshot();
+
+        index_pages(
+            &mut index,
+            &PrefixBlockCursor::at_root(),
+            &[3, 4],
+            pages(&[&[11]]),
+        )?;
+        let new_snapshot = index.create_cache_affinity_snapshot();
+
+        assert_eq!(old_snapshot.find_longest_prefix_token_count(&[3, 4]), 0);
+        assert_eq!(new_snapshot.find_longest_prefix_token_count(&[3, 4]), 2);
+        Ok(())
     }
 
     #[test]

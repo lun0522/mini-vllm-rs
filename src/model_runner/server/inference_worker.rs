@@ -232,6 +232,7 @@ impl InferenceWorker {
         let committed_token_ids = self.request_manager.committed_token_ids(request_id)?;
         self.model_executor
             .publish_completed_prefix(request_id, committed_token_ids)?;
+        self.publish_cache_affinity_state();
         self.scheduler.release_prefix_flight(request_id)
     }
 
@@ -280,15 +281,10 @@ impl InferenceWorker {
     }
 
     fn publish_cache_affinity_state(&self) {
-        let indexed_token_count = self
-            .model_executor
-            .prefix_cache_telemetry()
-            .target
-            .map_or(0, |telemetry| telemetry.current_indexed_token_count);
         self.cache_affinity_state_sender
-            .send_replace(CacheAffinityState {
-                indexed_token_count,
-            });
+            .send_replace(CacheAffinityState::new(
+                self.model_executor.create_cache_affinity_snapshot(),
+            ));
     }
 
     fn report_request_outcome(&self, request_id: u64, request_outcome: &RequestOutcome) {

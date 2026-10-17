@@ -1,5 +1,6 @@
 use super::physical_page_pool::PhysicalPagePool;
 use super::prefix_index::PrefixBlockIndex;
+use super::prefix_index::PrefixCacheAffinitySnapshot;
 use super::request_state::LayerCacheView;
 use super::request_state::RequestPagedCacheState;
 use super::utils::get_page_from_pool;
@@ -130,6 +131,12 @@ impl PagedKvCache {
             cumulative_lookup_count: self.prefix_cache_counters.cumulative_lookup_count,
             cumulative_hit_count: self.prefix_cache_counters.cumulative_hit_count,
         })
+    }
+
+    pub(super) fn create_cache_affinity_snapshot(&self) -> Option<PrefixCacheAffinitySnapshot> {
+        self.prefix_block_index
+            .as_ref()
+            .map(PrefixBlockIndex::create_cache_affinity_snapshot)
     }
 
     /// Attaches the longest reusable prefix to the current request and returns its token count.

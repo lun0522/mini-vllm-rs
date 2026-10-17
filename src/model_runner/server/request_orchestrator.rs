@@ -4,11 +4,14 @@ use crate::model_runner::RequestRoutingPolicy;
 use anyhow::ensure;
 use anyhow::Result;
 use log::info;
+use std::sync::Arc;
 use tokio::sync::watch;
 
+use super::kv_cache::PrefixCacheAffinitySnapshot;
 use super::routing_policy::BackendRoutingPolicy;
 use super::routing_policy::LeastEstimatedWorkPolicy;
 use super::routing_policy::LeastRequestsPolicy;
+use super::routing_policy::MostCachedPrefixPolicy;
 use super::routing_policy::RoundRobinPolicy;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -21,9 +24,17 @@ pub(super) struct OperationalState {
     pub(super) active_remaining_max_output_token_count: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct CacheAffinityState {
-    pub(super) indexed_token_count: usize,
+    pub(super) prefix_cache: Option<Arc<PrefixCacheAffinitySnapshot>>,
+}
+
+impl CacheAffinityState {
+    pub(super) fn new(prefix_cache: Option<PrefixCacheAffinitySnapshot>) -> Self {
+        Self {
+            prefix_cache: prefix_cache.map(Arc::new),
+        }
+    }
 }
 
 pub(super) struct BackendStateReceivers {
@@ -38,7 +49,8 @@ pub(super) struct RoutingDecision {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct RequestRoutingContext {
+pub(super) struct RequestRoutingContext<'a> {
+    pub(super) input_token_ids: &'a [u32],
     pub(super) input_token_count: usize,
     pub(super) max_new_token_count: u64,
 }
@@ -67,12 +79,15 @@ impl RequestOrchestrator {
             RequestRoutingPolicy::LeastEstimatedWork => {
                 Box::new(LeastEstimatedWorkPolicy::new(backend_state_receivers))
             }
+            RequestRoutingPolicy::MostCachedPrefix => {
+                Box::new(MostCachedPrefixPolicy::new(backend_state_receivers))
+            }
         };
         Ok(Self { policy })
     }
 
     /// Selects a backend according to the configured routing policy.
-    pub(super) fn route_request(&self, request: RequestRoutingContext) -> RoutingDecision {
+    pub(super) fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision {
         self.policy.route_request(request)
     }
 }
@@ -111,8 +126,9 @@ mod tests {
         }
     }
 
-    fn routing_context(estimated_token_count: u64) -> RequestRoutingContext {
+    fn routing_context(estimated_token_count: u64) -> RequestRoutingContext<'static> {
         RequestRoutingContext {
+            input_token_ids: &[],
             input_token_count: 0,
             max_new_token_count: estimated_token_count,
         }

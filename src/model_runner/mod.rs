@@ -48,6 +48,7 @@ pub(crate) enum RequestRoutingPolicy {
     RoundRobin,
     LeastRequests,
     LeastEstimatedWork,
+    MostCachedPrefix,
 }
 
 impl From<RequestRoutingPolicyProto> for RequestRoutingPolicy {
@@ -59,6 +60,7 @@ impl From<RequestRoutingPolicyProto> for RequestRoutingPolicy {
             RequestRoutingPolicyProto::RoundRobin => Self::RoundRobin,
             RequestRoutingPolicyProto::LeastRequests => Self::LeastRequests,
             RequestRoutingPolicyProto::LeastEstimatedWork => Self::LeastEstimatedWork,
+            RequestRoutingPolicyProto::MostCachedPrefix => Self::MostCachedPrefix,
         }
     }
 }
@@ -69,6 +71,7 @@ impl From<RequestRoutingPolicy> for RequestRoutingPolicyProto {
             RequestRoutingPolicy::RoundRobin => Self::RoundRobin,
             RequestRoutingPolicy::LeastRequests => Self::LeastRequests,
             RequestRoutingPolicy::LeastEstimatedWork => Self::LeastEstimatedWork,
+            RequestRoutingPolicy::MostCachedPrefix => Self::MostCachedPrefix,
         }
     }
 }
@@ -79,6 +82,7 @@ impl fmt::Display for RequestRoutingPolicy {
             Self::RoundRobin => "round-robin",
             Self::LeastRequests => "least-requests",
             Self::LeastEstimatedWork => "least-estimated-work",
+            Self::MostCachedPrefix => "most-cached-prefix",
         })
     }
 }
@@ -550,6 +554,7 @@ mod tests {
                 RequestRoutingPolicy::LeastEstimatedWork,
                 "least-estimated-work",
             ),
+            (RequestRoutingPolicy::MostCachedPrefix, "most-cached-prefix"),
         ] {
             let config = RequestOrchestratorConfig { routing_policy };
 

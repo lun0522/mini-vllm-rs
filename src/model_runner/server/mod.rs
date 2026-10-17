@@ -215,6 +215,7 @@ impl ModelRunnerService for ModelRunnerRpcService {
         let routing_decision = self
             .request_orchestrator
             .route_request(RequestRoutingContext {
+                input_token_ids: &request.input_token_ids,
                 input_token_count: request.input_token_ids.len(),
                 max_new_token_count: request.max_new_tokens,
             });
