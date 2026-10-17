@@ -400,6 +400,7 @@ impl RequestRoutingPolicy {
         match self {
             Self::Unspecified => "unspecified",
             Self::RoundRobin => "round-robin",
+            Self::LeastRequests => "least-requests",
         }
     }
 }

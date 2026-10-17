@@ -46,6 +46,7 @@ impl fmt::Display for RequestOrchestratorConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RequestRoutingPolicy {
     RoundRobin,
+    LeastRequests,
 }
 
 impl From<RequestRoutingPolicyProto> for RequestRoutingPolicy {
@@ -55,6 +56,7 @@ impl From<RequestRoutingPolicyProto> for RequestRoutingPolicy {
                 "validated request orchestrator configuration should specify a routing policy"
             ),
             RequestRoutingPolicyProto::RoundRobin => Self::RoundRobin,
+            RequestRoutingPolicyProto::LeastRequests => Self::LeastRequests,
         }
     }
 }
@@ -63,6 +65,7 @@ impl From<RequestRoutingPolicy> for RequestRoutingPolicyProto {
     fn from(policy: RequestRoutingPolicy) -> Self {
         match policy {
             RequestRoutingPolicy::RoundRobin => Self::RoundRobin,
+            RequestRoutingPolicy::LeastRequests => Self::LeastRequests,
         }
     }
 }
@@ -71,6 +74,7 @@ impl fmt::Display for RequestRoutingPolicy {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::RoundRobin => "round-robin",
+            Self::LeastRequests => "least-requests",
         })
     }
 }
@@ -535,15 +539,21 @@ mod tests {
 
     #[test]
     fn round_trips_request_orchestrator_configuration_through_proto() {
-        let config = RequestOrchestratorConfig {
-            routing_policy: RequestRoutingPolicy::RoundRobin,
-        };
+        for (routing_policy, expected_display) in [
+            (RequestRoutingPolicy::RoundRobin, "round-robin"),
+            (RequestRoutingPolicy::LeastRequests, "least-requests"),
+        ] {
+            let config = RequestOrchestratorConfig { routing_policy };
 
-        assert_eq!(config.to_string(), "routing_policy=round-robin");
-        assert_eq!(
-            RequestOrchestratorConfig::from(RequestOrchestratorConfigProto::from(config)),
-            config
-        );
+            assert_eq!(
+                config.to_string(),
+                format!("routing_policy={expected_display}")
+            );
+            assert_eq!(
+                RequestOrchestratorConfig::from(RequestOrchestratorConfigProto::from(config)),
+                config
+            );
+        }
     }
 
     #[test]

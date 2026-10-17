@@ -358,19 +358,28 @@ mod tests {
 
     #[test]
     fn parses_request_orchestrator_configuration() {
-        let args = MainProcessArgs::from_args(
-            &["mini-vllm-rs"],
-            &[
-                "--request-orchestrator-config",
-                "routing_policy: REQUEST_ROUTING_POLICY_ROUND_ROBIN",
-            ],
-        )
-        .expect("request orchestrator arguments should parse");
+        for (policy_name, expected_policy) in [
+            (
+                "REQUEST_ROUTING_POLICY_ROUND_ROBIN",
+                RequestRoutingPolicyProto::RoundRobin,
+            ),
+            (
+                "REQUEST_ROUTING_POLICY_LEAST_REQUESTS",
+                RequestRoutingPolicyProto::LeastRequests,
+            ),
+        ] {
+            let config = format!("routing_policy: {policy_name}");
+            let args = MainProcessArgs::from_args(
+                &["mini-vllm-rs"],
+                &["--request-orchestrator-config", &config],
+            )
+            .expect("request orchestrator arguments should parse");
 
-        assert_eq!(
-            args.request_orchestrator_config.routing_policy,
-            RequestRoutingPolicyProto::RoundRobin as i32
-        );
+            assert_eq!(
+                args.request_orchestrator_config.routing_policy,
+                expected_policy as i32
+            );
+        }
     }
 
     #[test]

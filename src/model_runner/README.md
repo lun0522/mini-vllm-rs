@@ -20,17 +20,9 @@ flowchart LR
 ```
 
 CPU-only and GPU-only modes create one backend. Mixed mode creates both and
-routes whole requests between their bounded queues according to the configured
-request-routing policy. The initial `round-robin` policy selects backends in
-cyclic order. Each backend has its own inference thread, scheduler, loaded
-models, and KV caches; a request is never split across devices.
-
-The request orchestrator owns only the configured backend-selection policy
-state and returns a backend index. The RPC service retains ownership of the
-backend queues and dispatches each request according to that decision.
-Workers publish replaceable operational and cache-affinity snapshots to the
-orchestrator at sparse request-lifecycle boundaries. The initial round-robin
-policy observes but does not yet use those snapshots.
+routes whole requests between their bounded queues. Each backend has its own
+inference thread, scheduler, loaded models, and KV caches; a request is never
+split across devices.
 
 The server binds its Unix socket only after every configured backend has loaded
 its models, making the socket a readiness signal. After startup, inference
@@ -104,6 +96,30 @@ The RPC server rejects empty inputs or inputs larger than the effective
 KV-cache capacity: the target capacity without speculative decoding, or the
 smaller target/draft capacity with it. If the requested output would exceed the
 remaining capacity, it reduces `max_new_tokens` before queueing the request.
+
+## Request orchestration
+
+The request orchestrator owns only the configured backend-selection policy
+state and returns a backend index. The RPC service retains ownership of the
+backend queues and dispatches each request according to that decision.
+
+Workers publish replaceable operational and cache-affinity snapshots to the
+orchestrator at sparse request-lifecycle boundaries:
+
+- Operational snapshots contain separate queued and active request counts.
+- Cache-affinity snapshots remain separate so load-only policies do not depend
+  on cache contents.
+
+The available request-routing policies are:
+
+- `round-robin`, which selects backends cyclically without inspecting worker
+  state.
+- `least-requests`, which selects the backend with the smallest sum of queued
+  and active requests. Equal scores select the least recently used backend.
+
+Operational snapshots are intentionally approximate: requests still in a
+backend's message channel are not represented until its worker receives them,
+and routing does not reserve capacity before dispatch.
 
 ## Scheduling
 

@@ -157,8 +157,12 @@ impl Scheduler {
         self.queued_requests.is_empty() && self.active_requests.is_empty()
     }
 
-    pub(super) fn request_count(&self) -> usize {
-        self.queued_requests.len() + self.active_requests.len()
+    pub(super) fn queued_request_count(&self) -> usize {
+        self.queued_requests.len()
+    }
+
+    pub(super) fn active_request_count(&self) -> usize {
+        self.active_requests.len()
     }
 
     /// Updates scheduling metadata and returns whether this transition requires prefix

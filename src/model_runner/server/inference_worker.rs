@@ -265,7 +265,8 @@ impl InferenceWorker {
     fn publish_operational_state(&self) {
         self.operational_state_sender
             .send_replace(OperationalState {
-                request_count: self.scheduler.request_count(),
+                queued_request_count: self.scheduler.queued_request_count(),
+                active_request_count: self.scheduler.active_request_count(),
             });
     }
 
