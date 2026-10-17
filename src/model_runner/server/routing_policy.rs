@@ -344,6 +344,225 @@ impl BackendSelectionHistory {
 mod tests {
     use super::*;
 
+    fn backend_state_receiver(operational_state: OperationalState) -> BackendStateReceivers {
+        backend_state_receiver_for_device(InferenceDevice::Cpu, operational_state)
+    }
+
+    fn backend_state_receiver_for_device(
+        device: InferenceDevice,
+        operational_state: OperationalState,
+    ) -> BackendStateReceivers {
+        let (_operational_sender, operational) = watch::channel(operational_state);
+        let (_cache_affinity_sender, cache_affinity) =
+            watch::channel(CacheAffinityState::default());
+        BackendStateReceivers {
+            device,
+            operational,
+            cache_affinity,
+        }
+    }
+
+    fn backend_state_receivers(count: usize) -> Vec<BackendStateReceivers> {
+        (0..count)
+            .map(|_| backend_state_receiver(OperationalState::default()))
+            .collect()
+    }
+
+    fn routing_context(estimated_token_count: u64) -> RequestRoutingContext<'static> {
+        RequestRoutingContext {
+            input_token_ids: &[],
+            input_token_count: 0,
+            max_new_token_count: estimated_token_count,
+        }
+    }
+
+    #[test]
+    fn routes_requests_in_round_robin_order() {
+        let policy = RoundRobinPolicy::new(2);
+
+        let backend_indices: Vec<_> = (0..5)
+            .map(|_| policy.route_request(routing_context(1)).backend_index)
+            .collect();
+
+        assert_eq!(backend_indices, vec![0, 1, 0, 1, 0]);
+    }
+
+    #[test]
+    fn routes_every_request_to_the_only_backend() {
+        let policy = RoundRobinPolicy::new(1);
+
+        for _ in 0..3 {
+            assert_eq!(policy.route_request(routing_context(1)).backend_index, 0);
+        }
+    }
+
+    #[test]
+    fn least_requests_observes_latest_operational_state_publications() {
+        let (operational_sender, first_operational) = watch::channel(OperationalState::default());
+        let (_first_cache_affinity_sender, first_cache_affinity) =
+            watch::channel(CacheAffinityState::default());
+        let policy = LeastRequestsPolicy::new(vec![
+            BackendStateReceivers {
+                device: InferenceDevice::Cpu,
+                operational: first_operational,
+                cache_affinity: first_cache_affinity,
+            },
+            backend_state_receiver(OperationalState {
+                active_request_count: 1,
+                ..Default::default()
+            }),
+        ]);
+
+        assert_eq!(policy.route_request(routing_context(1)).backend_index, 0);
+
+        operational_sender.send_replace(OperationalState {
+            queued_request_count: 2,
+            active_request_count: 1,
+            ..Default::default()
+        });
+
+        assert_eq!(policy.route_request(routing_context(1)).backend_index, 1);
+    }
+
+    #[test]
+    fn routes_to_the_backend_with_the_fewest_requests() {
+        let policy = LeastRequestsPolicy::new(vec![
+            backend_state_receiver(OperationalState {
+                queued_request_count: 2,
+                active_request_count: 1,
+                ..Default::default()
+            }),
+            backend_state_receiver(OperationalState {
+                queued_request_count: 0,
+                active_request_count: 2,
+                ..Default::default()
+            }),
+        ]);
+
+        assert_eq!(policy.route_request(routing_context(1)).backend_index, 1);
+    }
+
+    #[test]
+    fn least_requests_breaks_ties_by_least_recent_selection() {
+        let policy = LeastRequestsPolicy::new(backend_state_receivers(2));
+
+        let backend_indices: Vec<_> = (0..4)
+            .map(|_| policy.route_request(routing_context(1)).backend_index)
+            .collect();
+
+        assert_eq!(backend_indices, vec![0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn least_estimated_work_accounts_for_backend_throughput() {
+        let policy = LeastEstimatedWorkPolicy::new(vec![
+            backend_state_receiver_for_device(
+                InferenceDevice::Cpu,
+                OperationalState {
+                    queued_request_count: 0,
+                    active_request_count: 1,
+                    active_remaining_max_output_token_count: 100,
+                    ..Default::default()
+                },
+            ),
+            backend_state_receiver_for_device(
+                InferenceDevice::Gpu,
+                OperationalState {
+                    queued_request_count: 1,
+                    active_request_count: 1,
+                    queued_remaining_prefill_token_count: 50,
+                    active_remaining_max_output_token_count: 100,
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        // CPU: 200 / 9.22; GPU: 250 / 16.25, so the busier GPU still has less work.
+        assert_eq!(policy.route_request(routing_context(100)).backend_index, 1);
+    }
+
+    #[test]
+    fn least_estimated_work_breaks_equal_scores_by_least_recent_selection() {
+        let policy = LeastEstimatedWorkPolicy::new(vec![
+            backend_state_receiver_for_device(InferenceDevice::Cpu, OperationalState::default()),
+            backend_state_receiver_for_device(InferenceDevice::Cpu, OperationalState::default()),
+        ]);
+
+        let backend_indices: Vec<_> = (0..4)
+            .map(|_| policy.route_request(routing_context(1)).backend_index)
+            .collect();
+
+        assert_eq!(backend_indices, vec![0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn most_cached_prefix_breaks_equal_matches_by_least_recent_selection() {
+        let policy = MostCachedPrefixPolicy::new(backend_state_receivers(2));
+
+        let backend_indices: Vec<_> = (0..4)
+            .map(|_| policy.route_request(routing_context(1)).backend_index)
+            .collect();
+
+        assert_eq!(backend_indices, vec![0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn cache_aware_least_estimated_work_accounts_for_backend_load() {
+        let policy = CacheAwareLeastEstimatedWorkPolicy::new(vec![
+            backend_state_receiver(OperationalState {
+                active_remaining_prefill_token_count: 20,
+                ..Default::default()
+            }),
+            backend_state_receiver(OperationalState::default()),
+        ]);
+        let request = RequestRoutingContext {
+            input_token_ids: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            input_token_count: 10,
+            max_new_token_count: 5,
+        };
+
+        let decision = policy.route_request(request);
+
+        // Backend 0: 20 existing + 10 input + 5 output = 35 tokens.
+        // Backend 1: 10 input + 5 output = 15 tokens.
+        assert_eq!(decision.backend_index, 1);
+    }
+
+    #[test]
+    fn cache_aware_least_estimated_work_accounts_for_backend_throughput() {
+        let policy = CacheAwareLeastEstimatedWorkPolicy::new(vec![
+            backend_state_receiver_for_device(
+                InferenceDevice::Cpu,
+                OperationalState {
+                    active_remaining_prefill_token_count: 3,
+                    ..Default::default()
+                },
+            ),
+            backend_state_receiver_for_device(InferenceDevice::Gpu, OperationalState::default()),
+        ]);
+        let request = RequestRoutingContext {
+            input_token_ids: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            input_token_count: 10,
+            max_new_token_count: 5,
+        };
+
+        let decision = policy.route_request(request);
+
+        // CPU: 18 / 9.22; GPU: 15 / 16.25, so the GPU finishes first.
+        assert_eq!(decision.backend_index, 1);
+    }
+
+    #[test]
+    fn cache_aware_least_estimated_work_breaks_equal_scores_by_least_recent_selection() {
+        let policy = CacheAwareLeastEstimatedWorkPolicy::new(backend_state_receivers(2));
+
+        let backend_indices: Vec<_> = (0..4)
+            .map(|_| policy.route_request(routing_context(1)).backend_index)
+            .collect();
+
+        assert_eq!(backend_indices, vec![0, 1, 0, 1]);
+    }
+
     #[test]
     fn cached_prefix_reduces_only_the_incoming_prefill_work() {
         let state = OperationalState {

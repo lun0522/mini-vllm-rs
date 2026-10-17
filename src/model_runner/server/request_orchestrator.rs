@@ -108,44 +108,6 @@ impl RequestOrchestrator {
 mod tests {
     use super::*;
 
-    fn backend_state_receiver(operational_state: OperationalState) -> BackendStateReceivers {
-        backend_state_receiver_for_device(InferenceDevice::Cpu, operational_state)
-    }
-
-    fn backend_state_receiver_for_device(
-        device: InferenceDevice,
-        operational_state: OperationalState,
-    ) -> BackendStateReceivers {
-        let (_operational_sender, operational) = watch::channel(operational_state);
-        let (_cache_affinity_sender, cache_affinity) =
-            watch::channel(CacheAffinityState::default());
-        BackendStateReceivers {
-            device,
-            operational,
-            cache_affinity,
-        }
-    }
-
-    fn backend_state_receivers(count: usize) -> Vec<BackendStateReceivers> {
-        (0..count)
-            .map(|_| backend_state_receiver(OperationalState::default()))
-            .collect()
-    }
-
-    fn round_robin_config() -> RequestOrchestratorConfig {
-        RequestOrchestratorConfig {
-            routing_policy: RequestRoutingPolicy::RoundRobin,
-        }
-    }
-
-    fn routing_context(estimated_token_count: u64) -> RequestRoutingContext<'static> {
-        RequestRoutingContext {
-            input_token_ids: &[],
-            input_token_count: 0,
-            max_new_token_count: estimated_token_count,
-        }
-    }
-
     #[test]
     fn excludes_the_final_input_token_from_cache_affinity_matching() {
         let request = RequestRoutingContext {
@@ -158,182 +120,19 @@ mod tests {
     }
 
     #[test]
-    fn routes_requests_in_round_robin_order() {
-        let orchestrator =
-            RequestOrchestrator::new(backend_state_receivers(2), round_robin_config()).unwrap();
-
-        let backend_indices: Vec<_> = (0..5)
-            .map(|_| orchestrator.route_request(routing_context(1)).backend_index)
-            .collect();
-
-        assert_eq!(backend_indices, vec![0, 1, 0, 1, 0]);
-    }
-
-    #[test]
-    fn routes_every_request_to_the_only_backend() {
-        let orchestrator =
-            RequestOrchestrator::new(backend_state_receivers(1), round_robin_config()).unwrap();
-
-        for _ in 0..3 {
-            assert_eq!(
-                orchestrator.route_request(routing_context(1)).backend_index,
-                0
-            );
-        }
-    }
-
-    #[test]
     fn rejects_an_empty_backend_set() {
-        let error = RequestOrchestrator::new(backend_state_receivers(0), round_robin_config())
-            .err()
-            .unwrap();
+        let error = RequestOrchestrator::new(
+            Vec::new(),
+            RequestOrchestratorConfig {
+                routing_policy: RequestRoutingPolicy::RoundRobin,
+            },
+        )
+        .err()
+        .unwrap();
 
         assert_eq!(
             error.to_string(),
             "request orchestration requires a backend"
         );
-    }
-
-    #[test]
-    fn least_requests_observes_latest_operational_state_publications() {
-        let (operational_sender, operational) = watch::channel(OperationalState::default());
-        let (_cache_affinity_sender, cache_affinity) =
-            watch::channel(CacheAffinityState::default());
-        let orchestrator = RequestOrchestrator::new(
-            vec![BackendStateReceivers {
-                device: InferenceDevice::Cpu,
-                operational,
-                cache_affinity,
-            }],
-            RequestOrchestratorConfig {
-                routing_policy: RequestRoutingPolicy::LeastRequests,
-            },
-        )
-        .unwrap();
-
-        operational_sender.send_replace(OperationalState {
-            queued_request_count: 2,
-            active_request_count: 1,
-            ..Default::default()
-        });
-        operational_sender.send_replace(OperationalState {
-            queued_request_count: 1,
-            active_request_count: 1,
-            ..Default::default()
-        });
-
-        assert_eq!(
-            orchestrator.route_request(routing_context(1)).backend_index,
-            0
-        );
-    }
-
-    #[test]
-    fn routes_to_the_backend_with_the_fewest_requests() {
-        let orchestrator = RequestOrchestrator::new(
-            vec![
-                backend_state_receiver(OperationalState {
-                    queued_request_count: 2,
-                    active_request_count: 1,
-                    ..Default::default()
-                }),
-                backend_state_receiver(OperationalState {
-                    queued_request_count: 0,
-                    active_request_count: 2,
-                    ..Default::default()
-                }),
-            ],
-            RequestOrchestratorConfig {
-                routing_policy: RequestRoutingPolicy::LeastRequests,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(
-            orchestrator.route_request(routing_context(1)).backend_index,
-            1
-        );
-    }
-
-    #[test]
-    fn least_requests_breaks_ties_by_least_recent_selection() {
-        let orchestrator = RequestOrchestrator::new(
-            backend_state_receivers(2),
-            RequestOrchestratorConfig {
-                routing_policy: RequestRoutingPolicy::LeastRequests,
-            },
-        )
-        .unwrap();
-
-        let backend_indices: Vec<_> = (0..4)
-            .map(|_| orchestrator.route_request(routing_context(1)).backend_index)
-            .collect();
-
-        assert_eq!(backend_indices, vec![0, 1, 0, 1]);
-    }
-
-    #[test]
-    fn least_estimated_work_accounts_for_backend_throughput() {
-        let orchestrator = RequestOrchestrator::new(
-            vec![
-                backend_state_receiver_for_device(
-                    InferenceDevice::Cpu,
-                    OperationalState {
-                        queued_request_count: 0,
-                        active_request_count: 1,
-                        active_remaining_max_output_token_count: 100,
-                        ..Default::default()
-                    },
-                ),
-                backend_state_receiver_for_device(
-                    InferenceDevice::Gpu,
-                    OperationalState {
-                        queued_request_count: 1,
-                        active_request_count: 1,
-                        queued_remaining_prefill_token_count: 50,
-                        active_remaining_max_output_token_count: 100,
-                        ..Default::default()
-                    },
-                ),
-            ],
-            RequestOrchestratorConfig {
-                routing_policy: RequestRoutingPolicy::LeastEstimatedWork,
-            },
-        )
-        .unwrap();
-
-        // CPU: 200 / 9.22; GPU: 250 / 16.25, so the busier GPU still has less work.
-        assert_eq!(
-            orchestrator
-                .route_request(routing_context(100))
-                .backend_index,
-            1
-        );
-    }
-
-    #[test]
-    fn least_estimated_work_breaks_equal_scores_by_least_recent_selection() {
-        let orchestrator = RequestOrchestrator::new(
-            vec![
-                backend_state_receiver_for_device(
-                    InferenceDevice::Cpu,
-                    OperationalState::default(),
-                ),
-                backend_state_receiver_for_device(
-                    InferenceDevice::Cpu,
-                    OperationalState::default(),
-                ),
-            ],
-            RequestOrchestratorConfig {
-                routing_policy: RequestRoutingPolicy::LeastEstimatedWork,
-            },
-        )
-        .unwrap();
-
-        let backend_indices: Vec<_> = (0..4)
-            .map(|_| orchestrator.route_request(routing_context(1)).backend_index)
-            .collect();
-
-        assert_eq!(backend_indices, vec![0, 1, 0, 1]);
     }
 }
