@@ -242,4 +242,11 @@ impl PhysicalPagePool {
     pub(super) fn free_page_count(&self) -> usize {
         self.free_page_ids.len()
     }
+
+    /// Returns whether every page is owned only by the reusable prefix index.
+    pub(super) fn are_pages_inactive(&self, page_ids: &[PageId]) -> bool {
+        page_ids
+            .iter()
+            .all(|page_id| self.page_states[page_id.0] == PageState::WrittenNotInUse)
+    }
 }

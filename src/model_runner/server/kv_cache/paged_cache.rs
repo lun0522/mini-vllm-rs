@@ -176,7 +176,6 @@ impl PagedKvCache {
             value,
         )?;
         self.ensure_append_capacity_with_prefix_eviction(
-            request_state,
             layer_cache.cached_token_count,
             appending_token_count,
         )?;
@@ -309,7 +308,6 @@ impl PagedKvCache {
     /// Evicts inactive cached-prefix leaves until the requested append fits or none remain.
     fn ensure_append_capacity_with_prefix_eviction(
         &mut self,
-        request_state: &RequestPagedCacheState,
         current_token_count: usize,
         appending_token_count: usize,
     ) -> Result<()> {
@@ -317,11 +315,14 @@ impl PagedKvCache {
             .physical_page_pool
             .compute_required_page_count(current_token_count, appending_token_count);
         while self.physical_page_pool.free_page_count() < required_page_count {
+            let physical_page_pool = &self.physical_page_pool;
             let Some(prefix_block_index) = self.prefix_block_index.as_mut() else {
                 break;
             };
-            let Some(evicted_block) = prefix_block_index
-                .evict_least_recently_used_leaf(request_state.prefix_block_cursor())?
+            let Some(evicted_block) =
+                prefix_block_index.evict_least_recently_used_leaf(|page_ids| {
+                    physical_page_pool.are_pages_inactive(page_ids)
+                })?
             else {
                 break;
             };
@@ -1065,6 +1066,41 @@ mod tests {
             .to_string();
 
         assert!(error.contains("only 0 of 2 are available"), "{error}");
+        assert_eq!(
+            cache
+                .prefix_block_index
+                .as_ref()
+                .context("prefix caching should be enabled")?
+                .find_longest_cached_prefix(&[1, 2, 3, 4])?
+                .page_ids_by_layer
+                .first()
+                .map_or(0, Vec::len),
+            2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn does_not_evict_a_prefix_attached_to_another_request() -> Result<()> {
+        let mut cache = paged_cache_with_prefix_caching(1, 2, 3, true)?;
+        cache.append(0, 0, &cache_tensor(0, 4)?, &cache_tensor(100, 4)?)?;
+        finish_request(&mut cache, &[1, 2, 3, 4])?;
+
+        let mut other_request_state = RequestPagedCacheState::new(1, 2);
+        assert_eq!(
+            cache
+                .cache
+                .restore_cached_prefix(&mut other_request_state, &[1, 2, 3, 4],)?,
+            4
+        );
+
+        let error = cache
+            .append(0, 0, &cache_tensor(10, 4)?, &cache_tensor(110, 4)?)
+            .err()
+            .context("append should fail while another request uses the cached prefix")?
+            .to_string();
+
+        assert!(error.contains("only 1 of 3 are available"), "{error}");
         assert_eq!(
             cache
                 .prefix_block_index

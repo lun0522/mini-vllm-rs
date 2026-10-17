@@ -13,6 +13,7 @@ use candle_transformers::utils::apply_repeat_penalty;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::ops::Range;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -74,15 +75,21 @@ pub(super) struct GenerationStep {
     pub(super) generation_phase: GenerationPhase,
 }
 
-struct PreparedModelForward {
-    // TODO: Avoid copying the vector.
-    input_token_ids: Vec<u32>,
-    start_position: usize,
+struct TokenRange(Range<usize>);
+
+impl TokenRange {
+    fn token_ids<'a>(&self, tokens: &'a [u32]) -> &'a [u32] {
+        &tokens[self.0.clone()]
+    }
+
+    fn start_position(&self) -> usize {
+        self.0.start
+    }
 }
 
 struct PreparedSpeculativePrefill {
-    target: Option<PreparedModelForward>,
-    draft: Option<PreparedModelForward>,
+    target: Option<TokenRange>,
+    draft: Option<TokenRange>,
     chunk_end_position: usize,
     started_at: Instant,
 }
@@ -107,7 +114,7 @@ enum PreparedForwardPhase {
 
 enum PreparedForward {
     Target {
-        model_forward: PreparedModelForward,
+        token_range: TokenRange,
         phase: PreparedForwardPhase,
     },
     SpeculativePrefill(PreparedSpeculativePrefill),
@@ -281,11 +288,8 @@ impl RequestExecutionState {
         ensure!(token_budget > 0, "token budget must be greater than zero");
         self.pending_output_token_ids.clear();
         if !use_speculative_decoding {
-            let (model_forward, phase) = self.prepare_target_only_forward(token_budget)?;
-            return Ok(PreparedForward::Target {
-                model_forward,
-                phase,
-            });
+            let (token_range, phase) = self.prepare_target_only_forward(token_budget)?;
+            return Ok(PreparedForward::Target { token_range, phase });
         }
 
         match self.generation_phase {
@@ -307,17 +311,16 @@ impl RequestExecutionState {
     fn prepare_target_only_forward(
         &mut self,
         token_budget: usize,
-    ) -> Result<(PreparedModelForward, PreparedForwardPhase)> {
+    ) -> Result<(TokenRange, PreparedForwardPhase)> {
         let started_at = Instant::now();
-        let (input_token_ids, start_position, prepared_phase) = match self.generation_phase {
+        let (token_range, prepared_phase) = match self.generation_phase {
             GenerationPhase::Prefill { .. } => {
                 let start_position = self.prefill_current_positions.target;
                 let end_position = start_position
                     .saturating_add(token_budget)
                     .min(self.input_token_count);
                 (
-                    self.tokens[start_position..end_position].to_vec(),
-                    start_position,
+                    start_position..end_position,
                     PreparedForwardPhase::Prefill {
                         end_position,
                         started_at,
@@ -329,8 +332,7 @@ impl RequestExecutionState {
             } => {
                 let start_position = self.tokens.len() - 1;
                 (
-                    self.tokens[start_position..].to_vec(),
-                    start_position,
+                    start_position..self.tokens.len(),
                     PreparedForwardPhase::Decode {
                         generated_token_count,
                         started_at,
@@ -341,13 +343,7 @@ impl RequestExecutionState {
                 bail!("cannot prepare a finished request (target-only)")
             }
         };
-        Ok((
-            PreparedModelForward {
-                input_token_ids,
-                start_position,
-            },
-            prepared_phase,
-        ))
+        Ok((TokenRange(token_range), prepared_phase))
     }
 
     fn prepare_speculative_prefill(
@@ -368,15 +364,10 @@ impl RequestExecutionState {
             .min(draft_position)
             .saturating_add(token_budget)
             .min(prefill_end_position);
-        let prepare_model_forward = |start_position| PreparedModelForward {
-            input_token_ids: self.tokens[start_position..chunk_end_position].to_vec(),
-            start_position,
-        };
+        let token_range = |start_position| TokenRange(start_position..chunk_end_position);
         Ok(PreparedSpeculativePrefill {
-            target: (target_position < chunk_end_position)
-                .then(|| prepare_model_forward(target_position)),
-            draft: (draft_position < chunk_end_position)
-                .then(|| prepare_model_forward(draft_position)),
+            target: (target_position < chunk_end_position).then(|| token_range(target_position)),
+            draft: (draft_position < chunk_end_position).then(|| token_range(draft_position)),
             chunk_end_position,
             started_at: Instant::now(),
         })
@@ -858,29 +849,35 @@ impl RequestExecutionBatch {
         {
             let request_id = request.execution_state.request_id();
             match prepared_forward {
-                PreparedForward::Target { model_forward, .. } => {
+                PreparedForward::Target { token_range, .. } => {
                     target_request_indices.push(request_index);
                     target_inputs.push(ForwardInput {
                         request_id,
-                        input: target.create_input_tensor(&model_forward.input_token_ids)?,
-                        start_position: model_forward.start_position,
+                        input: target.create_input_tensor(
+                            token_range.token_ids(&request.execution_state.tokens),
+                        )?,
+                        start_position: token_range.start_position(),
                     });
                 }
                 PreparedForward::SpeculativePrefill(prepared) => {
-                    if let Some(target_forward) = &prepared.target {
+                    if let Some(target_token_range) = &prepared.target {
                         target_request_indices.push(request_index);
                         target_inputs.push(ForwardInput {
                             request_id,
-                            input: target.create_input_tensor(&target_forward.input_token_ids)?,
-                            start_position: target_forward.start_position,
+                            input: target.create_input_tensor(
+                                target_token_range.token_ids(&request.execution_state.tokens),
+                            )?,
+                            start_position: target_token_range.start_position(),
                         });
                     }
-                    if let Some(draft_forward) = &prepared.draft {
+                    if let Some(draft_token_range) = &prepared.draft {
                         let draft = draft.context("draft model is missing")?;
                         draft_inputs.push(ForwardInput {
                             request_id,
-                            input: draft.create_input_tensor(&draft_forward.input_token_ids)?,
-                            start_position: draft_forward.start_position,
+                            input: draft.create_input_tensor(
+                                draft_token_range.token_ids(&request.execution_state.tokens),
+                            )?,
+                            start_position: draft_token_range.start_position(),
                         });
                     }
                 }
@@ -1422,9 +1419,9 @@ mod tests {
             remaining_token_count: 4,
         };
 
-        let (model_forward, prepared_phase) = execution_state.prepare_target_only_forward(2)?;
-        assert_eq!(model_forward.start_position, 0);
-        assert_eq!(model_forward.input_token_ids, [1, 2]);
+        let (token_range, prepared_phase) = execution_state.prepare_target_only_forward(2)?;
+        assert_eq!(token_range.start_position(), 0);
+        assert_eq!(token_range.token_ids(&execution_state.tokens), [1, 2]);
 
         let logits = Tensor::zeros(8, DType::F32, &Device::Cpu)?;
         let step = execution_state.complete_forward(prepared_phase, &logits)?;
@@ -1447,9 +1444,9 @@ mod tests {
             remaining_token_count: 2,
         };
 
-        let (model_forward, prepared_phase) = execution_state.prepare_target_only_forward(8)?;
-        assert_eq!(model_forward.start_position, 2);
-        assert_eq!(model_forward.input_token_ids, [3, 4]);
+        let (token_range, prepared_phase) = execution_state.prepare_target_only_forward(8)?;
+        assert_eq!(token_range.start_position(), 2);
+        assert_eq!(token_range.token_ids(&execution_state.tokens), [3, 4]);
 
         let mut logits = vec![0.0f32; 8];
         logits[5] = 1.0;
@@ -1470,9 +1467,9 @@ mod tests {
     fn prepares_and_completes_a_decode_iteration() -> Result<()> {
         let mut execution_state = create_test_execution_state(vec![1, 2, 3, 4], vec![]);
 
-        let (model_forward, prepared_phase) = execution_state.prepare_target_only_forward(1)?;
-        assert_eq!(model_forward.start_position, 3);
-        assert_eq!(model_forward.input_token_ids, [4]);
+        let (token_range, prepared_phase) = execution_state.prepare_target_only_forward(1)?;
+        assert_eq!(token_range.start_position(), 3);
+        assert_eq!(token_range.token_ids(&execution_state.tokens), [4]);
 
         let mut logits = vec![0.0f32; 8];
         logits[5] = 1.0;
