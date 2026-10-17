@@ -1,6 +1,7 @@
 use crate::model_runner::BackendThroughputProfile;
 use crate::model_runner::InferenceDevice;
 use std::cmp::Reverse;
+use std::fmt;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
@@ -10,10 +11,11 @@ use super::request_orchestrator::BackendStateReceivers;
 use super::request_orchestrator::CacheAffinityState;
 use super::request_orchestrator::OperationalState;
 use super::request_orchestrator::RequestRoutingContext;
+use super::request_orchestrator::RoutingCandidateDiagnostics;
 use super::request_orchestrator::RoutingDecision;
 use super::BackendId;
 
-pub(super) trait BackendRoutingPolicy: Send + Sync {
+pub(super) trait BackendRoutingPolicy: fmt::Display + Send + Sync {
     fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision;
 }
 
@@ -31,12 +33,23 @@ impl RoundRobinPolicy {
     }
 }
 
+impl fmt::Display for RoundRobinPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("round-robin")
+    }
+}
+
 impl BackendRoutingPolicy for RoundRobinPolicy {
     fn route_request(&self, _request: RequestRoutingContext<'_>) -> RoutingDecision {
         let backend_index =
             self.next_backend_index.fetch_add(1, Ordering::Relaxed) % self.backend_count;
         RoutingDecision {
             backend_id: BackendId::from_index(backend_index),
+            candidate_diagnostics: (0..self.backend_count)
+                .map(|backend_index| {
+                    RoutingCandidateDiagnostics::new(BackendId::from_index(backend_index))
+                })
+                .collect(),
         }
     }
 }
@@ -68,19 +81,26 @@ impl LeastRequestsPolicy {
     }
 }
 
+impl fmt::Display for LeastRequestsPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("least-requests")
+    }
+}
+
 impl BackendRoutingPolicy for LeastRequestsPolicy {
     fn route_request(&self, _request: RequestRoutingContext<'_>) -> RoutingDecision {
-        let backend_id = route_by_score(
+        route_by_score(
             self.operational_state_receivers.len(),
             &self.selection_history,
-            |backend_index| {
-                let state = self.operational_state_receivers[backend_index].borrow();
-                state
+            |backend_index, diagnostics| {
+                let state = *self.operational_state_receivers[backend_index].borrow();
+                let score = state
                     .queued_request_count
-                    .saturating_add(state.active_request_count)
+                    .saturating_add(state.active_request_count);
+                diagnostics.operational_state = Some(state);
+                score
             },
-        );
-        RoutingDecision { backend_id }
+        )
     }
 }
 
@@ -119,6 +139,12 @@ impl LeastEstimatedWorkPolicy {
     }
 }
 
+impl fmt::Display for LeastEstimatedWorkPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("least-estimated-work")
+    }
+}
+
 impl BackendRoutingPolicy for LeastEstimatedWorkPolicy {
     fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision {
         // This is a conservative upper-bound estimate that assigns equal cost to prefill and
@@ -127,23 +153,27 @@ impl BackendRoutingPolicy for LeastEstimatedWorkPolicy {
         //      + remaining maximum queued and active output tokens
         //      + the incoming request's input and maximum output tokens)
         //   / backend throughput
-        let backend_id = route_by_score(
+        route_by_score(
             self.operational_state_receivers.len(),
             &self.selection_history,
-            |backend_index| {
+            |backend_index, diagnostics| {
                 let backend = &self.operational_state_receivers[backend_index];
-                let state = backend.operational_state_receiver.borrow();
+                let state = *backend.operational_state_receiver.borrow();
+                let estimated_token_count = estimate_remaining_token_work(
+                    &state, request, /* cached_prefix_token_count */ 0,
+                );
+                let throughput_weight = self
+                    .throughput_profiles
+                    .get_throughput_weight(request, backend.device);
+                diagnostics.operational_state = Some(state);
+                diagnostics.estimated_token_count = Some(estimated_token_count);
+                diagnostics.throughput_weight = Some(throughput_weight);
                 EstimatedCompletionScore {
-                    estimated_token_count: estimate_remaining_token_work(
-                        &state, request, /* cached_prefix_token_count */ 0,
-                    ),
-                    throughput_weight: self
-                        .throughput_profiles
-                        .get_throughput_weight(request, backend.device),
+                    estimated_token_count,
+                    throughput_weight,
                 }
             },
-        );
-        RoutingDecision { backend_id }
+        )
     }
 }
 
@@ -165,20 +195,29 @@ impl MostCachedPrefixPolicy {
     }
 }
 
+impl fmt::Display for MostCachedPrefixPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("most-cached-prefix")
+    }
+}
+
 impl BackendRoutingPolicy for MostCachedPrefixPolicy {
     fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision {
-        let backend_id = route_by_score(
+        route_by_score(
             self.cache_affinity_state_receivers.len(),
             &self.selection_history,
-            |backend_index| {
+            |backend_index, diagnostics| {
                 let state = self.cache_affinity_state_receivers[backend_index].borrow();
-                Reverse(state.prefix_cache.as_ref().map_or(0, |prefix_cache| {
-                    prefix_cache
-                        .find_longest_prefix_token_count(request.restorable_input_token_ids())
-                }))
+                let cached_prefix_token_count =
+                    state.prefix_cache.as_ref().map_or(0, |prefix_cache| {
+                        prefix_cache
+                            .find_longest_prefix_token_count(request.restorable_input_token_ids())
+                    });
+                diagnostics.cache_affinity_state_epoch = Some(state.epoch);
+                diagnostics.cached_prefix_token_count = Some(cached_prefix_token_count);
+                Reverse(cached_prefix_token_count)
             },
-        );
-        RoutingDecision { backend_id }
+        )
     }
 }
 
@@ -209,6 +248,12 @@ impl CacheAwareLeastEstimatedWorkPolicy {
     }
 }
 
+impl fmt::Display for CacheAwareLeastEstimatedWorkPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("cache-aware-least-estimated-work")
+    }
+}
+
 impl BackendRoutingPolicy for CacheAwareLeastEstimatedWorkPolicy {
     fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision {
         // This uses the same conservative estimate as least-estimated-work, but excludes the
@@ -217,10 +262,10 @@ impl BackendRoutingPolicy for CacheAwareLeastEstimatedWorkPolicy {
         //      + remaining maximum queued and active output tokens
         //      + the incoming request's uncached input and maximum output tokens)
         //   / backend throughput
-        let backend_id = route_by_score(
+        route_by_score(
             self.backend_state_receivers.len(),
             &self.selection_history,
-            |backend_index| {
+            |backend_index, diagnostics| {
                 let backend = &self.backend_state_receivers[backend_index];
                 let operational_state = backend.operational_state_receiver.borrow();
                 let cache_affinity_state = backend.cache_affinity_state_receiver.borrow();
@@ -233,19 +278,25 @@ impl BackendRoutingPolicy for CacheAwareLeastEstimatedWorkPolicy {
                                 request.restorable_input_token_ids(),
                             )
                         });
+                let estimated_token_count = estimate_remaining_token_work(
+                    &operational_state,
+                    request,
+                    cached_prefix_token_count,
+                );
+                let throughput_weight = self
+                    .throughput_profiles
+                    .get_throughput_weight(request, backend.device);
+                diagnostics.operational_state = Some(*operational_state);
+                diagnostics.cache_affinity_state_epoch = Some(cache_affinity_state.epoch);
+                diagnostics.cached_prefix_token_count = Some(cached_prefix_token_count);
+                diagnostics.estimated_token_count = Some(estimated_token_count);
+                diagnostics.throughput_weight = Some(throughput_weight);
                 EstimatedCompletionScore {
-                    estimated_token_count: estimate_remaining_token_work(
-                        &operational_state,
-                        request,
-                        cached_prefix_token_count,
-                    ),
-                    throughput_weight: self
-                        .throughput_profiles
-                        .get_throughput_weight(request, backend.device),
+                    estimated_token_count,
+                    throughput_weight,
                 }
             },
-        );
-        RoutingDecision { backend_id }
+        )
     }
 }
 
@@ -268,21 +319,42 @@ fn estimate_remaining_token_work(
 fn route_by_score<Score: Ord>(
     backend_count: usize,
     selection_history: &Mutex<BackendSelectionHistory>,
-    scorer: impl Fn(usize) -> Score,
-) -> BackendId {
+    scorer: impl Fn(usize, &mut RoutingCandidateDiagnostics) -> Score,
+) -> RoutingDecision {
     let mut selection_history = selection_history
         .lock()
         .expect("backend selection history mutex is poisoned");
-    let backend_index = (0..backend_count)
-        .min_by_key(|backend_index| {
-            (
-                scorer(*backend_index),
-                selection_history.last_selected_epoch[*backend_index],
-            )
+    let scored_candidates: Vec<_> = (0..backend_count)
+        .map(|backend_index| {
+            let mut diagnostics =
+                RoutingCandidateDiagnostics::new(BackendId::from_index(backend_index));
+            diagnostics.last_selected_epoch =
+                Some(selection_history.last_selected_epoch[backend_index]);
+            let score = scorer(backend_index, &mut diagnostics);
+            (score, diagnostics)
         })
+        .collect();
+    let backend_index = scored_candidates
+        .iter()
+        .enumerate()
+        .min_by(
+            |(left_index, (left_score, _)), (right_index, (right_score, _))| {
+                left_score.cmp(right_score).then_with(|| {
+                    selection_history.last_selected_epoch[*left_index]
+                        .cmp(&selection_history.last_selected_epoch[*right_index])
+                })
+            },
+        )
+        .map(|(backend_index, _)| backend_index)
         .expect("the orchestrator always has at least one backend");
     selection_history.record_selection(backend_index);
-    BackendId::from_index(backend_index)
+    RoutingDecision {
+        backend_id: BackendId::from_index(backend_index),
+        candidate_diagnostics: scored_candidates
+            .into_iter()
+            .map(|(_, diagnostics)| diagnostics)
+            .collect(),
+    }
 }
 
 struct BackendOperationalStateReceiver {
@@ -447,8 +519,11 @@ mod tests {
         let policy = RoundRobinPolicy::new(1);
 
         for _ in 0..3 {
+            let decision = policy.route_request(routing_context(1));
+            assert_eq!(decision.backend_id, BackendId::from_index(0));
+            assert_eq!(decision.candidate_diagnostics.len(), 1);
             assert_eq!(
-                policy.route_request(routing_context(1)).backend_id,
+                decision.candidate_diagnostics[0].backend_id,
                 BackendId::from_index(0)
             );
         }
@@ -477,14 +552,20 @@ mod tests {
         );
 
         operational_sender.send_replace(OperationalState {
+            epoch: 2,
             queued_request_count: 2,
             active_request_count: 1,
             ..Default::default()
         });
 
+        let decision = policy.route_request(routing_context(1));
+        assert_eq!(decision.backend_id, BackendId::from_index(1));
         assert_eq!(
-            policy.route_request(routing_context(1)).backend_id,
-            BackendId::from_index(1)
+            decision.candidate_diagnostics[0]
+                .operational_state
+                .unwrap()
+                .epoch,
+            2
         );
     }
 
@@ -687,8 +768,12 @@ mod tests {
     fn most_cached_prefix_breaks_equal_matches_by_least_recent_selection() {
         let policy = MostCachedPrefixPolicy::new(backend_state_receivers(2));
 
-        let backend_ids: Vec<_> = (0..4)
-            .map(|_| policy.route_request(routing_context(1)).backend_id)
+        let decisions: Vec<_> = (0..4)
+            .map(|_| policy.route_request(routing_context(1)))
+            .collect();
+        let backend_ids: Vec<_> = decisions
+            .iter()
+            .map(|decision| decision.backend_id)
             .collect();
 
         assert_eq!(
@@ -700,6 +785,11 @@ mod tests {
                 BackendId::from_index(1),
             ]
         );
+        assert!(decisions.iter().all(|decision| decision
+            .candidate_diagnostics
+            .iter()
+            .all(|candidate| candidate.cache_affinity_state_epoch == Some(0)
+                && candidate.cached_prefix_token_count == Some(0))));
     }
 
     #[test]

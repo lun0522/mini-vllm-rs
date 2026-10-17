@@ -36,14 +36,33 @@ use super::InferenceRequest;
 use super::InferenceWorkerMessage;
 use tokio::sync::watch;
 
+struct StatePublisher<State> {
+    sender: watch::Sender<State>,
+    epoch: u64,
+}
+
+impl<State> StatePublisher<State> {
+    fn new(sender: watch::Sender<State>) -> Self {
+        Self { sender, epoch: 0 }
+    }
+
+    fn publish(&mut self, create_state: impl FnOnce(u64) -> State) {
+        self.epoch = self
+            .epoch
+            .checked_add(1)
+            .expect("state publication epoch overflowed");
+        self.sender.send_replace(create_state(self.epoch));
+    }
+}
+
 /// Coordinates request storage, scheduling, model execution, and result delivery.
 pub(super) struct InferenceWorker {
     backend_id: BackendId,
     model_executor: ModelExecutor,
     request_manager: RequestManager,
     scheduler: Scheduler,
-    operational_state_sender: watch::Sender<OperationalState>,
-    cache_affinity_state_sender: watch::Sender<CacheAffinityState>,
+    operational_state_publisher: StatePublisher<OperationalState>,
+    cache_affinity_state_publisher: StatePublisher<CacheAffinityState>,
 }
 
 impl InferenceWorker {
@@ -62,8 +81,8 @@ impl InferenceWorker {
             model_executor,
             request_manager: RequestManager::new(),
             scheduler: Scheduler::new(scheduler_config, kv_cache_geometry),
-            operational_state_sender,
-            cache_affinity_state_sender,
+            operational_state_publisher: StatePublisher::new(operational_state_sender),
+            cache_affinity_state_publisher: StatePublisher::new(cache_affinity_state_sender),
         }
     }
 
@@ -264,10 +283,11 @@ impl InferenceWorker {
         Ok(())
     }
 
-    fn publish_operational_state(&self) {
+    fn publish_operational_state(&mut self) {
         let scheduler_load = self.scheduler.create_load_snapshot();
-        self.operational_state_sender
-            .send_replace(OperationalState {
+        self.operational_state_publisher
+            .publish(|epoch| OperationalState {
+                epoch,
                 queued_request_count: scheduler_load.queued_request_count,
                 active_request_count: scheduler_load.active_request_count,
                 queued_remaining_prefill_token_count: scheduler_load
@@ -281,11 +301,10 @@ impl InferenceWorker {
             });
     }
 
-    fn publish_cache_affinity_state(&self) {
-        self.cache_affinity_state_sender
-            .send_replace(CacheAffinityState::new(
-                self.model_executor.create_cache_affinity_snapshot(),
-            ));
+    fn publish_cache_affinity_state(&mut self) {
+        let snapshot = self.model_executor.create_cache_affinity_snapshot();
+        self.cache_affinity_state_publisher
+            .publish(|epoch| CacheAffinityState::new(epoch, snapshot));
     }
 
     fn report_request_outcome(&self, request_id: u64, request_outcome: &RequestOutcome) {
@@ -300,6 +319,7 @@ impl InferenceWorker {
         match &request_outcome.result {
             Ok(stats) => {
                 let client_stats = create_client_facing_generation_stats(
+                    self.backend_id,
                     stats,
                     queued_at,
                     request_outcome.metrics.first_token_at,
@@ -404,6 +424,7 @@ fn generation_error_status(error: &anyhow::Error) -> Status {
 }
 
 fn create_client_facing_generation_stats(
+    backend_id: BackendId,
     stats: &TextGenerationStats,
     queued_at: Instant,
     first_token_at: Option<Instant>,
@@ -429,6 +450,7 @@ fn create_client_facing_generation_stats(
         completed_at,
     ));
     TextGenerationStatsProto {
+        backend_id: backend_id.0.get(),
         finish_reason: TextGenerationFinishReason::from(stats.execution.finish_reason) as i32,
         input_token_count: stats.execution.input_token_count,
         output_token_count: stats.execution.output_token_count,
@@ -546,6 +568,18 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
+    fn state_publisher_assigns_monotonically_increasing_epochs() {
+        let (sender, receiver) = watch::channel(0);
+        let mut publisher = StatePublisher::new(sender);
+
+        publisher.publish(|epoch| epoch);
+        assert_eq!(*receiver.borrow(), 1);
+
+        publisher.publish(|epoch| epoch);
+        assert_eq!(*receiver.borrow(), 2);
+    }
+
+    #[test]
     fn reports_generation_cancellation_with_the_cancelled_status() {
         let error = anyhow::Error::new(text_generation::GenerationCancelled);
         let status = generation_error_status(&error);
@@ -575,8 +609,16 @@ mod tests {
         };
         let now = Instant::now();
 
-        let client_stats = create_client_facing_generation_stats(&stats, now, None, None, now);
+        let client_stats = create_client_facing_generation_stats(
+            BackendId::from_index(0),
+            &stats,
+            now,
+            None,
+            None,
+            now,
+        );
 
+        assert_eq!(client_stats.backend_id, 1);
         assert_eq!(
             client_stats.finish_reason,
             TextGenerationFinishReason::EndOfSequenceToken as i32
@@ -616,6 +658,7 @@ mod tests {
         let now = Instant::now();
 
         let client_stats = create_client_facing_generation_stats(
+            BackendId::from_index(1),
             &stats,
             now,
             Some(now + Duration::from_micros(10)),
@@ -624,6 +667,7 @@ mod tests {
         );
         let draft_stats = client_stats.draft_token_stats.unwrap();
 
+        assert_eq!(client_stats.backend_id, 2);
         assert_eq!(
             client_stats.finish_reason,
             TextGenerationFinishReason::MaxNewTokensReached as i32

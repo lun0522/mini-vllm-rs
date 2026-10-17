@@ -238,6 +238,7 @@ impl ModelRunnerService for ModelRunnerRpcService {
         .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let request_id = request.request_id;
         let queued_at = Instant::now();
+        let routing_started_at = Instant::now();
         let routing_decision = self
             .request_orchestrator
             .route_request(RequestRoutingContext {
@@ -245,9 +246,22 @@ impl ModelRunnerService for ModelRunnerRpcService {
                 input_token_count: request.input_token_ids.len(),
                 max_new_token_count: request.max_new_tokens,
             });
+        let routing_duration = routing_started_at.elapsed();
+        let request_orchestrator = &self.request_orchestrator;
+        for candidate in &routing_decision.candidate_diagnostics {
+            info!(
+                "Request routing candidate: request_id={request_id} policy={request_orchestrator} \
+                 selected={} {candidate}",
+                candidate.backend_id == routing_decision.backend_id,
+            );
+        }
         info!(
-            "Request routing: request_id={request_id} backend_id={}",
-            routing_decision.backend_id
+            "Request routing: request_id={request_id} policy={request_orchestrator} \
+             input_tokens={} max_output_tokens={} backend_id={} routing_us={}",
+            request.input_token_ids.len(),
+            request.max_new_tokens,
+            routing_decision.backend_id,
+            routing_duration.as_micros(),
         );
         let (event_sender, event_receiver) = mpsc::channel(GENERATION_EVENT_QUEUE_CAPACITY);
         self.inference_message_senders[routing_decision.backend_id.index()]

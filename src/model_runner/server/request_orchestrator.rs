@@ -4,6 +4,7 @@ use crate::model_runner::RequestRoutingPolicy;
 use anyhow::ensure;
 use anyhow::Result;
 use log::info;
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -18,6 +19,7 @@ use super::BackendId;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct OperationalState {
+    pub(super) epoch: u64,
     pub(super) queued_request_count: usize,
     pub(super) active_request_count: usize,
     pub(super) queued_remaining_prefill_token_count: usize,
@@ -28,12 +30,14 @@ pub(super) struct OperationalState {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct CacheAffinityState {
+    pub(super) epoch: u64,
     pub(super) prefix_cache: Option<Arc<PrefixCacheAffinitySnapshot>>,
 }
 
 impl CacheAffinityState {
-    pub(super) fn new(prefix_cache: Option<PrefixCacheAffinitySnapshot>) -> Self {
+    pub(super) fn new(epoch: u64, prefix_cache: Option<PrefixCacheAffinitySnapshot>) -> Self {
         Self {
+            epoch,
             prefix_cache: prefix_cache.map(Arc::new),
         }
     }
@@ -45,9 +49,75 @@ pub(super) struct BackendStateReceivers {
     pub(super) cache_affinity: watch::Receiver<CacheAffinityState>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RoutingDecision {
     pub(super) backend_id: BackendId,
+    pub(super) candidate_diagnostics: Vec<RoutingCandidateDiagnostics>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RoutingCandidateDiagnostics {
+    pub(super) backend_id: BackendId,
+    pub(super) operational_state: Option<OperationalState>,
+    pub(super) cache_affinity_state_epoch: Option<u64>,
+    pub(super) cached_prefix_token_count: Option<usize>,
+    pub(super) estimated_token_count: Option<u128>,
+    pub(super) throughput_weight: Option<u64>,
+    pub(super) last_selected_epoch: Option<u64>,
+}
+
+impl RoutingCandidateDiagnostics {
+    pub(super) fn new(backend_id: BackendId) -> Self {
+        Self {
+            backend_id,
+            operational_state: None,
+            cache_affinity_state_epoch: None,
+            cached_prefix_token_count: None,
+            estimated_token_count: None,
+            throughput_weight: None,
+            last_selected_epoch: None,
+        }
+    }
+}
+
+impl fmt::Display for RoutingCandidateDiagnostics {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "backend_id={}", self.backend_id)?;
+        if let Some(state) = self.operational_state {
+            write!(
+                formatter,
+                " operational_epoch={} queued_requests={} active_requests={} \
+                 queued_remaining_prefill_tokens={} queued_remaining_max_output_tokens={} \
+                 active_remaining_prefill_tokens={} active_remaining_max_output_tokens={}",
+                state.epoch,
+                state.queued_request_count,
+                state.active_request_count,
+                state.queued_remaining_prefill_token_count,
+                state.queued_remaining_max_output_token_count,
+                state.active_remaining_prefill_token_count,
+                state.active_remaining_max_output_token_count,
+            )?;
+        }
+        if let Some(epoch) = self.cache_affinity_state_epoch {
+            write!(formatter, " cache_affinity_epoch={epoch}")?;
+        }
+        if let Some(cached_prefix_token_count) = self.cached_prefix_token_count {
+            write!(
+                formatter,
+                " cached_prefix_tokens={cached_prefix_token_count}"
+            )?;
+        }
+        if let Some(estimated_token_count) = self.estimated_token_count {
+            write!(formatter, " estimated_tokens={estimated_token_count}")?;
+        }
+        if let Some(throughput_weight) = self.throughput_weight {
+            write!(formatter, " throughput_weight={throughput_weight}")?;
+        }
+        if let Some(last_selected_epoch) = self.last_selected_epoch {
+            write!(formatter, " last_selected_epoch={last_selected_epoch}")?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,6 +138,12 @@ impl RequestRoutingContext<'_> {
 /// Selects an inference backend for each request without owning or dispatching to the backend.
 pub(super) struct RequestOrchestrator {
     policy: Box<dyn BackendRoutingPolicy>,
+}
+
+impl fmt::Display for RequestOrchestrator {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.policy.fmt(formatter)
+    }
 }
 
 impl RequestOrchestrator {

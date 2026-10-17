@@ -100,18 +100,25 @@ remaining capacity, it reduces `max_new_tokens` before queueing the request.
 ## Request orchestration
 
 The request orchestrator owns only the configured backend-selection policy
-state and returns a backend index. The RPC service retains ownership of the
-backend queues and dispatches each request according to that decision.
+state and returns a one-based backend ID. The RPC service retains ownership of
+the backend queues and dispatches each request according to that decision.
 
 Workers publish replaceable operational and cache-affinity snapshots to the
 orchestrator at sparse request-lifecycle boundaries:
 
 - Operational snapshots contain:
+  - An independently increasing publication epoch.
   - Queued and active request counts.
   - Queued and active remaining prefill-token counts.
   - Queued and active remaining maximum output-token counts.
-- Cache-affinity snapshots remain separate so load-only policies do not depend
-  on cache contents.
+- Cache-affinity snapshots contain:
+  - An independently increasing publication epoch.
+  - The backend's prefix-cache index when prefix caching is enabled.
+
+Cache-affinity snapshots remain separate so load-only policies do not depend
+on cache contents. Routing logs record the request dimensions, selected
+backend, routing duration, and the snapshot epochs and scoring inputs inspected
+for each candidate backend.
 
 The available request-routing policies are:
 
@@ -223,10 +230,11 @@ complete blocks for reuse across requests. See the
 [KV-cache architecture](server/kv_cache/README.md) for allocation, prefix
 indexing, eviction, and page ownership details.
 
-A successful request ends with a `TextGenerationStats` event. Its finish reason
-reports whether generation sampled an end-of-sequence token or reached the
-effective maximum new-token count. A `MAX_NEW_TOKENS_REACHED` result
-with fewer output tokens than the client originally requested indicates that
-the model context or KV-cache capacity reduced the requested limit. Cancellation
+A successful request ends with a `TextGenerationStats` event. It identifies the
+one-based backend that served the request, and its finish reason reports whether
+generation sampled an end-of-sequence token or reached the effective maximum
+new-token count. A `MAX_NEW_TOKENS_REACHED` result with fewer output tokens than
+the client originally requested indicates that the model context or KV-cache
+capacity reduced the requested limit. Cancellation
 or execution failure aborts the request, releases its model and cache state, and
 returns a gRPC error.
