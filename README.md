@@ -146,6 +146,9 @@ cargo run --release
     in [`backend_throughput_profiles.md`](benchmarks/backend_throughput_profiles.md).
     See [Request orchestration](src/model_runner/README.md#request-orchestration)
     for policy behavior and state handling.
+- `--backend-throughput-profiles-file <path>` reads benchmark-derived throughput
+  profiles from a textproto file and applies them to the request-orchestrator
+  configuration. Profiles cannot be supplied both inline and through this file.
 - `--input-preprocessing-thread-count <count>` sets the request-handler
   preprocessing pool size and defaults to `4`.
 - `--request-socket <path>` changes the public request-handler Unix socket and

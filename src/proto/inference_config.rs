@@ -371,11 +371,57 @@ impl RequestOrchestratorConfig {
             routing_policy != RequestRoutingPolicy::Unspecified,
             "request routing policy must be specified"
         );
+        self.throughput_profiles
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("backend throughput profiles must be specified"))?
+            .validate()
+    }
+}
+
+impl FromStr for RequestOrchestratorConfig {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_textproto(value, "inference_config.RequestOrchestratorConfig")
+    }
+}
+
+impl fmt::Display for RequestOrchestratorConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let routing_policy =
+            RequestRoutingPolicy::try_from(self.routing_policy).map_err(|_| fmt::Error)?;
+        writeln!(
+            formatter,
+            "Request routing policy: {}",
+            routing_policy.cli_value()
+        )?;
+        let Some(throughput_profiles) = &self.throughput_profiles else {
+            return Ok(());
+        };
+        for profile in &throughput_profiles.profiles {
+            writeln!(
+                formatter,
+                "Backend throughput profile: input tokens={}, maximum output tokens={}, CPU \
+                 prefill tok/s={}, CPU decode tok/s={}, GPU prefill tok/s={}, GPU decode tok/s={}",
+                profile.input_token_count.separate_with_commas(),
+                profile.max_output_token_count.separate_with_commas(),
+                profile.cpu_prefill_tokens_per_second.separate_with_commas(),
+                profile.cpu_decode_tokens_per_second.separate_with_commas(),
+                profile.gpu_prefill_tokens_per_second.separate_with_commas(),
+                profile.gpu_decode_tokens_per_second.separate_with_commas(),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl BackendThroughputProfiles {
+    pub(crate) fn validate(&self) -> AnyhowResult<()> {
         anyhow::ensure!(
-            !self.throughput_profiles.is_empty(),
+            !self.profiles.is_empty(),
             "at least one backend throughput profile must be specified"
         );
-        for (profile_index, profile) in self.throughput_profiles.iter().enumerate() {
+        for (profile_index, profile) in self.profiles.iter().enumerate() {
             anyhow::ensure!(
                 profile.input_token_count > 0,
                 "backend throughput profile {profile_index} input token count must be greater than 0"
@@ -400,37 +446,11 @@ impl RequestOrchestratorConfig {
     }
 }
 
-impl FromStr for RequestOrchestratorConfig {
+impl FromStr for BackendThroughputProfiles {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        parse_textproto(value, "inference_config.RequestOrchestratorConfig")
-    }
-}
-
-impl fmt::Display for RequestOrchestratorConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let routing_policy =
-            RequestRoutingPolicy::try_from(self.routing_policy).map_err(|_| fmt::Error)?;
-        writeln!(
-            formatter,
-            "Request routing policy: {}",
-            routing_policy.cli_value()
-        )?;
-        for profile in &self.throughput_profiles {
-            writeln!(
-                formatter,
-                "Backend throughput profile: input tokens={}, maximum output tokens={}, CPU \
-                 prefill tok/s={}, CPU decode tok/s={}, GPU prefill tok/s={}, GPU decode tok/s={}",
-                profile.input_token_count.separate_with_commas(),
-                profile.max_output_token_count.separate_with_commas(),
-                profile.cpu_prefill_tokens_per_second.separate_with_commas(),
-                profile.cpu_decode_tokens_per_second.separate_with_commas(),
-                profile.gpu_prefill_tokens_per_second.separate_with_commas(),
-                profile.gpu_decode_tokens_per_second.separate_with_commas(),
-            )?;
-        }
-        Ok(())
+        parse_textproto(value, "inference_config.BackendThroughputProfiles")
     }
 }
 
@@ -568,14 +588,16 @@ mod tests {
     fn validates_and_displays_request_orchestrator_configuration() {
         let config = RequestOrchestratorConfig {
             routing_policy: RequestRoutingPolicy::RoundRobin.into(),
-            throughput_profiles: vec![BackendThroughputProfile {
-                input_token_count: 128,
-                max_output_token_count: 512,
-                cpu_prefill_tokens_per_second: 75,
-                cpu_decode_tokens_per_second: 48,
-                gpu_prefill_tokens_per_second: 12_086,
-                gpu_decode_tokens_per_second: 396,
-            }],
+            throughput_profiles: Some(BackendThroughputProfiles {
+                profiles: vec![BackendThroughputProfile {
+                    input_token_count: 128,
+                    max_output_token_count: 512,
+                    cpu_prefill_tokens_per_second: 75,
+                    cpu_decode_tokens_per_second: 48,
+                    gpu_prefill_tokens_per_second: 12_086,
+                    gpu_decode_tokens_per_second: 396,
+                }],
+            }),
         };
 
         assert!(config.validate().is_ok());
@@ -588,13 +610,14 @@ mod tests {
         );
 
         let mut invalid = config.clone();
-        invalid.throughput_profiles[0].cpu_prefill_tokens_per_second = 0;
+        invalid.throughput_profiles.as_mut().unwrap().profiles[0].cpu_prefill_tokens_per_second = 0;
         assert_eq!(
             invalid.validate().unwrap_err().to_string(),
             "backend throughput profile 0 CPU prefill tokens per second must be greater than 0"
         );
-        invalid.throughput_profiles[0].cpu_prefill_tokens_per_second = 75;
-        invalid.throughput_profiles[0].gpu_decode_tokens_per_second = 0;
+        invalid.throughput_profiles.as_mut().unwrap().profiles[0].cpu_prefill_tokens_per_second =
+            75;
+        invalid.throughput_profiles.as_mut().unwrap().profiles[0].gpu_decode_tokens_per_second = 0;
         assert_eq!(
             invalid.validate().unwrap_err().to_string(),
             "backend throughput profile 0 GPU decode tokens per second must be greater than 0"

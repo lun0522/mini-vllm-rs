@@ -150,8 +150,8 @@ enum PrefixCacheCoordinationPolicy {
 message RequestOrchestratorConfig {
   // Policy used to select one backend for each request.
   RequestRoutingPolicy routing_policy = 1;
-  // Benchmark-derived relative backend throughputs for representative workloads.
-  repeated BackendThroughputProfile throughput_profiles = 2;
+  // Benchmark-derived backend throughputs for representative workloads.
+  BackendThroughputProfiles throughput_profiles = 2;
 }
 
 // Describes measured CPU and GPU throughput for one representative workload.
@@ -168,6 +168,11 @@ message BackendThroughputProfile {
   uint64 gpu_prefill_tokens_per_second = 5;
   // GPU decode throughput in tokens per second.
   uint64 gpu_decode_tokens_per_second = 6;
+}
+
+// Contains benchmark-derived backend throughput profiles loaded from a file.
+message BackendThroughputProfiles {
+  repeated BackendThroughputProfile profiles = 1;
 }
 
 // Selects how requests are routed across inference backends.

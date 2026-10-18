@@ -1,0 +1,98 @@
+# Backend throughput profiles measured on the environment documented in
+# backend_throughput_profiles.md.
+profiles {
+  input_token_count: 128
+  max_output_token_count: 16
+  cpu_prefill_tokens_per_second: 75
+  cpu_decode_tokens_per_second: 52
+  gpu_prefill_tokens_per_second: 12124
+  gpu_decode_tokens_per_second: 442
+}
+profiles {
+  input_token_count: 128
+  max_output_token_count: 128
+  cpu_prefill_tokens_per_second: 75
+  cpu_decode_tokens_per_second: 49
+  gpu_prefill_tokens_per_second: 12704
+  gpu_decode_tokens_per_second: 382
+}
+profiles {
+  input_token_count: 128
+  max_output_token_count: 512
+  cpu_prefill_tokens_per_second: 75
+  cpu_decode_tokens_per_second: 48
+  gpu_prefill_tokens_per_second: 12086
+  gpu_decode_tokens_per_second: 396
+}
+profiles {
+  input_token_count: 128
+  max_output_token_count: 1024
+  cpu_prefill_tokens_per_second: 75
+  cpu_decode_tokens_per_second: 44
+  gpu_prefill_tokens_per_second: 14040
+  gpu_decode_tokens_per_second: 300
+}
+profiles {
+  input_token_count: 512
+  max_output_token_count: 16
+  cpu_prefill_tokens_per_second: 73
+  cpu_decode_tokens_per_second: 46
+  gpu_prefill_tokens_per_second: 2539
+  gpu_decode_tokens_per_second: 203
+}
+profiles {
+  input_token_count: 512
+  max_output_token_count: 128
+  cpu_prefill_tokens_per_second: 73
+  cpu_decode_tokens_per_second: 45
+  gpu_prefill_tokens_per_second: 2551
+  gpu_decode_tokens_per_second: 293
+}
+profiles {
+  input_token_count: 512
+  max_output_token_count: 512
+  cpu_prefill_tokens_per_second: 73
+  cpu_decode_tokens_per_second: 43
+  gpu_prefill_tokens_per_second: 2562
+  gpu_decode_tokens_per_second: 257
+}
+profiles {
+  input_token_count: 512
+  max_output_token_count: 1024
+  cpu_prefill_tokens_per_second: 74
+  cpu_decode_tokens_per_second: 40
+  gpu_prefill_tokens_per_second: 2567
+  gpu_decode_tokens_per_second: 214
+}
+profiles {
+  input_token_count: 2048
+  max_output_token_count: 16
+  cpu_prefill_tokens_per_second: 64
+  cpu_decode_tokens_per_second: 32
+  gpu_prefill_tokens_per_second: 481
+  gpu_decode_tokens_per_second: 93
+}
+profiles {
+  input_token_count: 2048
+  max_output_token_count: 128
+  cpu_prefill_tokens_per_second: 64
+  cpu_decode_tokens_per_second: 32
+  gpu_prefill_tokens_per_second: 481
+  gpu_decode_tokens_per_second: 91
+}
+profiles {
+  input_token_count: 2048
+  max_output_token_count: 512
+  cpu_prefill_tokens_per_second: 64
+  cpu_decode_tokens_per_second: 31
+  gpu_prefill_tokens_per_second: 481
+  gpu_decode_tokens_per_second: 81
+}
+profiles {
+  input_token_count: 2048
+  max_output_token_count: 1024
+  cpu_prefill_tokens_per_second: 64
+  cpu_decode_tokens_per_second: 30
+  gpu_prefill_tokens_per_second: 480
+  gpu_decode_tokens_per_second: 70
+}

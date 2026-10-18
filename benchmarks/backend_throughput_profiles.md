@@ -2,19 +2,12 @@
 
 This benchmark measures the CPU and GPU costs that can be used by the
 `least-estimated-work` and `cache-aware-least-estimated-work` request-routing
-policies. Prefill and decode are reported separately because they have
-different execution characteristics. Their rates are computed as:
+policies. Prefill and decode throughput differ substantially, especially on the
+GPU, so the routing policies estimate their durations independently:
 
 ```text
 prefill throughput = input token count / prefill time
 decode throughput = (output token count - 1) / decode time
-```
-
-The earlier combined weight treated one prefill token and one decode token as
-equal work. These results show that assumption is especially inaccurate for
-the GPU. Separate rates allow a routing policy to estimate the two phases as:
-
-```text
 estimated time = remaining prefill tokens / prefill throughput
                + remaining decode tokens / decode throughput
 ```
@@ -33,8 +26,7 @@ The first output token is sampled at the end of prefill, so a request producing
 | KV cache | Paged, 16 tokens per page, 256 MiB; prefix caching disabled |
 | Scheduler | One active request, maximum batched token count of 2,048 |
 | Measurement | One warm-up followed by three measured requests for every workload and backend; EOS ignored |
-| `mini-vllm-rs` revision | `196b34f2ab09f99cf9506fb7ca51b6ff63edbeea` |
-| `mini-vllm-eval` revision | `4b1cc1a533de357b3e232ed65d7d3fe5db399973` |
+| Revisions | [`mini-vllm-rs` `196b34f`](https://github.com/lun0522/mini-vllm-rs/commit/196b34f2ab09f99cf9506fb7ca51b6ff63edbeea) and [`mini-vllm-eval` `4b1cc1a`](https://github.com/lun0522/mini-vllm-eval/commit/4b1cc1a533de357b3e232ed65d7d3fe5db399973) |
 
 The matrix covers input lengths of 128, 512, and 2,048 tokens and maximum
 output lengths of 16, 128, 512, and 1,024 tokens. CPU and GPU were measured
@@ -95,10 +87,31 @@ Decode throughput decreases as context grows on both devices. A routing model
 should therefore retain workload-specific profiles rather than use one global
 prefill rate and one global decode rate.
 
-The benchmark deliberately does not recommend a launch profile yet. The
-request-orchestrator configuration needs separate prefill and decode fields
-before these measurements can be represented without collapsing them back into
-the equal-token-cost approximation.
+## Recommended routing profiles
+
+The complete measured matrix, rounded to the integer tok/s values accepted by
+the configuration, is stored in
+[`backend_throughput_profiles.textproto`](backend_throughput_profiles.textproto).
+Use it with `least-estimated-work` or `cache-aware-least-estimated-work`:
+
+```shell
+--request-orchestrator-config \
+  'routing_policy: REQUEST_ROUTING_POLICY_LEAST_ESTIMATED_WORK' \
+--backend-throughput-profiles-file \
+  benchmarks/backend_throughput_profiles.textproto
+```
+
+The profile file intentionally contains only benchmark measurements, leaving
+the routing policy in the ordinary request-orchestrator configuration. The
+orchestrator selects the profile with the smallest Manhattan distance from the
+request's input-token and maximum-output-token counts. Retaining all twelve
+points captures the observed changes in prefill and decode throughput.
+
+When no profile file or inline profiles are supplied, mini-vLLM uses only the
+rounded 128-input/512-maximum-output row: CPU prefill/decode rates of `75`/`48`
+tok/s and GPU rates of `12086`/`396` tok/s. That fallback is convenient for
+smoke tests, but the complete matrix is recommended for routing benchmarks on
+this machine.
 
 These values are specific to this machine, model, dtype, and inference
 implementation. They should be remeasured after changing any of those inputs.

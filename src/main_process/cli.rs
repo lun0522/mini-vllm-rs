@@ -9,6 +9,7 @@ use crate::model_runner::DEFAULT_THROUGHPUT_PROFILE_INPUT_TOKEN_COUNT;
 use crate::model_runner::DEFAULT_THROUGHPUT_PROFILE_MAX_OUTPUT_TOKEN_COUNT;
 use crate::proto::inference_config::draft_token_count_policy::Policy;
 use crate::proto::inference_config::BackendThroughputProfile as BackendThroughputProfileProto;
+use crate::proto::inference_config::BackendThroughputProfiles;
 use crate::proto::inference_config::DraftModelConfig;
 use crate::proto::inference_config::DraftTokenCountPolicy;
 use crate::proto::inference_config::FixedDraftTokenCountPolicy;
@@ -28,6 +29,7 @@ use crate::proto::inference_config::DEFAULT_SCHEDULING_POLICY;
 use argh::FromArgs;
 use log::warn;
 use std::fmt;
+use std::fs;
 use std::path::PathBuf;
 use thousands::Separable;
 
@@ -40,41 +42,136 @@ const DEFAULT_PREFIX_CACHE_PUBLICATION_POLICY: PrefixCachePublicationPolicyProto
     PrefixCachePublicationPolicyProto::OnRequestCompletion;
 
 /// Runs text generation with a model from Hugging Face.
-#[derive(FromArgs)]
 pub(crate) struct MainProcessArgs {
+    pub(crate) model: ModelConfig,
+    pub(crate) draft_model: Option<DraftModelConfig>,
+    pub(crate) inference_device: InferenceDevice,
+    pub(crate) activation_dtype: ActivationDType,
+    pub(crate) kv_cache_config: KvCacheConfigProto,
+    pub(crate) scheduler_config: SchedulerConfigProto,
+    pub(crate) request_orchestrator_config: RequestOrchestratorConfigProto,
+    pub(crate) input_preprocessing_thread_count: usize,
+    pub(crate) trace_directory: Option<PathBuf>,
+    pub(crate) request_socket: PathBuf,
+    pub(crate) control_socket: PathBuf,
+}
+
+impl FromArgs for MainProcessArgs {
+    fn from_args(command_name: &[&str], args: &[&str]) -> Result<Self, argh::EarlyExit> {
+        RawMainProcessArgs::from_args(command_name, args)?
+            .resolve()
+            .map_err(argh::EarlyExit::from)
+    }
+
+    fn redact_arg_values(
+        command_name: &[&str],
+        args: &[&str],
+    ) -> Result<Vec<String>, argh::EarlyExit> {
+        RawMainProcessArgs::redact_arg_values(command_name, args)
+    }
+}
+
+impl argh::TopLevelCommand for MainProcessArgs {}
+
+/// Runs text generation with a model from Hugging Face.
+#[derive(FromArgs)]
+struct RawMainProcessArgs {
     /// textproto configuration for the target GGUF model
     #[argh(option, default = "default_model_config()")]
-    pub(crate) model: ModelConfig,
+    model: ModelConfig,
     /// textproto configuration for the speculative-decoding draft model and token-count policy
     #[argh(option)]
-    pub(crate) draft_model: Option<DraftModelConfig>,
+    draft_model: Option<DraftModelConfig>,
     /// device used for model inference
     #[argh(option, default = "InferenceDevice::Gpu")]
-    pub(crate) inference_device: InferenceDevice,
+    inference_device: InferenceDevice,
     /// data type used for model activations and KV caches
     #[argh(option, default = "ActivationDType::F16")]
-    pub(crate) activation_dtype: ActivationDType,
+    activation_dtype: ActivationDType,
     /// textproto KV-cache configuration
     #[argh(option, default = "default_kv_cache_config()")]
-    pub(crate) kv_cache_config: KvCacheConfigProto,
+    kv_cache_config: KvCacheConfigProto,
     /// textproto scheduler configuration
     #[argh(option, default = "default_scheduler_config()")]
-    pub(crate) scheduler_config: SchedulerConfigProto,
-    /// textproto request orchestrator configuration
-    #[argh(option, default = "default_request_orchestrator_config()")]
-    pub(crate) request_orchestrator_config: RequestOrchestratorConfigProto,
+    scheduler_config: SchedulerConfigProto,
+    /// inline textproto request orchestrator configuration
+    #[argh(option)]
+    request_orchestrator_config: Option<RequestOrchestratorConfigProto>,
+    /// path to a textproto backend throughput profiles file
+    #[argh(option)]
+    backend_throughput_profiles_file: Option<PathBuf>,
     /// number of request-handler threads used for concurrent input preprocessing
     #[argh(option, default = "DEFAULT_INPUT_PREPROCESSING_THREAD_COUNT")]
-    pub(crate) input_preprocessing_thread_count: usize,
+    input_preprocessing_thread_count: usize,
     /// directory where a Chrome trace is written
     #[argh(option)]
-    pub(crate) trace_directory: Option<PathBuf>,
+    trace_directory: Option<PathBuf>,
     /// unix domain socket exposed to local inference clients
     #[argh(option, default = "default_request_socket()")]
-    pub(crate) request_socket: PathBuf,
+    request_socket: PathBuf,
     /// unix domain socket exposed to lifecycle-control clients
     #[argh(option, default = "default_control_socket()")]
-    pub(crate) control_socket: PathBuf,
+    control_socket: PathBuf,
+}
+
+impl RawMainProcessArgs {
+    fn resolve(self) -> Result<MainProcessArgs, String> {
+        let request_orchestrator_config = resolve_request_orchestrator_config(
+            self.request_orchestrator_config,
+            self.backend_throughput_profiles_file,
+        )?;
+        Ok(MainProcessArgs {
+            model: self.model,
+            draft_model: self.draft_model,
+            inference_device: self.inference_device,
+            activation_dtype: self.activation_dtype,
+            kv_cache_config: self.kv_cache_config,
+            scheduler_config: self.scheduler_config,
+            request_orchestrator_config,
+            input_preprocessing_thread_count: self.input_preprocessing_thread_count,
+            trace_directory: self.trace_directory,
+            request_socket: self.request_socket,
+            control_socket: self.control_socket,
+        })
+    }
+}
+
+fn resolve_request_orchestrator_config(
+    config: Option<RequestOrchestratorConfigProto>,
+    throughput_profiles_file: Option<PathBuf>,
+) -> Result<RequestOrchestratorConfigProto, String> {
+    let has_inline_throughput_profiles = config
+        .as_ref()
+        .is_some_and(|config| config.throughput_profiles.is_some());
+    let mut config = config.unwrap_or_else(default_request_orchestrator_config);
+    if let Some(path) = throughput_profiles_file {
+        if has_inline_throughput_profiles {
+            return Err(
+                "backend throughput profiles cannot be supplied both inline and through --backend-throughput-profiles-file"
+                    .to_owned(),
+            );
+        }
+        let contents = fs::read_to_string(&path).map_err(|error| {
+            format!(
+                "failed to read backend throughput profiles file {}: {error}",
+                path.display()
+            )
+        })?;
+        let profiles: BackendThroughputProfiles = contents.parse().map_err(|error| {
+            format!(
+                "failed to parse backend throughput profiles file {}: {error}",
+                path.display()
+            )
+        })?;
+        if profiles.profiles.is_empty() {
+            return Err(format!(
+                "backend throughput profiles file {} contains no profiles",
+                path.display()
+            ));
+        }
+        config.throughput_profiles = Some(profiles);
+    }
+    Ok(config)
 }
 
 impl fmt::Display for MainProcessArgs {
@@ -160,7 +257,9 @@ fn default_scheduler_config() -> SchedulerConfigProto {
 fn default_request_orchestrator_config() -> RequestOrchestratorConfigProto {
     RequestOrchestratorConfigProto {
         routing_policy: DEFAULT_REQUEST_ROUTING_POLICY.into(),
-        throughput_profiles: vec![default_backend_throughput_profile()],
+        throughput_profiles: Some(BackendThroughputProfiles {
+            profiles: vec![default_backend_throughput_profile()],
+        }),
     }
 }
 
@@ -292,11 +391,11 @@ fn normalize_request_orchestrator_config(config: &mut RequestOrchestratorConfigP
         warn!("Request routing policy is unspecified; using default value round-robin");
         config.routing_policy = DEFAULT_REQUEST_ROUTING_POLICY.into();
     }
-    if config.throughput_profiles.is_empty() {
-        warn!("Backend throughput profiles are empty; using the default benchmark profile");
-        config
-            .throughput_profiles
-            .push(default_backend_throughput_profile());
+    if config.throughput_profiles.is_none() {
+        warn!("Backend throughput profiles are missing; using the default benchmark profile");
+        config.throughput_profiles = Some(BackendThroughputProfiles {
+            profiles: vec![default_backend_throughput_profile()],
+        });
     }
 }
 
@@ -410,12 +509,12 @@ mod tests {
         ] {
             let config = format!(
                 "routing_policy: {policy_name} \
-                 throughput_profiles {{ input_token_count: 64 max_output_token_count: 16 \
+                 throughput_profiles {{ profiles {{ input_token_count: 64 max_output_token_count: 16 \
                  cpu_prefill_tokens_per_second: 100 cpu_decode_tokens_per_second: 50 \
                  gpu_prefill_tokens_per_second: 200 gpu_decode_tokens_per_second: 150 }} \
-                 throughput_profiles {{ input_token_count: 512 max_output_token_count: 128 \
+                 profiles {{ input_token_count: 512 max_output_token_count: 128 \
                  cpu_prefill_tokens_per_second: 300 cpu_decode_tokens_per_second: 250 \
-                 gpu_prefill_tokens_per_second: 400 gpu_decode_tokens_per_second: 350 }}"
+                 gpu_prefill_tokens_per_second: 400 gpu_decode_tokens_per_second: 350 }} }}"
             );
             let args = MainProcessArgs::from_args(
                 &["mini-vllm-rs"],
@@ -429,26 +528,149 @@ mod tests {
             );
             assert_eq!(
                 args.request_orchestrator_config.throughput_profiles,
-                vec![
-                    BackendThroughputProfileProto {
-                        input_token_count: 64,
-                        max_output_token_count: 16,
-                        cpu_prefill_tokens_per_second: 100,
-                        cpu_decode_tokens_per_second: 50,
-                        gpu_prefill_tokens_per_second: 200,
-                        gpu_decode_tokens_per_second: 150,
-                    },
-                    BackendThroughputProfileProto {
-                        input_token_count: 512,
-                        max_output_token_count: 128,
-                        cpu_prefill_tokens_per_second: 300,
-                        cpu_decode_tokens_per_second: 250,
-                        gpu_prefill_tokens_per_second: 400,
-                        gpu_decode_tokens_per_second: 350,
-                    },
-                ]
+                Some(BackendThroughputProfiles {
+                    profiles: vec![
+                        BackendThroughputProfileProto {
+                            input_token_count: 64,
+                            max_output_token_count: 16,
+                            cpu_prefill_tokens_per_second: 100,
+                            cpu_decode_tokens_per_second: 50,
+                            gpu_prefill_tokens_per_second: 200,
+                            gpu_decode_tokens_per_second: 150,
+                        },
+                        BackendThroughputProfileProto {
+                            input_token_count: 512,
+                            max_output_token_count: 128,
+                            cpu_prefill_tokens_per_second: 300,
+                            cpu_decode_tokens_per_second: 250,
+                            gpu_prefill_tokens_per_second: 400,
+                            gpu_decode_tokens_per_second: 350,
+                        },
+                    ],
+                })
             );
         }
+    }
+
+    #[test]
+    fn reads_backend_throughput_profiles_from_file() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let path = directory
+            .path()
+            .join("backend-throughput-profiles.textproto");
+        fs::write(
+            &path,
+            concat!(
+                "profiles { input_token_count: 64 max_output_token_count: 16 ",
+                "cpu_prefill_tokens_per_second: 100 cpu_decode_tokens_per_second: 50 ",
+                "gpu_prefill_tokens_per_second: 200 gpu_decode_tokens_per_second: 150 }",
+            ),
+        )
+        .expect("backend throughput profiles should be written");
+
+        let args = MainProcessArgs::from_args(
+            &["mini-vllm-rs"],
+            &[
+                "--request-orchestrator-config",
+                "routing_policy: REQUEST_ROUTING_POLICY_LEAST_REQUESTS",
+                "--backend-throughput-profiles-file",
+                path.to_str().expect("temporary path should be UTF-8"),
+            ],
+        )
+        .expect("backend throughput profiles file should parse");
+
+        assert_eq!(
+            args.request_orchestrator_config.routing_policy,
+            RequestRoutingPolicyProto::LeastRequests as i32
+        );
+        assert_eq!(
+            args.request_orchestrator_config.throughput_profiles,
+            Some(BackendThroughputProfiles {
+                profiles: vec![BackendThroughputProfileProto {
+                    input_token_count: 64,
+                    max_output_token_count: 16,
+                    cpu_prefill_tokens_per_second: 100,
+                    cpu_decode_tokens_per_second: 50,
+                    gpu_prefill_tokens_per_second: 200,
+                    gpu_decode_tokens_per_second: 150,
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn reads_recommended_backend_throughput_profiles() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("benchmarks/backend_throughput_profiles.textproto");
+        let args = MainProcessArgs::from_args(
+            &["mini-vllm-rs"],
+            &[
+                "--backend-throughput-profiles-file",
+                path.to_str().expect("profile path should be UTF-8"),
+            ],
+        )
+        .expect("recommended backend throughput profiles should parse");
+
+        args.validate()
+            .expect("recommended backend throughput profiles should be valid");
+        assert_eq!(
+            args.request_orchestrator_config
+                .throughput_profiles
+                .expect("throughput profiles should be present")
+                .profiles
+                .len(),
+            12
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_backend_throughput_profiles_file() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let path = directory
+            .path()
+            .join("backend-throughput-profiles.textproto");
+        fs::write(&path, "not valid textproto")
+            .expect("backend throughput profiles should be written");
+
+        let result = MainProcessArgs::from_args(
+            &["mini-vllm-rs"],
+            &[
+                "--backend-throughput-profiles-file",
+                path.to_str().expect("temporary path should be UTF-8"),
+            ],
+        );
+        let Err(error) = result else {
+            panic!("invalid backend throughput profiles should fail")
+        };
+
+        assert!(error
+            .output
+            .contains("failed to parse backend throughput profiles file"));
+    }
+
+    #[test]
+    fn rejects_inline_and_file_backend_throughput_profiles() {
+        let result = MainProcessArgs::from_args(
+            &["mini-vllm-rs"],
+            &[
+                "--request-orchestrator-config",
+                concat!(
+                    "throughput_profiles { profiles { input_token_count: 64 max_output_token_count: 16 ",
+                    "cpu_prefill_tokens_per_second: 100 cpu_decode_tokens_per_second: 50 ",
+                    "gpu_prefill_tokens_per_second: 200 gpu_decode_tokens_per_second: 150 } }",
+                ),
+                "--backend-throughput-profiles-file",
+                "backend-throughput-profiles.textproto",
+            ],
+        );
+        let Err(error) = result else {
+            panic!("backend throughput profile sources should be mutually exclusive")
+        };
+
+        assert_eq!(
+            error.output,
+            "backend throughput profiles cannot be supplied both inline and through --backend-throughput-profiles-file"
+        );
     }
 
     #[test]
@@ -563,7 +785,9 @@ mod tests {
         );
         assert_eq!(
             config.throughput_profiles,
-            vec![default_backend_throughput_profile()]
+            Some(BackendThroughputProfiles {
+                profiles: vec![default_backend_throughput_profile()],
+            })
         );
         assert!(config.validate().is_ok());
     }

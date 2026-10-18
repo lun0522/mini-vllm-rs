@@ -5,6 +5,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::proto::inference_config::BackendThroughputProfile as BackendThroughputProfileProto;
+use crate::proto::inference_config::BackendThroughputProfiles as BackendThroughputProfilesProto;
 use crate::proto::inference_config::KvCacheConfig as KvCacheConfigProto;
 use crate::proto::inference_config::KvCacheType as KvCacheTypeProto;
 use crate::proto::inference_config::PrefixCacheCoordinationPolicy as PrefixCacheCoordinationPolicyProto;
@@ -119,6 +120,7 @@ impl From<RequestOrchestratorConfigProto> for RequestOrchestratorConfig {
             throughput_profiles: config
                 .throughput_profiles
                 .into_iter()
+                .flat_map(|profiles| profiles.profiles)
                 .map(Into::into)
                 .collect(),
         }
@@ -129,11 +131,13 @@ impl From<RequestOrchestratorConfig> for RequestOrchestratorConfigProto {
     fn from(config: RequestOrchestratorConfig) -> Self {
         Self {
             routing_policy: RequestRoutingPolicyProto::from(config.routing_policy).into(),
-            throughput_profiles: config
-                .throughput_profiles
-                .into_iter()
-                .map(Into::into)
-                .collect(),
+            throughput_profiles: Some(BackendThroughputProfilesProto {
+                profiles: config
+                    .throughput_profiles
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            }),
         }
     }
 }
