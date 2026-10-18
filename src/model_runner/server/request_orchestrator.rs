@@ -61,8 +61,10 @@ pub(super) struct RoutingCandidateDiagnostics {
     pub(super) operational_state: Option<OperationalState>,
     pub(super) cache_affinity_state_epoch: Option<u64>,
     pub(super) cached_prefix_token_count: Option<usize>,
-    pub(super) estimated_token_count: Option<u128>,
-    pub(super) throughput_weight: Option<u64>,
+    pub(super) estimated_prefill_token_count: Option<u128>,
+    pub(super) estimated_decode_token_count: Option<u128>,
+    pub(super) prefill_tokens_per_second: Option<u64>,
+    pub(super) decode_tokens_per_second: Option<u64>,
     pub(super) last_selected_epoch: Option<u64>,
 }
 
@@ -73,8 +75,10 @@ impl RoutingCandidateDiagnostics {
             operational_state: None,
             cache_affinity_state_epoch: None,
             cached_prefix_token_count: None,
-            estimated_token_count: None,
-            throughput_weight: None,
+            estimated_prefill_token_count: None,
+            estimated_decode_token_count: None,
+            prefill_tokens_per_second: None,
+            decode_tokens_per_second: None,
             last_selected_epoch: None,
         }
     }
@@ -107,11 +111,29 @@ impl fmt::Display for RoutingCandidateDiagnostics {
                 " cached_prefix_tokens={cached_prefix_token_count}"
             )?;
         }
-        if let Some(estimated_token_count) = self.estimated_token_count {
-            write!(formatter, " estimated_tokens={estimated_token_count}")?;
+        if let Some(estimated_prefill_token_count) = self.estimated_prefill_token_count {
+            write!(
+                formatter,
+                " estimated_prefill_tokens={estimated_prefill_token_count}"
+            )?;
         }
-        if let Some(throughput_weight) = self.throughput_weight {
-            write!(formatter, " throughput_weight={throughput_weight}")?;
+        if let Some(estimated_decode_token_count) = self.estimated_decode_token_count {
+            write!(
+                formatter,
+                " estimated_decode_tokens={estimated_decode_token_count}"
+            )?;
+        }
+        if let Some(prefill_tokens_per_second) = self.prefill_tokens_per_second {
+            write!(
+                formatter,
+                " prefill_tokens_per_second={prefill_tokens_per_second}"
+            )?;
+        }
+        if let Some(decode_tokens_per_second) = self.decode_tokens_per_second {
+            write!(
+                formatter,
+                " decode_tokens_per_second={decode_tokens_per_second}"
+            )?;
         }
         if let Some(last_selected_epoch) = self.last_selected_epoch {
             write!(formatter, " last_selected_epoch={last_selected_epoch}")?;

@@ -1,7 +1,9 @@
 use crate::model_runner::ActivationDType;
 use crate::model_runner::InferenceDevice;
-use crate::model_runner::DEFAULT_CPU_THROUGHPUT_WEIGHT;
-use crate::model_runner::DEFAULT_GPU_THROUGHPUT_WEIGHT;
+use crate::model_runner::DEFAULT_CPU_DECODE_TOKENS_PER_SECOND;
+use crate::model_runner::DEFAULT_CPU_PREFILL_TOKENS_PER_SECOND;
+use crate::model_runner::DEFAULT_GPU_DECODE_TOKENS_PER_SECOND;
+use crate::model_runner::DEFAULT_GPU_PREFILL_TOKENS_PER_SECOND;
 use crate::model_runner::DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT;
 use crate::model_runner::DEFAULT_THROUGHPUT_PROFILE_INPUT_TOKEN_COUNT;
 use crate::model_runner::DEFAULT_THROUGHPUT_PROFILE_MAX_OUTPUT_TOKEN_COUNT;
@@ -166,8 +168,10 @@ fn default_backend_throughput_profile() -> BackendThroughputProfileProto {
     BackendThroughputProfileProto {
         input_token_count: DEFAULT_THROUGHPUT_PROFILE_INPUT_TOKEN_COUNT,
         max_output_token_count: DEFAULT_THROUGHPUT_PROFILE_MAX_OUTPUT_TOKEN_COUNT,
-        cpu_throughput_weight: DEFAULT_CPU_THROUGHPUT_WEIGHT,
-        gpu_throughput_weight: DEFAULT_GPU_THROUGHPUT_WEIGHT,
+        cpu_prefill_tokens_per_second: DEFAULT_CPU_PREFILL_TOKENS_PER_SECOND,
+        cpu_decode_tokens_per_second: DEFAULT_CPU_DECODE_TOKENS_PER_SECOND,
+        gpu_prefill_tokens_per_second: DEFAULT_GPU_PREFILL_TOKENS_PER_SECOND,
+        gpu_decode_tokens_per_second: DEFAULT_GPU_DECODE_TOKENS_PER_SECOND,
     }
 }
 
@@ -407,9 +411,11 @@ mod tests {
             let config = format!(
                 "routing_policy: {policy_name} \
                  throughput_profiles {{ input_token_count: 64 max_output_token_count: 16 \
-                 cpu_throughput_weight: 100 gpu_throughput_weight: 200 }} \
+                 cpu_prefill_tokens_per_second: 100 cpu_decode_tokens_per_second: 50 \
+                 gpu_prefill_tokens_per_second: 200 gpu_decode_tokens_per_second: 150 }} \
                  throughput_profiles {{ input_token_count: 512 max_output_token_count: 128 \
-                 cpu_throughput_weight: 300 gpu_throughput_weight: 400 }}"
+                 cpu_prefill_tokens_per_second: 300 cpu_decode_tokens_per_second: 250 \
+                 gpu_prefill_tokens_per_second: 400 gpu_decode_tokens_per_second: 350 }}"
             );
             let args = MainProcessArgs::from_args(
                 &["mini-vllm-rs"],
@@ -427,14 +433,18 @@ mod tests {
                     BackendThroughputProfileProto {
                         input_token_count: 64,
                         max_output_token_count: 16,
-                        cpu_throughput_weight: 100,
-                        gpu_throughput_weight: 200,
+                        cpu_prefill_tokens_per_second: 100,
+                        cpu_decode_tokens_per_second: 50,
+                        gpu_prefill_tokens_per_second: 200,
+                        gpu_decode_tokens_per_second: 150,
                     },
                     BackendThroughputProfileProto {
                         input_token_count: 512,
                         max_output_token_count: 128,
-                        cpu_throughput_weight: 300,
-                        gpu_throughput_weight: 400,
+                        cpu_prefill_tokens_per_second: 300,
+                        cpu_decode_tokens_per_second: 250,
+                        gpu_prefill_tokens_per_second: 400,
+                        gpu_decode_tokens_per_second: 350,
                     },
                 ]
             );

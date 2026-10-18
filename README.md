@@ -140,10 +140,10 @@ cargo run --release
     `REQUEST_ROUTING_POLICY_MOST_CACHED_PREFIX`, or
     `REQUEST_ROUTING_POLICY_CACHE_AWARE_LEAST_ESTIMATED_WORK`, and defaults to
     round robin.
-  - `throughput_profiles`: Supplies benchmark-derived CPU and GPU weights for
-    representative input and maximum-output token counts. When omitted, it
-    defaults to a `128`-input, `512`-output profile with CPU/GPU weights of
-    `922` and `1625`, based on a previous Apple M2 benchmark.
+  - `throughput_profiles`: Supplies benchmark-derived CPU and GPU prefill and
+    decode rates for representative input and maximum-output token counts.
+    When omitted, it defaults to the `128`-input, `512`-output profile measured
+    in [`backend_throughput_profiles.md`](benchmarks/backend_throughput_profiles.md).
     See [Request orchestration](src/model_runner/README.md#request-orchestration)
     for policy behavior and state handling.
 - `--input-preprocessing-thread-count <count>` sets the request-handler

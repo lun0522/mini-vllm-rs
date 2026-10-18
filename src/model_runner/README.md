@@ -126,19 +126,19 @@ The available request-routing policies are:
   state.
 - `least-requests`, which selects the backend with the smallest sum of queued
   and active requests. Equal scores select the least recently used backend.
-- `least-estimated-work`, which divides each backend's estimated remaining
-  queued and active tokens, including the incoming request, by a
-  workload-specific throughput weight. It selects the configured profile with
-  the smallest combined absolute difference in input and maximum output token
-  counts; equal distances preserve configuration order. The fallback profile
-  represents a 128-input-token, 512-maximum-output-token workload with CPU/GPU
-  weights of `922` and `1625`, preserving the 9.22-to-16.25 throughput ratio
-  from the batched target-only results in
-  [`metal_gemv_threshold.md`](../../benchmarks/metal_gemv_threshold.md). Equal
-  scores select the least recently used backend. The defaults are specific to
-  the benchmark's Apple M2 and Qwen2.5 7B configuration and intentionally serve
-  as a simple baseline. The request-orchestrator configuration can carry
-  workload-specific throughput profiles from a different environment.
+- `least-estimated-work`, which estimates completion time by dividing remaining
+  prefill and decode token counts—including the incoming request—by their
+  respective workload-specific throughput rates and adding the two durations.
+  It selects the configured profile with the smallest combined absolute
+  difference in input and maximum output token counts; equal distances preserve
+  configuration order. The fallback is the 128-input-token,
+  512-maximum-output-token profile measured in
+  [`backend_throughput_profiles.md`](../../benchmarks/backend_throughput_profiles.md):
+  CPU prefill/decode rates of `75`/`48` tokens per second and GPU rates of
+  `12086`/`396`. Equal scores select the least recently used backend. These
+  Apple M2 and Qwen2.5 0.5B measurements intentionally serve as a simple baseline;
+  the request-orchestrator configuration can supply profiles from another
+  environment.
 - `most-cached-prefix`, which selects the backend with the longest cached
   complete-block prefix restorable for the incoming request. Equal matches
   select the least recently used backend. This policy requires prefix caching

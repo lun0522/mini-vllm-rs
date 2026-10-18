@@ -17,37 +17,29 @@ use candle_core::DType;
 
 pub(crate) const DEFAULT_KV_CACHE_PAGE_TOKEN_COUNT: usize = 16;
 
-// Preserve the CPU-to-GPU throughput ratio measured by the batched target-only
-// Apple M2 workload in benchmarks/metal_gemv_threshold.md. Its two prompts
-// contained 128 and 121 tokens and each generated 512 tokens; use 128 as the
-// representative input length for the fallback profile.
+// Use the phase-specific rates measured for the 128-input, 512-output workload
+// in benchmarks/backend_throughput_profiles.md as the fallback profile.
 pub(crate) const DEFAULT_THROUGHPUT_PROFILE_INPUT_TOKEN_COUNT: u64 = 128;
 pub(crate) const DEFAULT_THROUGHPUT_PROFILE_MAX_OUTPUT_TOKEN_COUNT: u64 = 512;
-pub(crate) const DEFAULT_CPU_THROUGHPUT_WEIGHT: u64 = 922;
-pub(crate) const DEFAULT_GPU_THROUGHPUT_WEIGHT: u64 = 1_625;
+pub(crate) const DEFAULT_CPU_PREFILL_TOKENS_PER_SECOND: u64 = 75;
+pub(crate) const DEFAULT_CPU_DECODE_TOKENS_PER_SECOND: u64 = 48;
+pub(crate) const DEFAULT_GPU_PREFILL_TOKENS_PER_SECOND: u64 = 12_086;
+pub(crate) const DEFAULT_GPU_DECODE_TOKENS_PER_SECOND: u64 = 396;
 
-/// Relative inference throughput by backend device; higher weights represent faster backends.
+/// Phase-specific inference throughput measured for one backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct BackendThroughputWeights {
-    pub(crate) cpu: u64,
-    pub(crate) gpu: u64,
+pub(crate) struct BackendThroughput {
+    pub(crate) prefill_tokens_per_second: u64,
+    pub(crate) decode_tokens_per_second: u64,
 }
 
-impl Default for BackendThroughputWeights {
-    fn default() -> Self {
-        Self {
-            cpu: DEFAULT_CPU_THROUGHPUT_WEIGHT,
-            gpu: DEFAULT_GPU_THROUGHPUT_WEIGHT,
-        }
-    }
-}
-
-/// Relative backend throughput measured for one representative request workload.
+/// Backend throughput measured for one representative request workload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BackendThroughputProfile {
     pub(crate) input_token_count: u64,
     pub(crate) max_output_token_count: u64,
-    pub(crate) weights: BackendThroughputWeights,
+    pub(crate) cpu: BackendThroughput,
+    pub(crate) gpu: BackendThroughput,
 }
 
 impl Default for BackendThroughputProfile {
@@ -55,7 +47,14 @@ impl Default for BackendThroughputProfile {
         Self {
             input_token_count: DEFAULT_THROUGHPUT_PROFILE_INPUT_TOKEN_COUNT,
             max_output_token_count: DEFAULT_THROUGHPUT_PROFILE_MAX_OUTPUT_TOKEN_COUNT,
-            weights: BackendThroughputWeights::default(),
+            cpu: BackendThroughput {
+                prefill_tokens_per_second: DEFAULT_CPU_PREFILL_TOKENS_PER_SECOND,
+                decode_tokens_per_second: DEFAULT_CPU_DECODE_TOKENS_PER_SECOND,
+            },
+            gpu: BackendThroughput {
+                prefill_tokens_per_second: DEFAULT_GPU_PREFILL_TOKENS_PER_SECOND,
+                decode_tokens_per_second: DEFAULT_GPU_DECODE_TOKENS_PER_SECOND,
+            },
         }
     }
 }
@@ -65,9 +64,13 @@ impl From<BackendThroughputProfileProto> for BackendThroughputProfile {
         Self {
             input_token_count: profile.input_token_count,
             max_output_token_count: profile.max_output_token_count,
-            weights: BackendThroughputWeights {
-                cpu: profile.cpu_throughput_weight,
-                gpu: profile.gpu_throughput_weight,
+            cpu: BackendThroughput {
+                prefill_tokens_per_second: profile.cpu_prefill_tokens_per_second,
+                decode_tokens_per_second: profile.cpu_decode_tokens_per_second,
+            },
+            gpu: BackendThroughput {
+                prefill_tokens_per_second: profile.gpu_prefill_tokens_per_second,
+                decode_tokens_per_second: profile.gpu_decode_tokens_per_second,
             },
         }
     }
@@ -78,8 +81,10 @@ impl From<BackendThroughputProfile> for BackendThroughputProfileProto {
         Self {
             input_token_count: profile.input_token_count,
             max_output_token_count: profile.max_output_token_count,
-            cpu_throughput_weight: profile.weights.cpu,
-            gpu_throughput_weight: profile.weights.gpu,
+            cpu_prefill_tokens_per_second: profile.cpu.prefill_tokens_per_second,
+            cpu_decode_tokens_per_second: profile.cpu.decode_tokens_per_second,
+            gpu_prefill_tokens_per_second: profile.gpu.prefill_tokens_per_second,
+            gpu_decode_tokens_per_second: profile.gpu.decode_tokens_per_second,
         }
     }
 }
@@ -88,9 +93,15 @@ impl fmt::Display for BackendThroughputProfile {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "input_token_count={}, max_output_token_count={}, cpu_throughput_weight={}, \
-             gpu_throughput_weight={}",
-            self.input_token_count, self.max_output_token_count, self.weights.cpu, self.weights.gpu,
+            "input_token_count={}, max_output_token_count={}, \
+             cpu_prefill_tokens_per_second={}, cpu_decode_tokens_per_second={}, \
+             gpu_prefill_tokens_per_second={}, gpu_decode_tokens_per_second={}",
+            self.input_token_count,
+            self.max_output_token_count,
+            self.cpu.prefill_tokens_per_second,
+            self.cpu.decode_tokens_per_second,
+            self.gpu.prefill_tokens_per_second,
+            self.gpu.decode_tokens_per_second,
         )
     }
 }
@@ -667,7 +678,14 @@ mod tests {
                 throughput_profiles: vec![BackendThroughputProfile {
                     input_token_count: 128,
                     max_output_token_count: 64,
-                    weights: BackendThroughputWeights { cpu: 300, gpu: 400 },
+                    cpu: BackendThroughput {
+                        prefill_tokens_per_second: 300,
+                        decode_tokens_per_second: 200,
+                    },
+                    gpu: BackendThroughput {
+                        prefill_tokens_per_second: 400,
+                        decode_tokens_per_second: 250,
+                    },
                 }],
             };
 
@@ -676,7 +694,8 @@ mod tests {
                 format!(
                     "routing_policy={expected_display}, \
                      throughput_profile=(input_token_count=128, max_output_token_count=64, \
-                     cpu_throughput_weight=300, gpu_throughput_weight=400)"
+                     cpu_prefill_tokens_per_second=300, cpu_decode_tokens_per_second=200, \
+                     gpu_prefill_tokens_per_second=400, gpu_decode_tokens_per_second=250)"
                 )
             );
             assert_eq!(

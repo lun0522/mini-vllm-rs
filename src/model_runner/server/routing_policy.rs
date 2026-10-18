@@ -1,3 +1,4 @@
+use crate::model_runner::BackendThroughput;
 use crate::model_runner::BackendThroughputProfile;
 use crate::model_runner::InferenceDevice;
 use std::cmp::Reverse;
@@ -128,31 +129,23 @@ impl LeastEstimatedWorkPolicy {
 
 impl BackendRoutingPolicy for LeastEstimatedWorkPolicy {
     fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision {
-        // This is a conservative upper-bound estimate that assigns equal cost to prefill and
-        // decode tokens:
-        //   (remaining queued and active prefill tokens
-        //      + remaining maximum queued and active output tokens
-        //      + the incoming request's input and maximum output tokens)
-        //   / backend throughput
+        // Estimate completion time by pricing prefill and decode work at their independently
+        // measured rates for the backend and request workload.
         route_by_score(
             self.operational_state_receivers.len(),
             &self.selection_history,
             |backend_index, diagnostics| {
                 let backend = &self.operational_state_receivers[backend_index];
                 let state = *backend.operational_state_receiver.borrow();
-                let estimated_token_count = estimate_remaining_token_work(
+                let estimated_work = EstimatedTokenWork::new(
                     &state, request, /* cached_prefix_token_count */ 0,
                 );
-                let throughput_weight = self
+                let throughput = self
                     .throughput_profiles
-                    .get_throughput_weight(request, backend.device);
+                    .estimate_throughput(request, backend.device);
                 diagnostics.operational_state = Some(state);
-                diagnostics.estimated_token_count = Some(estimated_token_count);
-                diagnostics.throughput_weight = Some(throughput_weight);
-                EstimatedCompletionScore {
-                    estimated_token_count,
-                    throughput_weight,
-                }
+                estimated_work.populate_diagnostics(diagnostics, throughput);
+                estimated_work.estimate_duration(throughput)
             },
         )
     }
@@ -225,12 +218,8 @@ impl CacheAwareLeastEstimatedWorkPolicy {
 
 impl BackendRoutingPolicy for CacheAwareLeastEstimatedWorkPolicy {
     fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision {
-        // This uses the same conservative estimate as least-estimated-work, but excludes the
-        // reusable cached prefix from the incoming request's prefill work:
-        //   (remaining queued and active prefill tokens
-        //      + remaining maximum queued and active output tokens
-        //      + the incoming request's uncached input and maximum output tokens)
-        //   / backend throughput
+        // This uses the same phase-specific completion-time estimate as least-estimated-work,
+        // but excludes the reusable cached prefix from the incoming request's prefill work.
         route_by_score(
             self.backend_state_receivers.len(),
             &self.selection_history,
@@ -247,42 +236,19 @@ impl BackendRoutingPolicy for CacheAwareLeastEstimatedWorkPolicy {
                                 request.restorable_input_token_ids(),
                             )
                         });
-                let estimated_token_count = estimate_remaining_token_work(
-                    &operational_state,
-                    request,
-                    cached_prefix_token_count,
-                );
-                let throughput_weight = self
+                let estimated_work =
+                    EstimatedTokenWork::new(&operational_state, request, cached_prefix_token_count);
+                let throughput = self
                     .throughput_profiles
-                    .get_throughput_weight(request, backend.device);
+                    .estimate_throughput(request, backend.device);
                 diagnostics.operational_state = Some(*operational_state);
                 diagnostics.cache_affinity_state_epoch = Some(cache_affinity_state.epoch);
                 diagnostics.cached_prefix_token_count = Some(cached_prefix_token_count);
-                diagnostics.estimated_token_count = Some(estimated_token_count);
-                diagnostics.throughput_weight = Some(throughput_weight);
-                EstimatedCompletionScore {
-                    estimated_token_count,
-                    throughput_weight,
-                }
+                estimated_work.populate_diagnostics(diagnostics, throughput);
+                estimated_work.estimate_duration(throughput)
             },
         )
     }
-}
-
-fn estimate_remaining_token_work(
-    state: &OperationalState,
-    request: RequestRoutingContext<'_>,
-    cached_prefix_token_count: usize,
-) -> u128 {
-    let uncached_input_token_count = request
-        .input_token_count
-        .saturating_sub(cached_prefix_token_count);
-    (state.queued_remaining_prefill_token_count as u128)
-        .saturating_add(state.queued_remaining_max_output_token_count as u128)
-        .saturating_add(state.active_remaining_prefill_token_count as u128)
-        .saturating_add(state.active_remaining_max_output_token_count as u128)
-        .saturating_add(uncached_input_token_count as u128)
-        .saturating_add(request.max_new_token_count as u128)
 }
 
 fn route_by_score<Score: Ord>(
@@ -348,13 +314,13 @@ impl BackendThroughputProfiles {
 
     /// Uses the measured workload with the smallest Manhattan distance from the request.
     /// `min_by_key` preserves configuration order when multiple profiles are equally close.
-    fn get_throughput_weight(
+    fn estimate_throughput(
         &self,
         request: RequestRoutingContext<'_>,
         device: InferenceDevice,
-    ) -> u64 {
+    ) -> BackendThroughput {
         let input_token_count = u64::try_from(request.input_token_count).unwrap_or(u64::MAX);
-        let weights = self
+        let profile = self
             .profiles
             .iter()
             .min_by_key(|profile| {
@@ -364,41 +330,62 @@ impl BackendThroughputProfiles {
                         .abs_diff(request.max_new_token_count) as u128,
                 )
             })
-            .expect("request orchestration requires at least one throughput profile")
-            .weights;
+            .expect("request orchestration requires at least one throughput profile");
         match device {
-            InferenceDevice::Cpu => weights.cpu,
-            InferenceDevice::Gpu => weights.gpu,
+            InferenceDevice::Cpu => profile.cpu,
+            InferenceDevice::Gpu => profile.gpu,
             InferenceDevice::Mixed => unreachable!("an inference backend has one concrete device"),
         }
     }
 }
 
-/// Orders estimated completion times represented as token-count/throughput ratios.
-struct EstimatedCompletionScore {
-    estimated_token_count: u128,
-    throughput_weight: u64,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EstimatedTokenWork {
+    prefill_token_count: u128,
+    decode_token_count: u128,
 }
 
-impl PartialEq for EstimatedCompletionScore {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other).is_eq()
+impl EstimatedTokenWork {
+    fn new(
+        state: &OperationalState,
+        request: RequestRoutingContext<'_>,
+        cached_prefix_token_count: usize,
+    ) -> Self {
+        let uncached_input_token_count = request
+            .input_token_count
+            .saturating_sub(cached_prefix_token_count);
+        Self {
+            prefill_token_count: (state.queued_remaining_prefill_token_count as u128)
+                .saturating_add(state.active_remaining_prefill_token_count as u128)
+                .saturating_add(uncached_input_token_count as u128),
+            decode_token_count: (state.queued_remaining_max_output_token_count as u128)
+                .saturating_add(state.active_remaining_max_output_token_count as u128)
+                .saturating_add(request.max_new_token_count as u128),
+        }
     }
-}
 
-impl Eq for EstimatedCompletionScore {}
-
-impl PartialOrd for EstimatedCompletionScore {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
+    fn estimate_duration(self, throughput: BackendThroughput) -> u128 {
+        const NANOSECONDS_PER_SECOND: u128 = 1_000_000_000;
+        let prefill_duration = self
+            .prefill_token_count
+            .saturating_mul(NANOSECONDS_PER_SECOND)
+            / throughput.prefill_tokens_per_second as u128;
+        let decode_duration = self
+            .decode_token_count
+            .saturating_mul(NANOSECONDS_PER_SECOND)
+            / throughput.decode_tokens_per_second as u128;
+        prefill_duration.saturating_add(decode_duration)
     }
-}
 
-impl Ord for EstimatedCompletionScore {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Compare token_count / throughput without division or floating-point rounding.
-        (self.estimated_token_count * other.throughput_weight as u128)
-            .cmp(&(other.estimated_token_count * self.throughput_weight as u128))
+    fn populate_diagnostics(
+        self,
+        diagnostics: &mut RoutingCandidateDiagnostics,
+        throughput: BackendThroughput,
+    ) {
+        diagnostics.estimated_prefill_token_count = Some(self.prefill_token_count);
+        diagnostics.estimated_decode_token_count = Some(self.decode_token_count);
+        diagnostics.prefill_tokens_per_second = Some(throughput.prefill_tokens_per_second);
+        diagnostics.decode_tokens_per_second = Some(throughput.decode_tokens_per_second);
     }
 }
 
@@ -425,8 +412,6 @@ impl BackendSelectionHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_runner::BackendThroughputWeights;
-
     fn backend_state_receiver(operational_state: OperationalState) -> BackendStateReceivers {
         backend_state_receiver_for_device(InferenceDevice::Cpu, operational_state)
     }
@@ -453,6 +438,30 @@ mod tests {
 
     fn default_throughput_profiles() -> Vec<BackendThroughputProfile> {
         vec![BackendThroughputProfile::default()]
+    }
+
+    fn throughput(
+        prefill_tokens_per_second: u64,
+        decode_tokens_per_second: u64,
+    ) -> BackendThroughput {
+        BackendThroughput {
+            prefill_tokens_per_second,
+            decode_tokens_per_second,
+        }
+    }
+
+    fn throughput_profile(
+        input_token_count: u64,
+        max_output_token_count: u64,
+        cpu: BackendThroughput,
+        gpu: BackendThroughput,
+    ) -> BackendThroughputProfile {
+        BackendThroughputProfile {
+            input_token_count,
+            max_output_token_count,
+            cpu,
+            gpu,
+        }
     }
 
     fn routing_context(estimated_token_count: u64) -> RequestRoutingContext<'static> {
@@ -605,7 +614,7 @@ mod tests {
             default_throughput_profiles(),
         );
 
-        // CPU: 200 / 9.22; GPU: 250 / 16.25, so the busier GPU still has less work.
+        // The GPU's higher phase-specific rates outweigh its larger queued workload.
         assert_eq!(
             policy.route_request(routing_context(100)).backend_id,
             BackendId::from_index(1)
@@ -615,29 +624,17 @@ mod tests {
     #[test]
     fn selects_the_nearest_throughput_profile_for_the_request_workload() {
         let profiles = BackendThroughputProfiles::new(vec![
-            BackendThroughputProfile {
-                input_token_count: 128,
-                max_output_token_count: 32,
-                weights: BackendThroughputWeights { cpu: 1, gpu: 2 },
-            },
-            BackendThroughputProfile {
-                input_token_count: 128,
-                max_output_token_count: 256,
-                weights: BackendThroughputWeights { cpu: 3, gpu: 4 },
-            },
-            BackendThroughputProfile {
-                input_token_count: 512,
-                max_output_token_count: 32,
-                weights: BackendThroughputWeights { cpu: 5, gpu: 6 },
-            },
+            throughput_profile(128, 32, throughput(1, 11), throughput(2, 12)),
+            throughput_profile(128, 256, throughput(3, 13), throughput(4, 14)),
+            throughput_profile(512, 32, throughput(5, 15), throughput(6, 16)),
         ]);
-        for (input_token_count, max_new_token_count, device, expected_weight) in [
-            (100, 50, InferenceDevice::Cpu, 1),
-            (100, 50, InferenceDevice::Gpu, 2),
-            (100, 220, InferenceDevice::Cpu, 3),
-            (450, 50, InferenceDevice::Gpu, 6),
+        for (input_token_count, max_new_token_count, device, expected_throughput) in [
+            (100, 50, InferenceDevice::Cpu, throughput(1, 11)),
+            (100, 50, InferenceDevice::Gpu, throughput(2, 12)),
+            (100, 220, InferenceDevice::Cpu, throughput(3, 13)),
+            (450, 50, InferenceDevice::Gpu, throughput(6, 16)),
             // Equal-distance profiles preserve configuration order.
-            (128, 144, InferenceDevice::Cpu, 1),
+            (128, 144, InferenceDevice::Cpu, throughput(1, 11)),
         ] {
             let request = RequestRoutingContext {
                 input_token_ids: &[],
@@ -646,8 +643,8 @@ mod tests {
             };
 
             assert_eq!(
-                profiles.get_throughput_weight(request, device),
-                expected_weight,
+                profiles.estimate_throughput(request, device),
+                expected_throughput,
                 "input_token_count={input_token_count}, max_new_token_count={max_new_token_count}"
             );
         }
@@ -667,16 +664,8 @@ mod tests {
                 ),
             ],
             vec![
-                BackendThroughputProfile {
-                    input_token_count: 10,
-                    max_output_token_count: 10,
-                    weights: BackendThroughputWeights { cpu: 10, gpu: 1 },
-                },
-                BackendThroughputProfile {
-                    input_token_count: 100,
-                    max_output_token_count: 100,
-                    weights: BackendThroughputWeights { cpu: 1, gpu: 10 },
-                },
+                throughput_profile(10, 10, throughput(10, 10), throughput(1, 1)),
+                throughput_profile(100, 100, throughput(1, 1), throughput(10, 10)),
             ],
         );
 
@@ -700,6 +689,43 @@ mod tests {
                 .backend_id,
             BackendId::from_index(1)
         );
+    }
+
+    #[test]
+    fn least_estimated_work_prices_prefill_and_decode_at_independent_rates() {
+        for (input_token_count, max_new_token_count, expected_backend_index) in
+            [(100, 1, 0), (1, 100, 1)]
+        {
+            let policy = LeastEstimatedWorkPolicy::new(
+                vec![
+                    backend_state_receiver_for_device(
+                        InferenceDevice::Cpu,
+                        OperationalState::default(),
+                    ),
+                    backend_state_receiver_for_device(
+                        InferenceDevice::Gpu,
+                        OperationalState::default(),
+                    ),
+                ],
+                vec![throughput_profile(
+                    1,
+                    1,
+                    throughput(100, 1),
+                    throughput(1, 100),
+                )],
+            );
+
+            assert_eq!(
+                policy
+                    .route_request(RequestRoutingContext {
+                        input_token_ids: &[],
+                        input_token_count,
+                        max_new_token_count,
+                    })
+                    .backend_id,
+                BackendId::from_index(expected_backend_index)
+            );
+        }
     }
 
     #[test]
@@ -812,7 +838,7 @@ mod tests {
 
         let decision = policy.route_request(request);
 
-        // CPU: 18 / 9.22; GPU: 15 / 16.25, so the GPU finishes first.
+        // The GPU's higher phase-specific rates more than offset the CPU's small load.
         assert_eq!(decision.backend_id, BackendId::from_index(1));
     }
 
@@ -830,16 +856,8 @@ mod tests {
                 ),
             ],
             vec![
-                BackendThroughputProfile {
-                    input_token_count: 10,
-                    max_output_token_count: 10,
-                    weights: BackendThroughputWeights { cpu: 10, gpu: 1 },
-                },
-                BackendThroughputProfile {
-                    input_token_count: 100,
-                    max_output_token_count: 100,
-                    weights: BackendThroughputWeights { cpu: 1, gpu: 10 },
-                },
+                throughput_profile(10, 10, throughput(10, 10), throughput(1, 1)),
+                throughput_profile(100, 100, throughput(1, 1), throughput(10, 10)),
             ],
         );
 
@@ -896,7 +914,13 @@ mod tests {
             max_new_token_count: 7,
         };
 
-        assert_eq!(estimate_remaining_token_work(&state, request, 4), 109);
+        assert_eq!(
+            EstimatedTokenWork::new(&state, request, 4),
+            EstimatedTokenWork {
+                prefill_token_count: 42,
+                decode_token_count: 67,
+            }
+        );
     }
 
     #[test]
@@ -908,8 +932,46 @@ mod tests {
         };
 
         assert_eq!(
-            estimate_remaining_token_work(&OperationalState::default(), request, 4),
-            3
+            EstimatedTokenWork::new(&OperationalState::default(), request, 4),
+            EstimatedTokenWork {
+                prefill_token_count: 0,
+                decode_token_count: 3,
+            }
         );
+    }
+
+    #[test]
+    fn estimates_prefill_and_decode_duration_with_independent_rates() {
+        for (work, throughput, expected_duration_nanoseconds) in [
+            (
+                EstimatedTokenWork {
+                    prefill_token_count: 20,
+                    decode_token_count: 0,
+                },
+                throughput(10, 1),
+                2_000_000_000,
+            ),
+            (
+                EstimatedTokenWork {
+                    prefill_token_count: 0,
+                    decode_token_count: 20,
+                },
+                throughput(1, 10),
+                2_000_000_000,
+            ),
+            (
+                EstimatedTokenWork {
+                    prefill_token_count: 20,
+                    decode_token_count: 20,
+                },
+                throughput(10, 5),
+                6_000_000_000,
+            ),
+        ] {
+            assert_eq!(
+                work.estimate_duration(throughput),
+                expected_duration_nanoseconds
+            );
+        }
     }
 }

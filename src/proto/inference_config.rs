@@ -384,14 +384,17 @@ impl RequestOrchestratorConfig {
                 profile.max_output_token_count > 0,
                 "backend throughput profile {profile_index} maximum output token count must be greater than 0"
             );
-            anyhow::ensure!(
-                profile.cpu_throughput_weight > 0,
-                "backend throughput profile {profile_index} CPU throughput weight must be greater than 0"
-            );
-            anyhow::ensure!(
-                profile.gpu_throughput_weight > 0,
-                "backend throughput profile {profile_index} GPU throughput weight must be greater than 0"
-            );
+            for (name, throughput) in [
+                ("CPU prefill", profile.cpu_prefill_tokens_per_second),
+                ("CPU decode", profile.cpu_decode_tokens_per_second),
+                ("GPU prefill", profile.gpu_prefill_tokens_per_second),
+                ("GPU decode", profile.gpu_decode_tokens_per_second),
+            ] {
+                anyhow::ensure!(
+                    throughput > 0,
+                    "backend throughput profile {profile_index} {name} tokens per second must be greater than 0"
+                );
+            }
         }
         Ok(())
     }
@@ -418,11 +421,13 @@ impl fmt::Display for RequestOrchestratorConfig {
             writeln!(
                 formatter,
                 "Backend throughput profile: input tokens={}, maximum output tokens={}, CPU \
-                 weight={}, GPU weight={}",
+                 prefill tok/s={}, CPU decode tok/s={}, GPU prefill tok/s={}, GPU decode tok/s={}",
                 profile.input_token_count.separate_with_commas(),
                 profile.max_output_token_count.separate_with_commas(),
-                profile.cpu_throughput_weight.separate_with_commas(),
-                profile.gpu_throughput_weight.separate_with_commas(),
+                profile.cpu_prefill_tokens_per_second.separate_with_commas(),
+                profile.cpu_decode_tokens_per_second.separate_with_commas(),
+                profile.gpu_prefill_tokens_per_second.separate_with_commas(),
+                profile.gpu_decode_tokens_per_second.separate_with_commas(),
             )?;
         }
         Ok(())
@@ -566,8 +571,10 @@ mod tests {
             throughput_profiles: vec![BackendThroughputProfile {
                 input_token_count: 128,
                 max_output_token_count: 512,
-                cpu_throughput_weight: 922,
-                gpu_throughput_weight: 1_625,
+                cpu_prefill_tokens_per_second: 75,
+                cpu_decode_tokens_per_second: 48,
+                gpu_prefill_tokens_per_second: 12_086,
+                gpu_decode_tokens_per_second: 396,
             }],
         };
 
@@ -576,20 +583,21 @@ mod tests {
             config.to_string(),
             "Request routing policy: round-robin\n\
              Backend throughput profile: input tokens=128, maximum output tokens=512, CPU \
-             weight=922, GPU weight=1,625\n"
+             prefill tok/s=75, CPU decode tok/s=48, GPU prefill tok/s=12,086, GPU decode \
+             tok/s=396\n"
         );
 
         let mut invalid = config.clone();
-        invalid.throughput_profiles[0].cpu_throughput_weight = 0;
+        invalid.throughput_profiles[0].cpu_prefill_tokens_per_second = 0;
         assert_eq!(
             invalid.validate().unwrap_err().to_string(),
-            "backend throughput profile 0 CPU throughput weight must be greater than 0"
+            "backend throughput profile 0 CPU prefill tokens per second must be greater than 0"
         );
-        invalid.throughput_profiles[0].cpu_throughput_weight = 922;
-        invalid.throughput_profiles[0].gpu_throughput_weight = 0;
+        invalid.throughput_profiles[0].cpu_prefill_tokens_per_second = 75;
+        invalid.throughput_profiles[0].gpu_decode_tokens_per_second = 0;
         assert_eq!(
             invalid.validate().unwrap_err().to_string(),
-            "backend throughput profile 0 GPU throughput weight must be greater than 0"
+            "backend throughput profile 0 GPU decode tokens per second must be greater than 0"
         );
 
         assert_eq!(
