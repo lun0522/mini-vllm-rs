@@ -247,17 +247,15 @@ impl ModelRunnerService for ModelRunnerRpcService {
                 max_new_token_count: request.max_new_tokens,
             });
         let routing_duration = routing_started_at.elapsed();
-        let request_orchestrator = &self.request_orchestrator;
         for candidate in &routing_decision.candidate_diagnostics {
             info!(
-                "Request routing candidate: request_id={request_id} policy={request_orchestrator} \
-                 selected={} {candidate}",
+                "Request routing candidate: request_id={request_id} selected={} {candidate}",
                 candidate.backend_id == routing_decision.backend_id,
             );
         }
         info!(
-            "Request routing: request_id={request_id} policy={request_orchestrator} \
-             input_tokens={} max_output_tokens={} backend_id={} routing_us={}",
+            "Request routing: request_id={request_id} input_tokens={} max_output_tokens={} \
+             backend_id={} routing_us={}",
             request.input_token_ids.len(),
             request.max_new_tokens,
             routing_decision.backend_id,
@@ -334,6 +332,7 @@ fn create_inference_backend(
         .map(create_draft_model_config)
         .transpose()?;
     let model_executor = ModelExecutor::new(
+        backend_id,
         &args.model_path,
         draft_model_config,
         inference_device,

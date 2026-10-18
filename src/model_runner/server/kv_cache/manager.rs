@@ -216,6 +216,9 @@ impl KvCache for KvCacheManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_runner::server::kv_cache::contiguous_cache::ContiguousKvCache;
+    use crate::model_runner::server::kv_cache::paged_cache::PagedKvCache;
+    use crate::model_runner::server::BackendId;
     use crate::models::ModelInfo;
     use crate::models::ModelRole;
     use candle_core::DType;
@@ -229,7 +232,8 @@ mod tests {
             activation_dtype: DType::U32,
             context_length: 1,
         };
-        let cache = super::super::paged_cache::PagedKvCache::new(
+        let cache = PagedKvCache::new(
+            BackendId::from_index(0),
             &model_info,
             ModelRole::Target,
             &Device::Cpu,
@@ -248,7 +252,8 @@ mod tests {
             activation_dtype: DType::U32,
             context_length: 1,
         };
-        let cache = super::super::contiguous_cache::ContiguousKvCache::new(
+        let cache = ContiguousKvCache::new(
+            BackendId::from_index(0),
             &model_info,
             ModelRole::Target,
             &Device::Cpu,

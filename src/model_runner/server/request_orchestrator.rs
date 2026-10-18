@@ -140,12 +140,6 @@ pub(super) struct RequestOrchestrator {
     policy: Box<dyn BackendRoutingPolicy>,
 }
 
-impl fmt::Display for RequestOrchestrator {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.policy.fmt(formatter)
-    }
-}
-
 impl RequestOrchestrator {
     pub(super) fn new(
         backend_state_receivers: Vec<BackendStateReceivers>,

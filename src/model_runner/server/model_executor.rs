@@ -28,6 +28,7 @@ use super::kv_cache::PrefixCacheAffinitySnapshot;
 use super::kv_cache::PrefixCacheTelemetry;
 use super::model_instance::ModelInstance;
 use super::text_generation;
+use super::BackendId;
 
 pub(super) struct ModelExecutorMetadata {
     pub model_metadata: GetModelMetadataResponse,
@@ -60,6 +61,7 @@ pub(super) struct ModelExecutor {
 
 impl ModelExecutor {
     pub(super) fn new(
+        backend_id: BackendId,
         model_path: &Path,
         draft_model_config: Option<DraftModelConfig>,
         inference_device: InferenceDevice,
@@ -80,10 +82,11 @@ impl ModelExecutor {
             })
             .transpose()?;
         info!(
-            "Selected inference device {:?} for quantized GGUF inference",
+            "[Backend {backend_id}] Selected inference device {:?} for quantized GGUF inference",
             loaded_model.device()
         );
         let target_kv_cache = create_kv_cache(
+            backend_id,
             kv_cache_config.kv_cache_type,
             &loaded_model,
             ModelRole::Target,
@@ -98,6 +101,7 @@ impl ModelExecutor {
                     target_kv_cache_token_capacity,
                 )?;
                 let kv_cache = create_kv_cache(
+                    backend_id,
                     kv_cache_config.kv_cache_type,
                     &model,
                     ModelRole::Draft,
@@ -453,6 +457,7 @@ mod tests {
             next_token,
         }));
         let cache = create_kv_cache(
+            BackendId::from_index(0),
             KvCacheType::Paged {
                 per_page_token_count: 2,
                 enable_prefix_caching: true,

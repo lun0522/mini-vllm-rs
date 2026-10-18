@@ -1,7 +1,6 @@
 use crate::model_runner::BackendThroughputProfile;
 use crate::model_runner::InferenceDevice;
 use std::cmp::Reverse;
-use std::fmt;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
@@ -15,7 +14,7 @@ use super::request_orchestrator::RoutingCandidateDiagnostics;
 use super::request_orchestrator::RoutingDecision;
 use super::BackendId;
 
-pub(super) trait BackendRoutingPolicy: fmt::Display + Send + Sync {
+pub(super) trait BackendRoutingPolicy: Send + Sync {
     fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision;
 }
 
@@ -30,12 +29,6 @@ impl RoundRobinPolicy {
             backend_count,
             next_backend_index: AtomicUsize::new(0),
         }
-    }
-}
-
-impl fmt::Display for RoundRobinPolicy {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("round-robin")
     }
 }
 
@@ -78,12 +71,6 @@ impl LeastRequestsPolicy {
                 .collect(),
             selection_history: Mutex::new(BackendSelectionHistory::new(backend_count)),
         }
-    }
-}
-
-impl fmt::Display for LeastRequestsPolicy {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("least-requests")
     }
 }
 
@@ -139,12 +126,6 @@ impl LeastEstimatedWorkPolicy {
     }
 }
 
-impl fmt::Display for LeastEstimatedWorkPolicy {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("least-estimated-work")
-    }
-}
-
 impl BackendRoutingPolicy for LeastEstimatedWorkPolicy {
     fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision {
         // This is a conservative upper-bound estimate that assigns equal cost to prefill and
@@ -195,12 +176,6 @@ impl MostCachedPrefixPolicy {
     }
 }
 
-impl fmt::Display for MostCachedPrefixPolicy {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("most-cached-prefix")
-    }
-}
-
 impl BackendRoutingPolicy for MostCachedPrefixPolicy {
     fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision {
         route_by_score(
@@ -245,12 +220,6 @@ impl CacheAwareLeastEstimatedWorkPolicy {
             throughput_profiles: BackendThroughputProfiles::new(throughput_profiles),
             selection_history: Mutex::new(BackendSelectionHistory::new(backend_count)),
         }
-    }
-}
-
-impl fmt::Display for CacheAwareLeastEstimatedWorkPolicy {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("cache-aware-least-estimated-work")
     }
 }
 

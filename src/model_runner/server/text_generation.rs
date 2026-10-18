@@ -1169,6 +1169,7 @@ mod tests {
     use super::*;
     use crate::model_runner::server::draft_token_count::DraftTokenCountPolicy;
     use crate::model_runner::server::kv_cache::create_kv_cache;
+    use crate::model_runner::server::BackendId;
     use crate::model_runner::KvCacheType;
     use crate::models::loaded_model::LoadedModel;
     use crate::models::CausalLanguageModel;
@@ -1313,6 +1314,7 @@ mod tests {
             forward_calls: Arc::clone(&forward_calls),
         }));
         let kv_cache = create_kv_cache(
+            BackendId::from_index(0),
             KvCacheType::Contiguous,
             &model,
             ModelRole::Target,

@@ -75,7 +75,7 @@ impl InferenceWorker {
     ) -> Self {
         let scheduler_config = normalize_scheduler_config(&model_executor, scheduler_config);
         let kv_cache_geometry = model_executor.kv_cache_geometry();
-        info!("Scheduler config: {scheduler_config}");
+        info!("[Backend {backend_id}] Scheduler config: {scheduler_config}");
         Self {
             backend_id,
             model_executor,
@@ -163,7 +163,7 @@ impl InferenceWorker {
         // decode, so synchronize the scheduler with the execution state's actual initial phase.
         self.handle_generation_phase(request_id, started_request.generation_phase)?;
         info!(
-            "Worker state (backend_id={}): request_id={} status=started input_tokens={} \
+            "[Backend {}] Worker state: request_id={} status=started input_tokens={} \
              generation_phase={} ignore_eos_tokens={} queue_us={}",
             self.backend_id,
             request_id,
@@ -328,7 +328,7 @@ impl InferenceWorker {
                 );
                 let draft_stats = stats.execution.draft_stats.as_ref();
                 info!(
-                    "Worker state (backend_id={}): request_id={} status=completed finish_reason={} \
+                    "[Backend {}] Worker state: request_id={} status=completed finish_reason={} \
                      input_tokens={} output_tokens={} queue_us={} prefill_us={} ttft_us={} \
                      decode_us={} completion_us={} \
                      target_cached_tokens={} target_newly_indexed_tokens={} \
@@ -356,10 +356,7 @@ impl InferenceWorker {
                         .as_micros()
                         .separate_with_commas(),
                     stats.prefix_cache.target.restored_token_count,
-                    stats
-                        .prefix_cache
-                        .target
-                        .newly_indexed_token_count,
+                    stats.prefix_cache.target.newly_indexed_token_count,
                     count_to_string(
                         stats
                             .prefix_cache
@@ -383,7 +380,7 @@ impl InferenceWorker {
             Err(error) => {
                 let status = generation_error_status(error);
                 info!(
-                    "Worker state (backend_id={}): request_id={} status={} input_tokens={} \
+                    "[Backend {}] Worker state: request_id={} status={} input_tokens={} \
                      output_tokens={} queue_us={} ttft_us={}",
                     self.backend_id,
                     request_id,

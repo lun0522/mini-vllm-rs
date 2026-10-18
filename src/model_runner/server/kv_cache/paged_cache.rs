@@ -20,6 +20,8 @@ use candle_core::Tensor;
 use log::info;
 use thousands::Separable;
 
+use crate::model_runner::server::BackendId;
+
 /// Coordinates shared physical pages and prefix metadata with request-specific virtual tables.
 pub(in crate::model_runner::server) struct PagedKvCache {
     physical_page_pool: PhysicalPagePool,
@@ -65,6 +67,7 @@ impl PrefixCacheCounters {
 
 impl PagedKvCache {
     pub(super) fn new(
+        backend_id: BackendId,
         model_info: &ModelInfo,
         model_role: ModelRole,
         device: &Device,
@@ -84,8 +87,8 @@ impl PagedKvCache {
             .then(|| PrefixBlockIndex::new(per_page_token_count))
             .transpose()?;
         info!(
-            "Created {model_role} model paged KV cache with {} pages per pool and capacity for \
-             {token_capacity} cached tokens using {} bytes",
+            "[Backend {backend_id}] Created {model_role} model paged KV cache with {} pages per \
+             pool and capacity for {token_capacity} cached tokens using {} bytes",
             physical_page_pool.page_count,
             allocated_size_bytes.separate_with_commas()
         );
@@ -510,6 +513,7 @@ mod tests {
             2 * per_pool_page_count * per_page_token_count * model_info.kv_cache_bytes_per_token();
         Ok(TestPagedKvCache {
             cache: PagedKvCache::new(
+                BackendId::from_index(0),
                 &model_info,
                 ModelRole::Target,
                 &Device::Cpu,

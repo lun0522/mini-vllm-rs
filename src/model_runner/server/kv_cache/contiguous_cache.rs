@@ -4,6 +4,7 @@ use super::utils::validate_cache_append;
 use super::utils::validate_truncation;
 use super::utils::TOKEN_DIMENSION;
 use super::LayerCache;
+use crate::model_runner::server::BackendId;
 use crate::models::ContiguousCacheTensors;
 use crate::models::ModelInfo;
 use crate::models::ModelRole;
@@ -53,6 +54,7 @@ impl RequestContiguousCacheState {
 
 impl ContiguousKvCache {
     pub(super) fn new(
+        backend_id: BackendId,
         model_info: &ModelInfo,
         model_role: ModelRole,
         device: &Device,
@@ -87,8 +89,8 @@ impl ContiguousKvCache {
             * per_layer_token_capacity
             * model_info.kv_cache_bytes_per_token();
         info!(
-            "Created {model_role} model contiguous KV cache with capacity for \
-             {per_layer_token_capacity} cached tokens using {} bytes",
+            "[Backend {backend_id}] Created {model_role} model contiguous KV cache with capacity \
+             for {per_layer_token_capacity} cached tokens using {} bytes",
             allocated_size_bytes.separate_with_commas()
         );
         Ok(cache)
@@ -244,6 +246,7 @@ mod tests {
             2 * layer_count * token_capacity * model_info.kv_cache_bytes_per_token();
         Ok(TestContiguousKvCache {
             cache: ContiguousKvCache::new(
+                BackendId::from_index(0),
                 &model_info,
                 ModelRole::Target,
                 &Device::Cpu,
@@ -275,7 +278,14 @@ mod tests {
         assert_eq!(cache.request_state.layer_caches[0].token_count, 2);
 
         let model_info = test_model_info(/* layer_count */ 1);
-        assert!(ContiguousKvCache::new(&model_info, ModelRole::Target, &Device::Cpu, 0).is_err());
+        assert!(ContiguousKvCache::new(
+            BackendId::from_index(0),
+            &model_info,
+            ModelRole::Target,
+            &Device::Cpu,
+            0,
+        )
+        .is_err());
         Ok(())
     }
 

@@ -6,6 +6,8 @@ use crate::models::ModelRole;
 use anyhow::Context;
 use anyhow::Result;
 
+use super::BackendId;
+
 mod contiguous_cache;
 mod manager;
 mod paged_cache;
@@ -105,6 +107,7 @@ impl KvCacheBackend {
 }
 
 pub(super) fn create_kv_cache(
+    backend_id: BackendId,
     kv_cache_type: KvCacheType,
     model: &LoadedModel,
     model_role: ModelRole,
@@ -112,16 +115,23 @@ pub(super) fn create_kv_cache(
 ) -> Result<KvCacheBackend> {
     match kv_cache_type {
         KvCacheType::Contiguous => Ok(KvCacheBackend::Contiguous(Box::new(
-            ContiguousKvCache::new(model.info(), model_role, model.device(), total_size_bytes)
-                .with_context(|| {
-                    format!("failed to allocate {model_role} model contiguous KV-cache pools")
-                })?,
+            ContiguousKvCache::new(
+                backend_id,
+                model.info(),
+                model_role,
+                model.device(),
+                total_size_bytes,
+            )
+            .with_context(|| {
+                format!("failed to allocate {model_role} model contiguous KV-cache pools")
+            })?,
         ))),
         KvCacheType::Paged {
             per_page_token_count,
             enable_prefix_caching,
         } => Ok(KvCacheBackend::Paged(Box::new(
             PagedKvCache::new(
+                backend_id,
                 model.info(),
                 model_role,
                 model.device(),
