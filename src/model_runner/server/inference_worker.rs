@@ -28,6 +28,7 @@ use super::request_manager::RequestManager;
 use super::request_manager::RequestOutcome;
 use super::request_orchestrator::CacheAffinityState;
 use super::request_orchestrator::OperationalState;
+use super::request_orchestrator::RoutingReservation;
 use super::scheduler::Scheduler;
 use super::scheduler::SchedulingDecision;
 use super::text_generation;
@@ -112,7 +113,10 @@ impl InferenceWorker {
 
     fn handle_message(&mut self, message: InferenceWorkerMessage) -> Result<()> {
         match message {
-            InferenceWorkerMessage::Generate(request) => self.enqueue_request(request),
+            InferenceWorkerMessage::Generate {
+                request,
+                routing_reservation,
+            } => self.enqueue_request(request, routing_reservation),
             InferenceWorkerMessage::GetPrefixCacheTelemetry { response_sender } => {
                 let telemetry = self.model_executor.prefix_cache_telemetry();
                 let _ = response_sender.send(InferenceBackendPrefixCacheTelemetry {
@@ -125,7 +129,11 @@ impl InferenceWorker {
         }
     }
 
-    fn enqueue_request(&mut self, request: InferenceRequest) -> Result<()> {
+    fn enqueue_request(
+        &mut self,
+        request: InferenceRequest,
+        routing_reservation: RoutingReservation,
+    ) -> Result<()> {
         let scheduler = &mut self.scheduler;
         self.request_manager
             .add_request(request, |generate_text_request| {
@@ -137,7 +145,9 @@ impl InferenceWorker {
                     max_new_token_count,
                 )
             })?;
-        self.publish_operational_state();
+        // If adding the request fails, this line is not reached, but the reservation's RAII
+        // cleanup still releases the reserved load on the orchestrator side.
+        routing_reservation.release_after(|| self.publish_operational_state());
         Ok(())
     }
 

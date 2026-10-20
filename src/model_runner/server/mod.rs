@@ -62,6 +62,7 @@ use request_orchestrator::CacheAffinityState;
 use request_orchestrator::OperationalState;
 use request_orchestrator::RequestOrchestrator;
 use request_orchestrator::RequestRoutingContext;
+use request_orchestrator::RoutingReservation;
 
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_MODEL_RUNNER";
 const INFERENCE_MESSAGE_QUEUE_CAPACITY: usize = 32;
@@ -108,8 +109,11 @@ struct InferenceBackends {
     channels: Vec<InferenceBackendChannels>,
 }
 
-pub(super) enum InferenceWorkerMessage {
-    Generate(InferenceRequest),
+pub(in crate::model_runner::server) enum InferenceWorkerMessage {
+    Generate {
+        request: InferenceRequest,
+        routing_reservation: RoutingReservation,
+    },
     GetPrefixCacheTelemetry {
         response_sender: oneshot::Sender<InferenceBackendPrefixCacheTelemetry>,
     },
@@ -239,13 +243,13 @@ impl ModelRunnerService for ModelRunnerRpcService {
         let request_id = request.request_id;
         let queued_at = Instant::now();
         let routing_started_at = Instant::now();
-        let routing_decision = self
-            .request_orchestrator
-            .route_request(RequestRoutingContext {
-                input_token_ids: &request.input_token_ids,
-                input_token_count: request.input_token_ids.len(),
-                max_new_token_count: request.max_new_tokens,
-            });
+        let (routing_decision, routing_reservation) =
+            self.request_orchestrator
+                .route_request(RequestRoutingContext {
+                    input_token_ids: &request.input_token_ids,
+                    input_token_count: request.input_token_ids.len(),
+                    max_new_token_count: request.max_new_tokens,
+                });
         let routing_duration = routing_started_at.elapsed();
         for candidate in &routing_decision.candidate_diagnostics {
             info!(
@@ -263,11 +267,14 @@ impl ModelRunnerService for ModelRunnerRpcService {
         );
         let (event_sender, event_receiver) = mpsc::channel(GENERATION_EVENT_QUEUE_CAPACITY);
         self.inference_message_senders[routing_decision.backend_id.index()]
-            .send(InferenceWorkerMessage::Generate(InferenceRequest {
-                queued_at,
-                generate_text: request,
-                event_sender,
-            }))
+            .send(InferenceWorkerMessage::Generate {
+                request: InferenceRequest {
+                    queued_at,
+                    generate_text: request,
+                    event_sender,
+                },
+                routing_reservation,
+            })
             .await
             .map_err(|_| Status::unavailable("model runner inference thread stopped"))?;
         info!("Model runner queue state: request_id={request_id} status=queued");

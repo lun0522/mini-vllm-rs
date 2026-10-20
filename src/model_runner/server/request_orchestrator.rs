@@ -6,6 +6,7 @@ use anyhow::Result;
 use log::info;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::sync::watch;
 
 use super::kv_cache::PrefixCacheAffinitySnapshot;
@@ -157,9 +158,117 @@ impl RequestRoutingContext<'_> {
     }
 }
 
+/// Tracks requests routed to a backend but not yet reflected in its operational snapshot.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct BackendReservedLoad {
+    pub(super) request_count: usize,
+    pub(super) prefill_token_count: usize,
+    pub(super) cache_adjusted_prefill_token_count: usize,
+    pub(super) max_output_token_count: u64,
+}
+
+struct BackendReservations {
+    backend_loads: Vec<BackendReservedLoad>,
+}
+
+impl BackendReservations {
+    fn new(backend_count: usize) -> Self {
+        Self {
+            backend_loads: vec![BackendReservedLoad::default(); backend_count],
+        }
+    }
+
+    fn reserve(&mut self, backend_id: BackendId, load: BackendReservedLoad) {
+        let reserved_load = &mut self.backend_loads[backend_id.index()];
+        reserved_load.request_count = reserved_load
+            .request_count
+            .saturating_add(load.request_count);
+        reserved_load.prefill_token_count = reserved_load
+            .prefill_token_count
+            .saturating_add(load.prefill_token_count);
+        reserved_load.cache_adjusted_prefill_token_count = reserved_load
+            .cache_adjusted_prefill_token_count
+            .saturating_add(load.cache_adjusted_prefill_token_count);
+        reserved_load.max_output_token_count = reserved_load
+            .max_output_token_count
+            .saturating_add(load.max_output_token_count);
+    }
+
+    fn release(&mut self, backend_id: BackendId, load: BackendReservedLoad) {
+        let reserved_load = &mut self.backend_loads[backend_id.index()];
+        reserved_load.request_count = reserved_load
+            .request_count
+            .checked_sub(load.request_count)
+            .expect("released request count exceeds reserved request count");
+        reserved_load.prefill_token_count = reserved_load
+            .prefill_token_count
+            .checked_sub(load.prefill_token_count)
+            .expect("released prefill token count exceeds reserved prefill token count");
+        reserved_load.cache_adjusted_prefill_token_count = reserved_load
+            .cache_adjusted_prefill_token_count
+            .checked_sub(load.cache_adjusted_prefill_token_count)
+            .expect("released cache-adjusted prefill token count exceeds reserved token count");
+        reserved_load.max_output_token_count = reserved_load
+            .max_output_token_count
+            .checked_sub(load.max_output_token_count)
+            .expect("released output token count exceeds reserved output token count");
+    }
+}
+
+/// Releases a backend's reserved load when a routed request is dropped or observed by a worker.
+pub(super) struct RoutingReservation {
+    backend_id: BackendId,
+    load: Option<BackendReservedLoad>,
+    reservations: Arc<Mutex<BackendReservations>>,
+}
+
+impl RoutingReservation {
+    fn new(
+        backend_id: BackendId,
+        load: BackendReservedLoad,
+        reservations: Arc<Mutex<BackendReservations>>,
+    ) -> Self {
+        Self {
+            backend_id,
+            load: Some(load),
+            reservations,
+        }
+    }
+
+    /// Publishes the worker's updated load and removes the corresponding reservation atomically
+    /// with respect to routing decisions.
+    pub(super) fn release_after(mut self, publish_operational_state: impl FnOnce()) {
+        let load = self
+            .load
+            .take()
+            .expect("routing reservation must not be released twice");
+        let mut reservations = self
+            .reservations
+            .lock()
+            .expect("backend reservations mutex is poisoned");
+        publish_operational_state();
+        reservations.release(self.backend_id, load);
+    }
+}
+
+impl Drop for RoutingReservation {
+    fn drop(&mut self) {
+        let Some(load) = self.load.take() else {
+            return;
+        };
+        self.reservations
+            .lock()
+            .expect("backend reservations mutex is poisoned")
+            .release(self.backend_id, load);
+    }
+}
+
 /// Selects an inference backend for each request without owning or dispatching to the backend.
 pub(super) struct RequestOrchestrator {
     policy: Box<dyn BackendRoutingPolicy>,
+    // Keep critical sections over this mutex small because inference workers also acquire it to
+    // publish updated operational state and release the corresponding reservations.
+    reservations: Arc<Mutex<BackendReservations>>,
 }
 
 impl RequestOrchestrator {
@@ -196,18 +305,52 @@ impl RequestOrchestrator {
                 ))
             }
         };
-        Ok(Self { policy })
+        Ok(Self {
+            policy,
+            reservations: Arc::new(Mutex::new(BackendReservations::new(backend_count))),
+        })
     }
 
     /// Selects a backend according to the configured routing policy.
-    pub(super) fn route_request(&self, request: RequestRoutingContext<'_>) -> RoutingDecision {
-        self.policy.route_request(request)
+    pub(super) fn route_request(
+        &self,
+        request: RequestRoutingContext<'_>,
+    ) -> (RoutingDecision, RoutingReservation) {
+        let mut reservations = self
+            .reservations
+            .lock()
+            .expect("backend reservations mutex is poisoned");
+        let decision = self.policy.route_request(request);
+        let reserved_load = BackendReservedLoad::default();
+        reservations.reserve(decision.backend_id, reserved_load);
+        let reservation = RoutingReservation::new(
+            decision.backend_id,
+            reserved_load,
+            Arc::clone(&self.reservations),
+        );
+        (decision, reservation)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn backend_state_receivers(count: usize) -> Vec<BackendStateReceivers> {
+        (0..count)
+            .map(|_| {
+                let (_operational_sender, operational) =
+                    watch::channel(OperationalState::default());
+                let (_cache_affinity_sender, cache_affinity) =
+                    watch::channel(CacheAffinityState::default());
+                BackendStateReceivers {
+                    device: InferenceDevice::Cpu,
+                    operational,
+                    cache_affinity,
+                }
+            })
+            .collect()
+    }
 
     #[test]
     fn excludes_the_final_input_token_from_cache_affinity_matching() {
@@ -235,6 +378,60 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "request orchestration requires a backend"
+        );
+    }
+
+    #[test]
+    fn records_zero_reservations_without_changing_routing() {
+        let orchestrator = RequestOrchestrator::new(
+            backend_state_receivers(2),
+            RequestOrchestratorConfig {
+                routing_policy: RequestRoutingPolicy::RoundRobin,
+                throughput_profiles: vec![Default::default()],
+            },
+        )
+        .unwrap();
+        let request = RequestRoutingContext {
+            input_token_ids: &[1],
+            input_token_count: 1,
+            max_new_token_count: 1,
+        };
+
+        assert_eq!(
+            orchestrator.route_request(request).0.backend_id,
+            BackendId::from_index(0)
+        );
+        assert_eq!(
+            orchestrator.route_request(request).0.backend_id,
+            BackendId::from_index(1)
+        );
+        assert_eq!(
+            orchestrator.reservations.lock().unwrap().backend_loads,
+            vec![BackendReservedLoad::default(); 2]
+        );
+    }
+
+    #[test]
+    fn routing_reservation_releases_load_when_dropped() {
+        let backend_id = BackendId::from_index(0);
+        let load = BackendReservedLoad {
+            request_count: 1,
+            prefill_token_count: 2,
+            cache_adjusted_prefill_token_count: 3,
+            max_output_token_count: 4,
+        };
+        let reservations = Arc::new(Mutex::new(BackendReservations::new(1)));
+        reservations.lock().unwrap().reserve(backend_id, load);
+
+        drop(RoutingReservation::new(
+            backend_id,
+            load,
+            Arc::clone(&reservations),
+        ));
+
+        assert_eq!(
+            reservations.lock().unwrap().backend_loads,
+            vec![BackendReservedLoad::default()]
         );
     }
 }
