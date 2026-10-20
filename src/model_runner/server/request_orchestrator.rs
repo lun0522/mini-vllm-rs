@@ -29,6 +29,28 @@ pub(super) struct OperationalState {
     pub(super) active_remaining_max_output_token_count: usize,
 }
 
+impl OperationalState {
+    /// Includes dispatched requests not yet observed by the worker as additional queued work.
+    /// The epoch still identifies the original worker publication.
+    pub(super) fn with_reserved_load(mut self, reserved_load: BackendReservedLoad) -> Self {
+        self.queued_request_count = self
+            .queued_request_count
+            .saturating_add(reserved_load.request_count);
+        // Policies that do not estimate cache affinity reserve zero cached-prefix tokens.
+        let prefill_token_count = reserved_load
+            .prefill_token_count
+            .saturating_sub(reserved_load.cached_prefix_token_count);
+        self.queued_remaining_prefill_token_count = self
+            .queued_remaining_prefill_token_count
+            .saturating_add(prefill_token_count);
+        self.queued_remaining_max_output_token_count =
+            self.queued_remaining_max_output_token_count.saturating_add(
+                usize::try_from(reserved_load.max_output_token_count).unwrap_or(usize::MAX),
+            );
+        self
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct CacheAffinityState {
     pub(super) epoch: u64,
@@ -53,6 +75,7 @@ pub(super) struct BackendStateReceivers {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RoutingDecision {
     pub(super) backend_id: BackendId,
+    pub(super) estimated_cached_prefix_token_count: usize,
     pub(super) candidate_diagnostics: Vec<RoutingCandidateDiagnostics>,
 }
 
@@ -163,8 +186,19 @@ impl RequestRoutingContext<'_> {
 pub(super) struct BackendReservedLoad {
     pub(super) request_count: usize,
     pub(super) prefill_token_count: usize,
-    pub(super) cache_adjusted_prefill_token_count: usize,
+    pub(super) cached_prefix_token_count: usize,
     pub(super) max_output_token_count: u64,
+}
+
+impl BackendReservedLoad {
+    fn new(request: RequestRoutingContext<'_>, cached_prefix_token_count: usize) -> Self {
+        Self {
+            request_count: 1,
+            prefill_token_count: request.input_token_count,
+            cached_prefix_token_count: cached_prefix_token_count.min(request.input_token_count),
+            max_output_token_count: request.max_new_token_count,
+        }
+    }
 }
 
 struct BackendReservations {
@@ -186,9 +220,9 @@ impl BackendReservations {
         reserved_load.prefill_token_count = reserved_load
             .prefill_token_count
             .saturating_add(load.prefill_token_count);
-        reserved_load.cache_adjusted_prefill_token_count = reserved_load
-            .cache_adjusted_prefill_token_count
-            .saturating_add(load.cache_adjusted_prefill_token_count);
+        reserved_load.cached_prefix_token_count = reserved_load
+            .cached_prefix_token_count
+            .saturating_add(load.cached_prefix_token_count);
         reserved_load.max_output_token_count = reserved_load
             .max_output_token_count
             .saturating_add(load.max_output_token_count);
@@ -204,10 +238,10 @@ impl BackendReservations {
             .prefill_token_count
             .checked_sub(load.prefill_token_count)
             .expect("released prefill token count exceeds reserved prefill token count");
-        reserved_load.cache_adjusted_prefill_token_count = reserved_load
-            .cache_adjusted_prefill_token_count
-            .checked_sub(load.cache_adjusted_prefill_token_count)
-            .expect("released cache-adjusted prefill token count exceeds reserved token count");
+        reserved_load.cached_prefix_token_count = reserved_load
+            .cached_prefix_token_count
+            .checked_sub(load.cached_prefix_token_count)
+            .expect("released cached prefix token count exceeds reserved token count");
         reserved_load.max_output_token_count = reserved_load
             .max_output_token_count
             .checked_sub(load.max_output_token_count)
@@ -320,8 +354,11 @@ impl RequestOrchestrator {
             .reservations
             .lock()
             .expect("backend reservations mutex is poisoned");
-        let decision = self.policy.route_request(request);
-        let reserved_load = BackendReservedLoad::default();
+        let decision = self
+            .policy
+            .route_request(request, &reservations.backend_loads);
+        let reserved_load =
+            BackendReservedLoad::new(request, decision.estimated_cached_prefix_token_count);
         reservations.reserve(decision.backend_id, reserved_load);
         let reservation = RoutingReservation::new(
             decision.backend_id,
@@ -382,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn records_zero_reservations_without_changing_routing() {
+    fn records_request_load_and_releases_it_after_publication() {
         let orchestrator = RequestOrchestrator::new(
             backend_state_receivers(2),
             RequestOrchestratorConfig {
@@ -397,17 +434,184 @@ mod tests {
             max_new_token_count: 1,
         };
 
+        let (first_decision, first_reservation) = orchestrator.route_request(request);
+        let (second_decision, second_reservation) = orchestrator.route_request(request);
+        assert_eq!(first_decision.backend_id, BackendId::from_index(0));
+        assert_eq!(second_decision.backend_id, BackendId::from_index(1));
+        let expected_load = BackendReservedLoad {
+            request_count: 1,
+            prefill_token_count: 1,
+            cached_prefix_token_count: 0,
+            max_output_token_count: 1,
+        };
         assert_eq!(
-            orchestrator.route_request(request).0.backend_id,
-            BackendId::from_index(0)
+            orchestrator.reservations.lock().unwrap().backend_loads,
+            vec![expected_load; 2]
         );
-        assert_eq!(
-            orchestrator.route_request(request).0.backend_id,
-            BackendId::from_index(1)
-        );
+        first_reservation.release_after(|| {
+            // Publication happens before the reservation is removed.
+            assert!(orchestrator.reservations.try_lock().is_err());
+        });
+        drop(second_reservation);
         assert_eq!(
             orchestrator.reservations.lock().unwrap().backend_loads,
             vec![BackendReservedLoad::default(); 2]
+        );
+    }
+
+    #[test]
+    fn load_policies_account_for_unpublished_routed_requests() {
+        for routing_policy in [
+            RequestRoutingPolicy::LeastRequests,
+            RequestRoutingPolicy::LeastEstimatedWork,
+            RequestRoutingPolicy::CacheAwareLeastEstimatedWork,
+        ] {
+            let orchestrator = RequestOrchestrator::new(
+                backend_state_receivers(2),
+                RequestOrchestratorConfig {
+                    routing_policy,
+                    throughput_profiles: vec![Default::default()],
+                },
+            )
+            .unwrap();
+            let request = RequestRoutingContext {
+                input_token_ids: &[1, 2],
+                input_token_count: 2,
+                max_new_token_count: 4,
+            };
+            let (first, reservation) = orchestrator.route_request(request);
+            assert_eq!(first.backend_id, BackendId::from_index(0));
+            let (second, second_reservation) = orchestrator.route_request(request);
+            assert_eq!(second.backend_id, BackendId::from_index(1));
+            drop(reservation);
+            // Backend 1 was selected more recently, but its outstanding reservation must also
+            // outweigh backend 0's now-empty load without any worker snapshot publication.
+            let (third, third_reservation) = orchestrator.route_request(request);
+            assert_eq!(third.backend_id, BackendId::from_index(0));
+            drop(third_reservation);
+            drop(second_reservation);
+        }
+    }
+
+    #[test]
+    fn clamps_reserved_cached_prefix_to_input_length() {
+        let request = RequestRoutingContext {
+            input_token_ids: &[1, 2, 3, 4],
+            input_token_count: 4,
+            max_new_token_count: 8,
+        };
+        for (cached_tokens, expected_cached_tokens) in [(0, 0), (2, 2), (4, 4), (5, 4)] {
+            assert_eq!(
+                BackendReservedLoad::new(request, cached_tokens),
+                BackendReservedLoad {
+                    request_count: 1,
+                    prefill_token_count: 4,
+                    cached_prefix_token_count: expected_cached_tokens,
+                    max_output_token_count: 8,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn releasing_one_reservation_preserves_other_load_on_the_same_backend() {
+        let backend_id = BackendId::from_index(0);
+        let first_load = BackendReservedLoad {
+            request_count: 1,
+            prefill_token_count: 10,
+            cached_prefix_token_count: 4,
+            max_output_token_count: 8,
+        };
+        let second_load = BackendReservedLoad {
+            request_count: 1,
+            prefill_token_count: 20,
+            cached_prefix_token_count: 6,
+            max_output_token_count: 16,
+        };
+        let reservations = Arc::new(Mutex::new(BackendReservations::new(1)));
+        reservations.lock().unwrap().reserve(backend_id, first_load);
+        let first = RoutingReservation::new(backend_id, first_load, Arc::clone(&reservations));
+        reservations
+            .lock()
+            .unwrap()
+            .reserve(backend_id, second_load);
+        let second = RoutingReservation::new(backend_id, second_load, Arc::clone(&reservations));
+        assert_eq!(
+            reservations.lock().unwrap().backend_loads,
+            vec![BackendReservedLoad {
+                request_count: 2,
+                prefill_token_count: 30,
+                cached_prefix_token_count: 10,
+                max_output_token_count: 24,
+            }]
+        );
+
+        drop(first);
+        assert_eq!(
+            reservations.lock().unwrap().backend_loads,
+            vec![second_load]
+        );
+
+        drop(second);
+        assert_eq!(
+            reservations.lock().unwrap().backend_loads,
+            vec![BackendReservedLoad::default()]
+        );
+    }
+
+    #[test]
+    fn published_load_replaces_reservation_without_double_counting() {
+        let (operational_sender, operational) = watch::channel(OperationalState::default());
+        let (_cache_sender, cache_affinity) = watch::channel(CacheAffinityState::default());
+        let orchestrator = RequestOrchestrator::new(
+            vec![BackendStateReceivers {
+                device: InferenceDevice::Cpu,
+                operational,
+                cache_affinity,
+            }],
+            RequestOrchestratorConfig {
+                routing_policy: RequestRoutingPolicy::LeastEstimatedWork,
+                throughput_profiles: vec![Default::default()],
+            },
+        )
+        .unwrap();
+        let request = RequestRoutingContext {
+            input_token_ids: &[1, 2, 3],
+            input_token_count: 3,
+            max_new_token_count: 5,
+        };
+        let (_, first_reservation) = orchestrator.route_request(request);
+        let (before, probe_reservation) = orchestrator.route_request(request);
+        let before = &before.candidate_diagnostics[0];
+        assert_eq!(before.estimated_prefill_token_count, Some(6));
+        assert_eq!(before.estimated_decode_token_count, Some(10));
+        drop(probe_reservation);
+
+        let published_state = OperationalState {
+            epoch: 1,
+            queued_request_count: 1,
+            queued_remaining_prefill_token_count: 3,
+            queued_remaining_max_output_token_count: 5,
+            ..Default::default()
+        };
+        first_reservation.release_after(|| {
+            operational_sender.send_replace(published_state);
+        });
+        assert_eq!(
+            orchestrator.reservations.lock().unwrap().backend_loads,
+            vec![BackendReservedLoad::default()]
+        );
+
+        let (after, _reservation) = orchestrator.route_request(request);
+        let after = &after.candidate_diagnostics[0];
+        assert_eq!(after.operational_state, Some(published_state));
+        assert_eq!(
+            after.estimated_prefill_token_count,
+            before.estimated_prefill_token_count
+        );
+        assert_eq!(
+            after.estimated_decode_token_count,
+            before.estimated_decode_token_count
         );
     }
 
@@ -417,7 +621,7 @@ mod tests {
         let load = BackendReservedLoad {
             request_count: 1,
             prefill_token_count: 2,
-            cache_adjusted_prefill_token_count: 3,
+            cached_prefix_token_count: 1,
             max_output_token_count: 4,
         };
         let reservations = Arc::new(Mutex::new(BackendReservations::new(1)));
