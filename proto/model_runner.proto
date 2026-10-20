@@ -100,22 +100,24 @@ message GenerateTextEvent {
 }
 
 message TextGenerationStats {
+  // Request-handler-assigned identifier, matching the request ID in server logs.
+  uint64 request_id = 1;
   // One-based process-local identifier of the inference backend that served the request.
-  uint64 backend_id = 1;
+  uint64 backend_id = 2;
   // Observable reason that successful generation finished.
-  TextGenerationFinishReason finish_reason = 2;
+  TextGenerationFinishReason finish_reason = 3;
   // Number of tokens in the encoded, formatted input prompt.
-  uint64 input_token_count = 3;
+  uint64 input_token_count = 4;
   // Number of generated tokens, excluding the terminal end-of-sequence token.
-  uint64 output_token_count = 4;
+  uint64 output_token_count = 5;
   // Request latency and model-execution phase durations.
-  GenerationTiming timing = 5;
+  GenerationTiming timing = 6;
   // Speculative-decoding statistics; absent when no draft model is configured.
-  DraftTokenStats draft_token_stats = 6;
+  DraftTokenStats draft_token_stats = 7;
   // Prefix-cache statistics for the target model.
-  PrefixCacheStats target_prefix_cache_stats = 7;
+  PrefixCacheStats target_prefix_cache_stats = 8;
   // Prefix-cache statistics for the draft model; absent when no draft model is configured.
-  PrefixCacheStats draft_prefix_cache_stats = 8;
+  PrefixCacheStats draft_prefix_cache_stats = 9;
 }
 
 message PrefixCacheStats {

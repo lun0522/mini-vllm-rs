@@ -2,15 +2,13 @@ use crate::model_runner::BackendThroughput;
 use crate::model_runner::BackendThroughputProfile;
 use crate::model_runner::InferenceDevice;
 use std::cmp::Reverse;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-use std::sync::Mutex;
 use tokio::sync::watch;
 
 use super::request_orchestrator::BackendReservedLoad;
 use super::request_orchestrator::BackendStateReceivers;
 use super::request_orchestrator::CacheAffinityState;
 use super::request_orchestrator::OperationalState;
+use super::request_orchestrator::OrchestratorRoutingState;
 use super::request_orchestrator::RequestRoutingContext;
 use super::request_orchestrator::RoutingCandidateDiagnostics;
 use super::request_orchestrator::RoutingDecision;
@@ -20,52 +18,32 @@ pub(super) trait BackendRoutingPolicy: Send + Sync {
     fn route_request(
         &self,
         request: RequestRoutingContext<'_>,
-        reserved_loads: &[BackendReservedLoad],
+        routing_state: &mut OrchestratorRoutingState,
     ) -> RoutingDecision;
 }
 
-pub(super) struct RoundRobinPolicy {
-    backend_count: usize,
-    next_backend_index: AtomicUsize,
-}
-
-impl RoundRobinPolicy {
-    pub(super) fn new(backend_count: usize) -> Self {
-        Self {
-            backend_count,
-            next_backend_index: AtomicUsize::new(0),
-        }
-    }
-}
+pub(super) struct RoundRobinPolicy;
 
 impl BackendRoutingPolicy for RoundRobinPolicy {
     fn route_request(
         &self,
         _request: RequestRoutingContext<'_>,
-        _reserved_loads: &[BackendReservedLoad],
+        routing_state: &mut OrchestratorRoutingState,
     ) -> RoutingDecision {
-        let backend_index =
-            self.next_backend_index.fetch_add(1, Ordering::Relaxed) % self.backend_count;
-        RoutingDecision {
-            backend_id: BackendId::from_index(backend_index),
+        // Equal scores let least-recently-selected tie-breaking produce cyclic order.
+        route_by_score(routing_state, |_, _, _| BackendScore {
+            score: 0,
             estimated_cached_prefix_token_count: 0,
-            candidate_diagnostics: (0..self.backend_count)
-                .map(|backend_index| {
-                    RoutingCandidateDiagnostics::new(BackendId::from_index(backend_index))
-                })
-                .collect(),
-        }
+        })
     }
 }
 
 pub(super) struct LeastRequestsPolicy {
     operational_state_receivers: Vec<watch::Receiver<OperationalState>>,
-    selection_history: Mutex<BackendSelectionHistory>,
 }
 
 impl LeastRequestsPolicy {
     pub(super) fn new(backend_state_receivers: Vec<BackendStateReceivers>) -> Self {
-        let backend_count = backend_state_receivers.len();
         Self {
             operational_state_receivers: backend_state_receivers
                 .into_iter()
@@ -80,7 +58,6 @@ impl LeastRequestsPolicy {
                     },
                 )
                 .collect(),
-            selection_history: Mutex::new(BackendSelectionHistory::new(backend_count)),
         }
     }
 }
@@ -89,15 +66,14 @@ impl BackendRoutingPolicy for LeastRequestsPolicy {
     fn route_request(
         &self,
         _request: RequestRoutingContext<'_>,
-        reserved_loads: &[BackendReservedLoad],
+        routing_state: &mut OrchestratorRoutingState,
     ) -> RoutingDecision {
         route_by_score(
-            self.operational_state_receivers.len(),
-            &self.selection_history,
-            |backend_index, diagnostics| {
+            routing_state,
+            |backend_index, reserved_load, diagnostics| {
                 let state = *self.operational_state_receivers[backend_index].borrow();
                 diagnostics.operational_state = Some(state);
-                let state = state.with_reserved_load(reserved_loads[backend_index]);
+                let state = state.with_reserved_load(reserved_load);
                 let score = state
                     .queued_request_count
                     .saturating_add(state.active_request_count);
@@ -113,7 +89,6 @@ impl BackendRoutingPolicy for LeastRequestsPolicy {
 pub(super) struct LeastEstimatedWorkPolicy {
     operational_state_receivers: Vec<BackendOperationalStateReceiver>,
     throughput_profiles: BackendThroughputProfiles,
-    selection_history: Mutex<BackendSelectionHistory>,
 }
 
 impl LeastEstimatedWorkPolicy {
@@ -121,7 +96,6 @@ impl LeastEstimatedWorkPolicy {
         backend_state_receivers: Vec<BackendStateReceivers>,
         throughput_profiles: Vec<BackendThroughputProfile>,
     ) -> Self {
-        let backend_count = backend_state_receivers.len();
         Self {
             operational_state_receivers: backend_state_receivers
                 .into_iter()
@@ -140,7 +114,6 @@ impl LeastEstimatedWorkPolicy {
                 )
                 .collect(),
             throughput_profiles: BackendThroughputProfiles::new(throughput_profiles),
-            selection_history: Mutex::new(BackendSelectionHistory::new(backend_count)),
         }
     }
 }
@@ -149,18 +122,17 @@ impl BackendRoutingPolicy for LeastEstimatedWorkPolicy {
     fn route_request(
         &self,
         request: RequestRoutingContext<'_>,
-        reserved_loads: &[BackendReservedLoad],
+        routing_state: &mut OrchestratorRoutingState,
     ) -> RoutingDecision {
         // Estimate completion time by pricing prefill and decode work at their independently
         // measured rates for the backend and request workload.
         route_by_score(
-            self.operational_state_receivers.len(),
-            &self.selection_history,
-            |backend_index, diagnostics| {
+            routing_state,
+            |backend_index, reserved_load, diagnostics| {
                 let backend = &self.operational_state_receivers[backend_index];
                 let state = *backend.operational_state_receiver.borrow();
                 diagnostics.operational_state = Some(state);
-                let state = state.with_reserved_load(reserved_loads[backend_index]);
+                let state = state.with_reserved_load(reserved_load);
                 let estimated_work = EstimatedTokenWork::new(
                     &state, request, /* cached_prefix_token_count */ 0,
                 );
@@ -168,8 +140,10 @@ impl BackendRoutingPolicy for LeastEstimatedWorkPolicy {
                     .throughput_profiles
                     .estimate_throughput(request, backend.device);
                 estimated_work.populate_diagnostics(diagnostics, throughput);
+                let estimated_duration_ns = estimated_work.estimate_duration(throughput);
+                diagnostics.estimated_duration_ns = Some(estimated_duration_ns);
                 BackendScore {
-                    score: estimated_work.estimate_duration(throughput),
+                    score: estimated_duration_ns,
                     estimated_cached_prefix_token_count: 0,
                 }
             },
@@ -179,18 +153,15 @@ impl BackendRoutingPolicy for LeastEstimatedWorkPolicy {
 
 pub(super) struct MostCachedPrefixPolicy {
     cache_affinity_state_receivers: Vec<watch::Receiver<CacheAffinityState>>,
-    selection_history: Mutex<BackendSelectionHistory>,
 }
 
 impl MostCachedPrefixPolicy {
     pub(super) fn new(backend_state_receivers: Vec<BackendStateReceivers>) -> Self {
-        let backend_count = backend_state_receivers.len();
         Self {
             cache_affinity_state_receivers: backend_state_receivers
                 .into_iter()
                 .map(|backend| backend.cache_affinity)
                 .collect(),
-            selection_history: Mutex::new(BackendSelectionHistory::new(backend_count)),
         }
     }
 }
@@ -199,12 +170,11 @@ impl BackendRoutingPolicy for MostCachedPrefixPolicy {
     fn route_request(
         &self,
         request: RequestRoutingContext<'_>,
-        _reserved_loads: &[BackendReservedLoad],
+        routing_state: &mut OrchestratorRoutingState,
     ) -> RoutingDecision {
         route_by_score(
-            self.cache_affinity_state_receivers.len(),
-            &self.selection_history,
-            |backend_index, diagnostics| {
+            routing_state,
+            |backend_index, _reserved_load, diagnostics| {
                 let state = self.cache_affinity_state_receivers[backend_index].borrow();
                 let estimated_cached_prefix_token_count =
                     state.prefix_cache.as_ref().map_or(0, |prefix_cache| {
@@ -225,7 +195,6 @@ impl BackendRoutingPolicy for MostCachedPrefixPolicy {
 pub(super) struct CacheAwareLeastEstimatedWorkPolicy {
     backend_state_receivers: Vec<BackendStateReceiver>,
     throughput_profiles: BackendThroughputProfiles,
-    selection_history: Mutex<BackendSelectionHistory>,
 }
 
 impl CacheAwareLeastEstimatedWorkPolicy {
@@ -233,7 +202,6 @@ impl CacheAwareLeastEstimatedWorkPolicy {
         backend_state_receivers: Vec<BackendStateReceivers>,
         throughput_profiles: Vec<BackendThroughputProfile>,
     ) -> Self {
-        let backend_count = backend_state_receivers.len();
         Self {
             backend_state_receivers: backend_state_receivers
                 .into_iter()
@@ -244,7 +212,6 @@ impl CacheAwareLeastEstimatedWorkPolicy {
                 })
                 .collect(),
             throughput_profiles: BackendThroughputProfiles::new(throughput_profiles),
-            selection_history: Mutex::new(BackendSelectionHistory::new(backend_count)),
         }
     }
 }
@@ -253,19 +220,17 @@ impl BackendRoutingPolicy for CacheAwareLeastEstimatedWorkPolicy {
     fn route_request(
         &self,
         request: RequestRoutingContext<'_>,
-        reserved_loads: &[BackendReservedLoad],
+        routing_state: &mut OrchestratorRoutingState,
     ) -> RoutingDecision {
         // This uses the same phase-specific completion-time estimate as least-estimated-work,
         // but excludes the reusable cached prefix from the incoming request's prefill work.
         route_by_score(
-            self.backend_state_receivers.len(),
-            &self.selection_history,
-            |backend_index, diagnostics| {
+            routing_state,
+            |backend_index, reserved_load, diagnostics| {
                 let backend = &self.backend_state_receivers[backend_index];
                 let operational_state = *backend.operational_state_receiver.borrow();
                 diagnostics.operational_state = Some(operational_state);
-                let operational_state =
-                    operational_state.with_reserved_load(reserved_loads[backend_index]);
+                let operational_state = operational_state.with_reserved_load(reserved_load);
                 let cache_affinity_state = backend.cache_affinity_state_receiver.borrow();
                 let estimated_cached_prefix_token_count = cache_affinity_state
                     .prefix_cache
@@ -285,8 +250,10 @@ impl BackendRoutingPolicy for CacheAwareLeastEstimatedWorkPolicy {
                 diagnostics.cache_affinity_state_epoch = Some(cache_affinity_state.epoch);
                 diagnostics.cached_prefix_token_count = Some(estimated_cached_prefix_token_count);
                 estimated_work.populate_diagnostics(diagnostics, throughput);
+                let estimated_duration_ns = estimated_work.estimate_duration(throughput);
+                diagnostics.estimated_duration_ns = Some(estimated_duration_ns);
                 BackendScore {
-                    score: estimated_work.estimate_duration(throughput),
+                    score: estimated_duration_ns,
                     estimated_cached_prefix_token_count,
                 }
             },
@@ -300,20 +267,19 @@ struct BackendScore<Score> {
 }
 
 fn route_by_score<Score: Ord>(
-    backend_count: usize,
-    selection_history: &Mutex<BackendSelectionHistory>,
-    scorer: impl Fn(usize, &mut RoutingCandidateDiagnostics) -> BackendScore<Score>,
+    routing_state: &mut OrchestratorRoutingState,
+    scorer: impl Fn(usize, BackendReservedLoad, &mut RoutingCandidateDiagnostics) -> BackendScore<Score>,
 ) -> RoutingDecision {
-    let mut selection_history = selection_history
-        .lock()
-        .expect("backend selection history mutex is poisoned");
-    let scored_candidates: Vec<_> = (0..backend_count)
-        .map(|backend_index| {
+    let scored_candidates: Vec<_> = routing_state
+        .backends
+        .iter()
+        .enumerate()
+        .map(|(backend_index, backend)| {
             let mut diagnostics =
                 RoutingCandidateDiagnostics::new(BackendId::from_index(backend_index));
-            diagnostics.last_selected_epoch =
-                Some(selection_history.last_selected_epoch[backend_index]);
-            let score = scorer(backend_index, &mut diagnostics);
+            diagnostics.reserved_load = Some(backend.reserved_load);
+            diagnostics.last_selected_epoch = Some(backend.last_selected_epoch);
+            let score = scorer(backend_index, backend.reserved_load, &mut diagnostics);
             (score, diagnostics)
         })
         .collect();
@@ -323,15 +289,17 @@ fn route_by_score<Score: Ord>(
         .min_by(
             |(left_index, (left_score, _)), (right_index, (right_score, _))| {
                 left_score.score.cmp(&right_score.score).then_with(|| {
-                    selection_history.last_selected_epoch[*left_index]
-                        .cmp(&selection_history.last_selected_epoch[*right_index])
+                    routing_state.backends[*left_index]
+                        .last_selected_epoch
+                        .cmp(&routing_state.backends[*right_index].last_selected_epoch)
                 })
             },
         )
         .map(|(backend_index, _)| backend_index)
         .expect("the orchestrator always has at least one backend");
-    selection_history.record_selection(backend_index);
+    routing_state.record_backend_selection(backend_index);
     RoutingDecision {
+        routing_epoch: routing_state.selection_epoch,
         backend_id: BackendId::from_index(backend_index),
         estimated_cached_prefix_token_count: scored_candidates[backend_index]
             .0
@@ -440,26 +408,6 @@ impl EstimatedTokenWork {
     }
 }
 
-/// Tracks logical selection times for least-recently-selected tie-breaking.
-struct BackendSelectionHistory {
-    selection_epoch: u64,
-    last_selected_epoch: Vec<u64>,
-}
-
-impl BackendSelectionHistory {
-    fn new(backend_count: usize) -> Self {
-        Self {
-            selection_epoch: 0,
-            last_selected_epoch: vec![0; backend_count],
-        }
-    }
-
-    fn record_selection(&mut self, backend_index: usize) {
-        self.selection_epoch += 1;
-        self.last_selected_epoch[backend_index] = self.selection_epoch;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,24 +473,22 @@ mod tests {
 
     #[test]
     fn load_policies_score_reserved_work() {
+        let mut routing_state = OrchestratorRoutingState::new(2);
         let request = RequestRoutingContext {
             input_token_ids: &[1, 2],
             input_token_count: 2,
             max_new_token_count: 3,
         };
-        let reserved_loads = [
-            BackendReservedLoad {
-                request_count: 1,
-                prefill_token_count: 10,
-                cached_prefix_token_count: 6,
-                max_output_token_count: 7,
-            },
-            BackendReservedLoad::default(),
-        ];
+        routing_state.backends[0].reserved_load = BackendReservedLoad {
+            request_count: 1,
+            prefill_token_count: 10,
+            cached_prefix_token_count: 6,
+            max_output_token_count: 7,
+        };
         let least_requests = LeastRequestsPolicy::new(backend_state_receivers(2));
         assert_eq!(
             least_requests
-                .route_request(request, &reserved_loads)
+                .route_request(request, &mut routing_state)
                 .backend_id,
             BackendId::from_index(1)
         );
@@ -565,9 +511,10 @@ mod tests {
             ),
         ];
         for (policy, cached_prefix_token_count, expected_prefill) in policies {
-            let mut reserved_loads = reserved_loads;
-            reserved_loads[0].cached_prefix_token_count = cached_prefix_token_count;
-            let decision = policy.route_request(request, &reserved_loads);
+            routing_state.backends[0]
+                .reserved_load
+                .cached_prefix_token_count = cached_prefix_token_count;
+            let decision = policy.route_request(request, &mut routing_state);
             assert_eq!(decision.backend_id, BackendId::from_index(1));
             let diagnostics = &decision.candidate_diagnostics[0];
             assert_eq!(
@@ -584,14 +531,15 @@ mod tests {
 
     #[test]
     fn routes_requests_in_round_robin_order() {
-        let policy = RoundRobinPolicy::new(2);
+        let mut routing_state = OrchestratorRoutingState::new(2);
+        let policy = RoundRobinPolicy;
 
-        let backend_ids: Vec<_> = (0..5)
-            .map(|_| {
-                policy
-                    .route_request(routing_context(1), &[BackendReservedLoad::default(); 2])
-                    .backend_id
-            })
+        let decisions: Vec<_> = (0..5)
+            .map(|_| policy.route_request(routing_context(1), &mut routing_state))
+            .collect();
+        let backend_ids: Vec<_> = decisions
+            .iter()
+            .map(|decision| decision.backend_id)
             .collect();
 
         assert_eq!(
@@ -604,15 +552,51 @@ mod tests {
                 BackendId::from_index(0),
             ]
         );
+        assert_eq!(
+            decisions
+                .iter()
+                .map(|decision| decision.routing_epoch)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert_eq!(routing_state.selection_epoch, 5);
+    }
+
+    #[test]
+    fn policies_share_the_orchestrators_selection_history() {
+        let mut routing_state = OrchestratorRoutingState::new(2);
+        let policies: Vec<Box<dyn BackendRoutingPolicy>> = vec![
+            Box::new(RoundRobinPolicy),
+            Box::new(LeastRequestsPolicy::new(backend_state_receivers(2))),
+            Box::new(LeastEstimatedWorkPolicy::new(
+                backend_state_receivers(2),
+                default_throughput_profiles(),
+            )),
+            Box::new(MostCachedPrefixPolicy::new(backend_state_receivers(2))),
+            Box::new(CacheAwareLeastEstimatedWorkPolicy::new(
+                backend_state_receivers(2),
+                default_throughput_profiles(),
+            )),
+        ];
+
+        for (index, policy) in policies.iter().enumerate() {
+            let decision = policy.route_request(routing_context(1), &mut routing_state);
+            assert_eq!(decision.routing_epoch, index as u64 + 1);
+            assert_eq!(decision.backend_id, BackendId::from_index(index % 2));
+            assert_eq!(
+                routing_state.backends[index % 2].last_selected_epoch,
+                decision.routing_epoch
+            );
+        }
     }
 
     #[test]
     fn routes_every_request_to_the_only_backend() {
-        let policy = RoundRobinPolicy::new(1);
+        let mut routing_state = OrchestratorRoutingState::new(1);
+        let policy = RoundRobinPolicy;
 
         for _ in 0..3 {
-            let decision =
-                policy.route_request(routing_context(1), &[BackendReservedLoad::default(); 2]);
+            let decision = policy.route_request(routing_context(1), &mut routing_state);
             assert_eq!(decision.backend_id, BackendId::from_index(0));
             assert_eq!(decision.candidate_diagnostics.len(), 1);
             assert_eq!(
@@ -624,6 +608,7 @@ mod tests {
 
     #[test]
     fn least_requests_observes_latest_operational_state_publications() {
+        let mut routing_state = OrchestratorRoutingState::new(2);
         let (operational_sender, first_operational) = watch::channel(OperationalState::default());
         let (_first_cache_affinity_sender, first_cache_affinity) =
             watch::channel(CacheAffinityState::default());
@@ -641,7 +626,7 @@ mod tests {
 
         assert_eq!(
             policy
-                .route_request(routing_context(1), &[BackendReservedLoad::default(); 2])
+                .route_request(routing_context(1), &mut routing_state)
                 .backend_id,
             BackendId::from_index(0)
         );
@@ -653,8 +638,7 @@ mod tests {
             ..Default::default()
         });
 
-        let decision =
-            policy.route_request(routing_context(1), &[BackendReservedLoad::default(); 2]);
+        let decision = policy.route_request(routing_context(1), &mut routing_state);
         assert_eq!(decision.backend_id, BackendId::from_index(1));
         assert_eq!(
             decision.candidate_diagnostics[0]
@@ -667,6 +651,7 @@ mod tests {
 
     #[test]
     fn routes_to_the_backend_with_the_fewest_requests() {
+        let mut routing_state = OrchestratorRoutingState::new(2);
         let policy = LeastRequestsPolicy::new(vec![
             backend_state_receiver(OperationalState {
                 queued_request_count: 2,
@@ -682,7 +667,7 @@ mod tests {
 
         assert_eq!(
             policy
-                .route_request(routing_context(1), &[BackendReservedLoad::default(); 2])
+                .route_request(routing_context(1), &mut routing_state)
                 .backend_id,
             BackendId::from_index(1)
         );
@@ -690,12 +675,13 @@ mod tests {
 
     #[test]
     fn least_requests_breaks_ties_by_least_recent_selection() {
+        let mut routing_state = OrchestratorRoutingState::new(2);
         let policy = LeastRequestsPolicy::new(backend_state_receivers(2));
 
         let backend_ids: Vec<_> = (0..4)
             .map(|_| {
                 policy
-                    .route_request(routing_context(1), &[BackendReservedLoad::default(); 2])
+                    .route_request(routing_context(1), &mut routing_state)
                     .backend_id
             })
             .collect();
@@ -713,6 +699,7 @@ mod tests {
 
     #[test]
     fn least_estimated_work_accounts_for_backend_throughput() {
+        let mut routing_state = OrchestratorRoutingState::new(2);
         let policy = LeastEstimatedWorkPolicy::new(
             vec![
                 backend_state_receiver_for_device(
@@ -741,7 +728,7 @@ mod tests {
         // The GPU's higher phase-specific rates outweigh its larger queued workload.
         assert_eq!(
             policy
-                .route_request(routing_context(100), &[BackendReservedLoad::default(); 2])
+                .route_request(routing_context(100), &mut routing_state)
                 .backend_id,
             BackendId::from_index(1)
         );
@@ -778,6 +765,7 @@ mod tests {
 
     #[test]
     fn least_estimated_work_uses_the_selected_throughput_profile() {
+        let mut routing_state = OrchestratorRoutingState::new(2);
         let policy = LeastEstimatedWorkPolicy::new(
             vec![
                 backend_state_receiver_for_device(
@@ -803,7 +791,7 @@ mod tests {
                         input_token_count: 10,
                         max_new_token_count: 10,
                     },
-                    &[BackendReservedLoad::default(); 2]
+                    &mut routing_state
                 )
                 .backend_id,
             BackendId::from_index(0)
@@ -816,7 +804,7 @@ mod tests {
                         input_token_count: 100,
                         max_new_token_count: 100,
                     },
-                    &[BackendReservedLoad::default(); 2]
+                    &mut routing_state
                 )
                 .backend_id,
             BackendId::from_index(1)
@@ -825,6 +813,7 @@ mod tests {
 
     #[test]
     fn least_estimated_work_prices_prefill_and_decode_at_independent_rates() {
+        let mut routing_state = OrchestratorRoutingState::new(2);
         for (input_token_count, max_new_token_count, expected_backend_index) in
             [(100, 1, 0), (1, 100, 1)]
         {
@@ -847,24 +836,37 @@ mod tests {
                 )],
             );
 
+            let decision = policy.route_request(
+                RequestRoutingContext {
+                    input_token_ids: &[],
+                    input_token_count,
+                    max_new_token_count,
+                },
+                &mut routing_state,
+            );
             assert_eq!(
-                policy
-                    .route_request(
-                        RequestRoutingContext {
-                            input_token_ids: &[],
-                            input_token_count,
-                            max_new_token_count,
-                        },
-                        &[BackendReservedLoad::default(); 2]
-                    )
-                    .backend_id,
+                decision.backend_id,
                 BackendId::from_index(expected_backend_index)
             );
+            for candidate in &decision.candidate_diagnostics {
+                let expected_ns = if candidate.backend_id == BackendId::from_index(0) {
+                    input_token_count as u128 * 1_000_000_000 / 100
+                        + max_new_token_count as u128 * 1_000_000_000
+                } else {
+                    input_token_count as u128 * 1_000_000_000
+                        + max_new_token_count as u128 * 1_000_000_000 / 100
+                };
+                assert_eq!(candidate.estimated_duration_ns, Some(expected_ns));
+                assert!(candidate
+                    .to_string()
+                    .contains(&format!("estimated_duration_ns={expected_ns}")));
+            }
         }
     }
 
     #[test]
     fn least_estimated_work_breaks_equal_scores_by_least_recent_selection() {
+        let mut routing_state = OrchestratorRoutingState::new(2);
         let policy = LeastEstimatedWorkPolicy::new(
             vec![
                 backend_state_receiver_for_device(
@@ -882,7 +884,7 @@ mod tests {
         let backend_ids: Vec<_> = (0..4)
             .map(|_| {
                 policy
-                    .route_request(routing_context(1), &[BackendReservedLoad::default(); 2])
+                    .route_request(routing_context(1), &mut routing_state)
                     .backend_id
             })
             .collect();
@@ -900,10 +902,11 @@ mod tests {
 
     #[test]
     fn most_cached_prefix_breaks_equal_matches_by_least_recent_selection() {
+        let mut routing_state = OrchestratorRoutingState::new(2);
         let policy = MostCachedPrefixPolicy::new(backend_state_receivers(2));
 
         let decisions: Vec<_> = (0..4)
-            .map(|_| policy.route_request(routing_context(1), &[BackendReservedLoad::default(); 2]))
+            .map(|_| policy.route_request(routing_context(1), &mut routing_state))
             .collect();
         let backend_ids: Vec<_> = decisions
             .iter()
@@ -928,6 +931,7 @@ mod tests {
 
     #[test]
     fn cache_aware_least_estimated_work_accounts_for_backend_load() {
+        let mut routing_state = OrchestratorRoutingState::new(2);
         let policy = CacheAwareLeastEstimatedWorkPolicy::new(
             vec![
                 backend_state_receiver(OperationalState {
@@ -944,7 +948,7 @@ mod tests {
             max_new_token_count: 5,
         };
 
-        let decision = policy.route_request(request, &[BackendReservedLoad::default(); 2]);
+        let decision = policy.route_request(request, &mut routing_state);
 
         // Backend 0: 20 existing + 10 input + 5 output = 35 tokens.
         // Backend 1: 10 input + 5 output = 15 tokens.
@@ -953,6 +957,7 @@ mod tests {
 
     #[test]
     fn cache_aware_least_estimated_work_accounts_for_backend_throughput() {
+        let mut routing_state = OrchestratorRoutingState::new(2);
         let policy = CacheAwareLeastEstimatedWorkPolicy::new(
             vec![
                 backend_state_receiver_for_device(
@@ -975,7 +980,7 @@ mod tests {
             max_new_token_count: 5,
         };
 
-        let decision = policy.route_request(request, &[BackendReservedLoad::default(); 2]);
+        let decision = policy.route_request(request, &mut routing_state);
 
         // The GPU's higher phase-specific rates more than offset the CPU's small load.
         assert_eq!(decision.backend_id, BackendId::from_index(1));
@@ -983,6 +988,7 @@ mod tests {
 
     #[test]
     fn cache_aware_least_estimated_work_uses_the_selected_throughput_profile() {
+        let mut routing_state = OrchestratorRoutingState::new(2);
         let policy = CacheAwareLeastEstimatedWorkPolicy::new(
             vec![
                 backend_state_receiver_for_device(
@@ -1003,24 +1009,38 @@ mod tests {
         for (input_token_count, max_new_token_count, expected_backend_index) in
             [(10, 10, 0), (100, 100, 1)]
         {
+            let decision = policy.route_request(
+                RequestRoutingContext {
+                    input_token_ids: &[],
+                    input_token_count,
+                    max_new_token_count,
+                },
+                &mut routing_state,
+            );
             assert_eq!(
-                policy
-                    .route_request(
-                        RequestRoutingContext {
-                            input_token_ids: &[],
-                            input_token_count,
-                            max_new_token_count,
-                        },
-                        &[BackendReservedLoad::default(); 2]
-                    )
-                    .backend_id,
+                decision.backend_id,
                 BackendId::from_index(expected_backend_index)
             );
+            for candidate in &decision.candidate_diagnostics {
+                let rate = if candidate.backend_id == decision.backend_id {
+                    10
+                } else {
+                    1
+                };
+                assert_eq!(
+                    candidate.estimated_duration_ns,
+                    Some(
+                        (input_token_count as u128 + max_new_token_count as u128) * 1_000_000_000
+                            / rate
+                    ),
+                );
+            }
         }
     }
 
     #[test]
     fn cache_aware_least_estimated_work_breaks_equal_scores_by_least_recent_selection() {
+        let mut routing_state = OrchestratorRoutingState::new(2);
         let policy = CacheAwareLeastEstimatedWorkPolicy::new(
             backend_state_receivers(2),
             default_throughput_profiles(),
@@ -1029,7 +1049,7 @@ mod tests {
         let backend_ids: Vec<_> = (0..4)
             .map(|_| {
                 policy
-                    .route_request(routing_context(1), &[BackendReservedLoad::default(); 2])
+                    .route_request(routing_context(1), &mut routing_state)
                     .backend_id
             })
             .collect();

@@ -253,13 +253,15 @@ impl ModelRunnerService for ModelRunnerRpcService {
         let routing_duration = routing_started_at.elapsed();
         for candidate in &routing_decision.candidate_diagnostics {
             info!(
-                "Request routing candidate: request_id={request_id} selected={} {candidate}",
+                "Request routing candidate: request_id={request_id} routing_epoch={} selected={} {candidate}",
+                routing_decision.routing_epoch,
                 candidate.backend_id == routing_decision.backend_id,
             );
         }
         info!(
-            "Request routing: request_id={request_id} input_tokens={} max_output_tokens={} \
+            "Request routing: request_id={request_id} routing_epoch={} input_tokens={} max_output_tokens={} \
              backend_id={} routing_us={}",
+            routing_decision.routing_epoch,
             request.input_token_ids.len(),
             request.max_new_tokens,
             routing_decision.backend_id,

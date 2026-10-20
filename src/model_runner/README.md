@@ -11,8 +11,8 @@ flowchart LR
     Main["Main process<br/>client.rs"] -->|Start and stop| Rpc["Model-runner process<br/>server/mod.rs"]
     Handler[Request-handler process] -->|Token-level RPC| Rpc
 
-    Rpc --> Orchestrator["RequestOrchestrator<br/>Backend decision only"]
-    Orchestrator -->|Selected backend index| Rpc
+    Rpc --> Orchestrator["RequestOrchestrator<br/>Backend selection + pending load"]
+    Orchestrator -->|Selected backend ID + reservation| Rpc
     Rpc -->|Bounded queue per backend| Backends["Inference backend(s)<br/>CPU and/or GPU<br/>Dedicated thread each"]
     Backends --> Worker["InferenceWorker<br/>Scheduler + request manager"]
     Worker -->|Latest operational and cache-affinity state| Orchestrator
@@ -36,7 +36,8 @@ through the lifecycle client.
 | `client.rs` | Starts and stops the process, waits for readiness, and owns socket cleanup. |
 | `server/cli.rs` | Receives model paths, device mode, cache settings, and scheduler settings from the main process. |
 | `server/mod.rs` | Serves tonic RPCs, validates request capacity, and dispatches requests to inference backends. |
-| `server/request_orchestrator.rs` | Selects an inference backend for each request without owning or dispatching through backend queues. |
+| `server/request_orchestrator.rs` | Selects an inference backend and reserves its pending request load without owning or dispatching through backend queues. |
+| `server/routing_policy.rs` | Scores candidate backends using worker snapshots and outstanding reservations, with policy-specific selection and tie-breaking. |
 | `server/inference_worker.rs` | Coordinates admission, scheduled execution, event delivery, timing, and cleanup for one backend. |
 | `server/request_manager.rs` | Owns request payloads, resumable execution state, response channels, and lifecycle timing. |
 | `server/scheduler.rs` | Owns scheduling metadata and applies active-request, KV-cache reservation, and token-budget limits. |
@@ -65,10 +66,11 @@ sequenceDiagram
 
     Handler->>Rpc: GenerateText(token IDs)
     Rpc->>Rpc: Validate capacity
-    Rpc->>Orchestrator: Request backend decision
-    Orchestrator-->>Rpc: Selected backend index
-    Rpc->>Worker: Queue request on selected backend
+    Rpc->>Orchestrator: Select backend and reserve pending load
+    Orchestrator-->>Rpc: Selected backend ID + reservation token
+    Rpc->>Worker: Queue request with reservation token
     Worker->>Scheduler: Add scheduling metadata
+    Worker->>Worker: Publish operational state and release shared reservation atomically
     Scheduler-->>Worker: Admit request when a slot is available
     Worker->>Executor: Start request and restore cached prefixes
     loop Until completion or cancellation
@@ -99,9 +101,10 @@ remaining capacity, it reduces `max_new_tokens` before queueing the request.
 
 ## Request orchestration
 
-The request orchestrator owns only the configured backend-selection policy
-state and returns a one-based backend ID. The RPC service retains ownership of
-the backend queues and dispatches each request according to that decision.
+The request orchestrator owns the configured backend-selection policy state and
+pending-load reservations. It returns a one-based backend ID and a reservation
+token. The RPC service retains ownership of the backend queues and dispatches
+each request with its token according to that decision.
 
 Workers publish replaceable operational and cache-affinity snapshots to the
 orchestrator at sparse request-lifecycle boundaries:
@@ -118,7 +121,16 @@ orchestrator at sparse request-lifecycle boundaries:
 Cache-affinity snapshots remain separate so load-only policies do not depend
 on cache contents. Routing logs record the request dimensions, selected
 backend, routing duration, and the snapshot epochs and scoring inputs inspected
-for each candidate backend.
+for each candidate backend. Decisions and their candidate logs share a one-based
+`routing_epoch`, assigned during selection under the reservation lock. Use that
+epoch rather than log-line order to reconstruct routing order, since logging
+runs outside the lock. Final generation statistics include `request_id`, matching
+the server logs, so clients can correlate each workload with its decision.
+Both identifiers are local to the running server and reset on restart.
+Candidate diagnostics record published operational
+load separately from outstanding reserved load, before reserving the incoming
+request. Both estimated-work policies also log `estimated_duration_ns`, the
+exact integer duration score used to rank each backend, not measured latency.
 
 The available request-routing policies are:
 
@@ -148,9 +160,48 @@ The available request-routing policies are:
   complete-block prefix from its prefill work. Equal scores select the least
   recently used backend. This policy requires prefix caching on every backend.
 
-Operational snapshots are intentionally approximate: requests still in a
-backend's message channel are not represented until its worker receives them,
-and routing does not reserve capacity before dispatch.
+### Pending-load reservations
+
+The orchestrator and each `RoutingReservation` token share an
+`Arc<Mutex<OrchestratorRoutingState>>`. It holds the global selection epoch and
+one `BackendRoutingState` per backend, grouping its reserved load and
+last-selected epoch. Policies retain only policy-specific inputs; the shared
+selection helper handles tie-breaking and epoch updates without policy-local
+locks. Selecting a backend and adding its reservation happen under the same
+lock, so concurrent routing decisions account for earlier selections even
+before those requests reach their workers. Reservations include:
+
+- Request count.
+- Input prefill-token count and estimated cached-prefix-token count.
+- Maximum output-token count.
+
+Load-based policies merge reservations into a local copy of the worker's
+operational snapshot as additional queued work. Cache-aware routing subtracts
+the reserved cached-prefix estimate from reserved prefill work; load-only
+policies reserve zero cached-prefix tokens. Round-robin and most-cached-prefix
+record reservations but ignore them when selecting a backend.
+
+The token accompanies the request while dispatch waits for queue space and
+while the request remains in the backend channel. After successfully enqueueing
+the request in its scheduler, the worker publishes its updated operational
+snapshot and releases the reservation under the same mutex. Routing therefore
+sees either the reservation or the published load, not both or neither.
+
+The token uses RAII: dropping an undispatched request, a failed send, or a queued
+message discarded during shutdown releases its reserved load automatically.
+Worker enqueue errors also drop the token and release its load. Shared ownership
+lets workers perform this cleanup directly without sending an acknowledgement
+message to the orchestrator. Once handed off to a worker snapshot, the load is
+tracked by the scheduler rather than the token.
+
+Keep this shared critical section small because workers also need its lock;
+queue sends, inference, and routing-log output run outside it. These reservations
+account for pending work, not actual KV-cache capacity. The scheduler separately
+enforces KV-page reservations at admission.
+
+Operational snapshots remain approximate between their sparse publications,
+and cached-prefix estimates can become stale. Reservations close the pending
+dispatch accounting gap without increasing snapshot publication frequency.
 
 ## Scheduling
 

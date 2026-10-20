@@ -329,6 +329,7 @@ impl InferenceWorker {
         match &request_outcome.result {
             Ok(stats) => {
                 let client_stats = create_client_facing_generation_stats(
+                    request_id,
                     self.backend_id,
                     stats,
                     queued_at,
@@ -431,6 +432,7 @@ fn generation_error_status(error: &anyhow::Error) -> Status {
 }
 
 fn create_client_facing_generation_stats(
+    request_id: u64,
     backend_id: BackendId,
     stats: &TextGenerationStats,
     queued_at: Instant,
@@ -457,6 +459,7 @@ fn create_client_facing_generation_stats(
         completed_at,
     ));
     TextGenerationStatsProto {
+        request_id,
         backend_id: backend_id.0.get(),
         finish_reason: TextGenerationFinishReason::from(stats.execution.finish_reason) as i32,
         input_token_count: stats.execution.input_token_count,
@@ -617,6 +620,7 @@ mod tests {
         let now = Instant::now();
 
         let client_stats = create_client_facing_generation_stats(
+            42,
             BackendId::from_index(0),
             &stats,
             now,
@@ -625,6 +629,7 @@ mod tests {
             now,
         );
 
+        assert_eq!(client_stats.request_id, 42);
         assert_eq!(client_stats.backend_id, 1);
         assert_eq!(
             client_stats.finish_reason,
@@ -665,6 +670,7 @@ mod tests {
         let now = Instant::now();
 
         let client_stats = create_client_facing_generation_stats(
+            73,
             BackendId::from_index(1),
             &stats,
             now,
@@ -674,6 +680,7 @@ mod tests {
         );
         let draft_stats = client_stats.draft_token_stats.unwrap();
 
+        assert_eq!(client_stats.request_id, 73);
         assert_eq!(client_stats.backend_id, 2);
         assert_eq!(
             client_stats.finish_reason,

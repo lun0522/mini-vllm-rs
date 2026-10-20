@@ -112,6 +112,7 @@ mod tests {
         ModelRunnerGenerateTextEvent {
             event: Some(model_runner_generate_text_event::Event::Stats(
                 TextGenerationStats {
+                    request_id: 42,
                     finish_reason: TextGenerationFinishReason::EndOfSequenceToken as i32,
                     ..Default::default()
                 },
@@ -144,6 +145,7 @@ mod tests {
         assert!(matches!(
             final_events.events[0].event,
             Some(generate_text_event::Event::Stats(TextGenerationStats {
+                request_id: 42,
                 finish_reason,
                 ..
             })) if finish_reason == TextGenerationFinishReason::EndOfSequenceToken as i32
@@ -163,7 +165,10 @@ mod tests {
         assert_eq!(event_text(&final_events.events[0]), Some("hello world"));
         assert!(matches!(
             final_events.events[1].event,
-            Some(generate_text_event::Event::Stats(_))
+            Some(generate_text_event::Event::Stats(TextGenerationStats {
+                request_id: 42,
+                ..
+            }))
         ));
         assert!(final_events.finished);
     }
