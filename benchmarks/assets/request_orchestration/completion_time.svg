@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="680" viewBox="0 0 1000 680" role="img" aria-labelledby="title description">
+<title id="title">Request orchestration completion time by workload and schedule</title>
+<desc id="description">Estimated-work variants complete all workloads in approximately 15 to 16 seconds. Round robin and least requests vary from 19 to 46 seconds. Most cached prefix takes approximately 22 and 34 seconds for load and 18 seconds for affinity.</desc>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#24292f}.title{font-size:18px;font-weight:600}.small{font-size:12px;fill:#57606a}.group{font-size:14px;font-weight:600}.value{font-size:12px}.grid{stroke:#d0d7de;stroke-width:1}.error{stroke:#24292f;stroke-width:1.5}</style>
+<rect width="1000" height="680" fill="white"/>
+<text x="500" y="28" text-anchor="middle" class="title">Completion time by workload and schedule</text>
+<text x="500" y="49" text-anchor="middle" class="small">Lower is better; mean of 3 runs; whiskers show sample standard deviation</text>
+<line x1="170" y1="72" x2="170" y2="565" class="grid"/><text x="170" y="587" text-anchor="middle" class="small">0</text>
+<line x1="310" y1="72" x2="310" y2="565" class="grid"/><text x="310" y="587" text-anchor="middle" class="small">10</text>
+<line x1="450" y1="72" x2="450" y2="565" class="grid"/><text x="450" y="587" text-anchor="middle" class="small">20</text>
+<line x1="590" y1="72" x2="590" y2="565" class="grid"/><text x="590" y="587" text-anchor="middle" class="small">30</text>
+<line x1="730" y1="72" x2="730" y2="565" class="grid"/><text x="730" y="587" text-anchor="middle" class="small">40</text>
+<line x1="870" y1="72" x2="870" y2="565" class="grid"/><text x="870" y="587" text-anchor="middle" class="small">50</text>
+<text x="150" y="130" text-anchor="end" class="group">Load A</text>
+<rect x="170" y="82" width="311.92" height="17" fill="#2563eb"/>
+<path d="M475.62,90.5 H488.22 M475.62,86 V95 M488.22,86 V95" class="error" fill="none"/>
+<text x="497.22" y="95" class="value">22.28 s</text>
+<rect x="170" y="107" width="312.2" height="17" fill="#f59e0b"/>
+<path d="M474.22,115.5 H490.18 M474.22,111 V120 M490.18,111 V120" class="error" fill="none"/>
+<text x="499.18" y="120" class="value">22.30 s</text>
+<rect x="170" y="132" width="206.78" height="17" fill="#16a34a"/>
+<rect x="376.78" y="132" width="1.259999999999998" height="17" fill="#16a34a" opacity=".45"/>
+<text x="387.03999999999996" y="145" class="value">14.77–14.86 s</text>
+<rect x="170" y="157" width="306.74" height="17" fill="#9333ea"/>
+<path d="M474.08,165.5 H479.40000000000003 M474.08,161 V170 M479.40000000000003,161 V170" class="error" fill="none"/>
+<text x="488.40000000000003" y="170" class="value">21.91 s</text>
+<text x="150" y="254" text-anchor="end" class="group">Load B</text>
+<rect x="170" y="206" width="483.69999999999993" height="17" fill="#2563eb"/>
+<path d="M651.46,214.5 H655.9399999999999 M651.46,210 V219 M655.9399999999999,210 V219" class="error" fill="none"/>
+<text x="664.9399999999999" y="219" class="value">34.55 s</text>
+<rect x="170" y="231" width="479.08" height="17" fill="#f59e0b"/>
+<path d="M647.54,239.5 H650.62 M647.54,235 V244 M650.62,235 V244" class="error" fill="none"/>
+<text x="659.62" y="244" class="value">34.22 s</text>
+<rect x="170" y="256" width="207.34" height="17" fill="#16a34a"/>
+<rect x="377.34000000000003" y="256" width="1.679999999999989" height="17" fill="#16a34a" opacity=".45"/>
+<text x="388.02" y="269" class="value">14.81–14.93 s</text>
+<rect x="170" y="281" width="479.64" height="17" fill="#9333ea"/>
+<path d="M645.3,289.5 H653.98 M645.3,285 V294 M653.98,285 V294" class="error" fill="none"/>
+<text x="662.98" y="294" class="value">34.26 s</text>
+<text x="150" y="378" text-anchor="end" class="group">Affinity A</text>
+<rect x="170" y="330" width="644" height="17" fill="#2563eb"/>
+<path d="M799.16,338.5 H828.84 M799.16,334 V343 M828.84,334 V343" class="error" fill="none"/>
+<text x="837.84" y="343" class="value">46.00 s</text>
+<rect x="170" y="355" width="639.94" height="17" fill="#f59e0b"/>
+<path d="M803.36,363.5 H816.52 M803.36,359 V368 M816.52,359 V368" class="error" fill="none"/>
+<text x="825.52" y="368" class="value">45.71 s</text>
+<rect x="170" y="380" width="222.74" height="17" fill="#16a34a"/>
+<rect x="392.74" y="380" width="0.70000000000001" height="17" fill="#16a34a" opacity=".45"/>
+<text x="402.44" y="393" class="value">15.91–15.96 s</text>
+<rect x="170" y="405" width="249.33999999999997" height="17" fill="#9333ea"/>
+<path d="M414.72,413.5 H423.9599999999999 M414.72,409 V418 M423.9599999999999,409 V418" class="error" fill="none"/>
+<text x="432.9599999999999" y="418" class="value">17.81 s</text>
+<text x="150" y="502" text-anchor="end" class="group">Affinity B</text>
+<rect x="170" y="454" width="266" height="17" fill="#2563eb"/>
+<path d="M428.72,462.5 H443.28 M428.72,458 V467 M443.28,458 V467" class="error" fill="none"/>
+<text x="452.28" y="467" class="value">19.00 s</text>
+<rect x="170" y="479" width="266.14000000000004" height="17" fill="#f59e0b"/>
+<path d="M426.2,487.5 H446.08000000000004 M426.2,483 V492 M446.08000000000004,483 V492" class="error" fill="none"/>
+<text x="455.08000000000004" y="492" class="value">19.01 s</text>
+<rect x="170" y="504" width="222.46" height="17" fill="#16a34a"/>
+<rect x="392.46000000000004" y="504" width="2.519999999999996" height="17" fill="#16a34a" opacity=".45"/>
+<text x="403.98" y="517" class="value">15.89–16.07 s</text>
+<rect x="170" y="529" width="246.40000000000003" height="17" fill="#9333ea"/>
+<path d="M413.18,537.5 H419.62 M413.18,533 V542 M419.62,533 V542" class="error" fill="none"/>
+<text x="428.62" y="542" class="value">17.60 s</text>
+<text x="520" y="609" text-anchor="middle" class="small">Wall time (seconds)</text>
+<rect x="80" y="632" width="13" height="10" fill="#2563eb"/><text x="100" y="642" class="small">Round robin</text>
+<rect x="270" y="632" width="13" height="10" fill="#f59e0b"/><text x="290" y="642" class="small">Least requests</text>
+<rect x="470" y="632" width="13" height="10" fill="#16a34a"/><text x="490" y="642" class="small">Estimated-work variants</text>
+<rect x="755" y="632" width="13" height="10" fill="#9333ea"/><text x="775" y="642" class="small">Most cached prefix</text>
+<text x="500" y="666" text-anchor="middle" class="small">Estimated-work labels show the range of four configuration means, not standard deviation.</text>
+</svg>
+

@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="480" viewBox="0 0 1000 480" role="img" aria-labelledby="title description">
+  <title id="title">CPU and GPU request assignment by routing policy</title>
+  <desc id="description">Round robin and least requests assign six requests to each backend in both workloads. All estimated-work variants assign one request to CPU and eleven to GPU. Most cached prefix assigns six to each backend for load and seven to CPU and five to GPU for affinity.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
+    .title { font-size: 18px; font-weight: 600; }
+    .subtitle { font-size: 12px; fill: #57606a; }
+    .policy { font-size: 14px; font-weight: 600; }
+    .workload { font-size: 12px; fill: #57606a; }
+    .tick { font-size: 12px; fill: #57606a; }
+    .value { font-size: 12px; font-weight: 600; fill: #ffffff; }
+    .grid { stroke: #d0d7de; stroke-width: 1; }
+  </style>
+
+  <rect width="1000" height="480" fill="#ffffff"/>
+  <text x="500" y="28" text-anchor="middle" class="title">Backend assignment by routing policy</text>
+  <text x="500" y="48" text-anchor="middle" class="subtitle">Measured requests; each bar totals 12</text>
+
+  <!-- Plot: x=350..830 maps 0..12 requests. -->
+  <line x1="350" y1="70" x2="350" y2="400" class="grid"/>
+  <line x1="470" y1="70" x2="470" y2="400" class="grid"/>
+  <line x1="590" y1="70" x2="590" y2="400" class="grid"/>
+  <line x1="710" y1="70" x2="710" y2="400" class="grid"/>
+  <line x1="830" y1="70" x2="830" y2="400" class="grid"/>
+
+  <text x="28" y="113" class="policy">Round robin</text>
+  <text x="330" y="96" text-anchor="end" class="workload">Load</text>
+  <rect x="350" y="81" width="240" height="20" fill="#2563eb"/>
+  <rect x="590" y="81" width="240" height="20" fill="#16a34a"/>
+  <text x="470" y="96" text-anchor="middle" class="value">6</text>
+  <text x="710" y="96" text-anchor="middle" class="value">6</text>
+  <text x="330" y="124" text-anchor="end" class="workload">Affinity</text>
+  <rect x="350" y="109" width="240" height="20" fill="#2563eb"/>
+  <rect x="590" y="109" width="240" height="20" fill="#16a34a"/>
+  <text x="470" y="124" text-anchor="middle" class="value">6</text>
+  <text x="710" y="124" text-anchor="middle" class="value">6</text>
+
+  <text x="28" y="193" class="policy">Least requests</text>
+  <text x="330" y="176" text-anchor="end" class="workload">Load</text>
+  <rect x="350" y="161" width="240" height="20" fill="#2563eb"/>
+  <rect x="590" y="161" width="240" height="20" fill="#16a34a"/>
+  <text x="470" y="176" text-anchor="middle" class="value">6</text>
+  <text x="710" y="176" text-anchor="middle" class="value">6</text>
+  <text x="330" y="204" text-anchor="end" class="workload">Affinity</text>
+  <rect x="350" y="189" width="240" height="20" fill="#2563eb"/>
+  <rect x="590" y="189" width="240" height="20" fill="#16a34a"/>
+  <text x="470" y="204" text-anchor="middle" class="value">6</text>
+  <text x="710" y="204" text-anchor="middle" class="value">6</text>
+
+  <text x="28" y="273" class="policy">Estimated-work variants</text>
+  <text x="28" y="290" class="subtitle">Detailed/fallback; cache-aware/load-only</text>
+  <text x="330" y="256" text-anchor="end" class="workload">Load</text>
+  <rect x="350" y="241" width="40" height="20" fill="#2563eb"/>
+  <rect x="390" y="241" width="440" height="20" fill="#16a34a"/>
+  <text x="370" y="256" text-anchor="middle" class="value">1</text>
+  <text x="610" y="256" text-anchor="middle" class="value">11</text>
+  <text x="330" y="284" text-anchor="end" class="workload">Affinity</text>
+  <rect x="350" y="269" width="40" height="20" fill="#2563eb"/>
+  <rect x="390" y="269" width="440" height="20" fill="#16a34a"/>
+  <text x="370" y="284" text-anchor="middle" class="value">1</text>
+  <text x="610" y="284" text-anchor="middle" class="value">11</text>
+
+  <text x="28" y="353" class="policy">Most cached prefix</text>
+  <text x="330" y="336" text-anchor="end" class="workload">Load</text>
+  <rect x="350" y="321" width="240" height="20" fill="#2563eb"/>
+  <rect x="590" y="321" width="240" height="20" fill="#16a34a"/>
+  <text x="470" y="336" text-anchor="middle" class="value">6</text>
+  <text x="710" y="336" text-anchor="middle" class="value">6</text>
+  <text x="330" y="364" text-anchor="end" class="workload">Affinity</text>
+  <rect x="350" y="349" width="280" height="20" fill="#2563eb"/>
+  <rect x="630" y="349" width="200" height="20" fill="#16a34a"/>
+  <text x="490" y="364" text-anchor="middle" class="value">7</text>
+  <text x="730" y="364" text-anchor="middle" class="value">5</text>
+
+  <text x="350" y="420" text-anchor="middle" class="tick">0</text>
+  <text x="470" y="420" text-anchor="middle" class="tick">3</text>
+  <text x="590" y="420" text-anchor="middle" class="tick">6</text>
+  <text x="710" y="420" text-anchor="middle" class="tick">9</text>
+  <text x="830" y="420" text-anchor="middle" class="tick">12 requests</text>
+
+  <rect x="386" y="448" width="14" height="10" fill="#2563eb"/>
+  <text x="408" y="457" class="tick">CPU</text>
+  <rect x="510" y="448" width="14" height="10" fill="#16a34a"/>
+  <text x="532" y="457" class="tick">Metal GPU</text>
+</svg>

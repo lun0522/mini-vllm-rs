@@ -68,6 +68,9 @@ order:
 10. [Prefix-cache concurrent population](benchmarks/prefix_cache_concurrent_population.md)
     compares incremental publication and exact-input single-flight policies for
     simultaneous bursts and decode-time arrivals.
+11. [Request orchestration](benchmarks/request_orchestration.md) compares five
+    CPU/GPU routing policies across load and cache-affinity workloads, including
+    detailed versus fallback throughput profiles.
 
 ## Run
 
