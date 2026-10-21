@@ -88,6 +88,9 @@ message GenerateTextRequest {
   uint64 repeat_last_n = 5;
   // Token IDs that terminate generation without being emitted.
   repeated uint32 end_of_sequence_token_ids = 6;
+  // Benchmarking only: one-based backend ID to use instead of orchestrator selection; zero lets
+  // the orchestrator select the backend normally.
+  uint64 benchmark_backend_id = 7;
 }
 
 message GenerateTextEvent {

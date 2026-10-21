@@ -193,6 +193,7 @@ pub(super) struct RequestRoutingContext<'a> {
     pub(super) input_token_ids: &'a [u32],
     pub(super) input_token_count: usize,
     pub(super) max_new_token_count: u64,
+    pub(super) backend_id_override: Option<BackendId>,
 }
 
 impl RequestRoutingContext<'_> {
@@ -433,6 +434,7 @@ mod tests {
             input_token_ids: &[1, 2, 3],
             input_token_count: 3,
             max_new_token_count: 1,
+            backend_id_override: None,
         };
 
         assert_eq!(request.restorable_input_token_ids(), &[1, 2]);
@@ -479,6 +481,7 @@ mod tests {
                                 input_token_ids: &[1],
                                 input_token_count: 1,
                                 max_new_token_count: 1,
+                                backend_id_override: None,
                             })
                         })
                     })
@@ -498,6 +501,7 @@ mod tests {
                     input_token_ids: &[1],
                     input_token_count: 1,
                     max_new_token_count: 1,
+                    backend_id_override: None,
                 });
                 assert_eq!(next.routing_epoch, 17);
             });
@@ -518,6 +522,7 @@ mod tests {
             input_token_ids: &[1],
             input_token_count: 1,
             max_new_token_count: 1,
+            backend_id_override: None,
         };
 
         let (first_decision, first_reservation) = orchestrator.route_request(request);
@@ -564,6 +569,46 @@ mod tests {
     }
 
     #[test]
+    fn backend_override_preserves_scoring_history_and_reservations() {
+        let orchestrator = RequestOrchestrator::new(
+            backend_state_receivers(2),
+            RequestOrchestratorConfig {
+                routing_policy: RequestRoutingPolicy::RoundRobin,
+                throughput_profiles: vec![Default::default()],
+            },
+        )
+        .unwrap();
+        let overridden_backend_id = BackendId::from_index(1);
+
+        let (decision, reservation) = orchestrator.route_request(RequestRoutingContext {
+            input_token_ids: &[1, 2],
+            input_token_count: 2,
+            max_new_token_count: 3,
+            backend_id_override: Some(overridden_backend_id),
+        });
+
+        assert_eq!(decision.backend_id, overridden_backend_id);
+        assert_eq!(decision.candidate_diagnostics.len(), 2);
+        let routing_state = orchestrator.routing_state.lock().unwrap();
+        assert_eq!(routing_state.selection_epoch, 1);
+        assert_eq!(routing_state.backends[0], BackendRoutingState::default());
+        assert_eq!(
+            routing_state.backends[1],
+            BackendRoutingState {
+                reserved_load: BackendReservedLoad {
+                    request_count: 1,
+                    prefill_token_count: 2,
+                    cached_prefix_token_count: 0,
+                    max_output_token_count: 3,
+                },
+                last_selected_epoch: 1,
+            }
+        );
+        drop(routing_state);
+        drop(reservation);
+    }
+
+    #[test]
     fn load_policies_account_for_unpublished_routed_requests() {
         for routing_policy in [
             RequestRoutingPolicy::LeastRequests,
@@ -582,6 +627,7 @@ mod tests {
                 input_token_ids: &[1, 2],
                 input_token_count: 2,
                 max_new_token_count: 4,
+                backend_id_override: None,
             };
             let (first, reservation) = orchestrator.route_request(request);
             assert_eq!(first.backend_id, BackendId::from_index(0));
@@ -655,6 +701,7 @@ mod tests {
                 input_token_ids: &[1],
                 input_token_count: 1,
                 max_new_token_count: 2,
+                backend_id_override: None,
             });
             let (sender, receiver) = mpsc::channel(1);
             let mut receiver = Some(receiver);
@@ -704,6 +751,7 @@ mod tests {
             input_token_ids: &[1, 2, 3, 4],
             input_token_count: 4,
             max_new_token_count: 8,
+            backend_id_override: None,
         };
         for (cached_tokens, expected_cached_tokens) in [(0, 0), (2, 2), (4, 4), (5, 4)] {
             assert_eq!(
@@ -805,6 +853,7 @@ mod tests {
             input_token_ids: &[1, 2, 3],
             input_token_count: 3,
             max_new_token_count: 5,
+            backend_id_override: None,
         };
         let (_, first_reservation) = orchestrator.route_request(request);
         let (before, probe_reservation) = orchestrator.route_request(request);

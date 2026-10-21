@@ -112,6 +112,7 @@ async fn validate_text_generation(channel: Channel) -> anyhow::Result<()> {
             repeat_last_n: 64,
             stream_output: true,
             ignore_eos_tokens: true,
+            benchmark_backend_id: 0,
         })
         .await?
         .into_inner();

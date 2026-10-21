@@ -27,13 +27,15 @@ pub(super) struct RoundRobinPolicy;
 impl BackendRoutingPolicy for RoundRobinPolicy {
     fn route_request(
         &self,
-        _request: RequestRoutingContext<'_>,
+        request: RequestRoutingContext<'_>,
         routing_state: &mut OrchestratorRoutingState,
     ) -> RoutingDecision {
         // Equal scores let least-recently-selected tie-breaking produce cyclic order.
-        route_by_score(routing_state, |_, _, _| BackendScore {
-            score: 0,
-            estimated_cached_prefix_token_count: 0,
+        route_by_score(routing_state, request.backend_id_override, |_, _, _| {
+            BackendScore {
+                score: 0,
+                estimated_cached_prefix_token_count: 0,
+            }
         })
     }
 }
@@ -65,11 +67,12 @@ impl LeastRequestsPolicy {
 impl BackendRoutingPolicy for LeastRequestsPolicy {
     fn route_request(
         &self,
-        _request: RequestRoutingContext<'_>,
+        request: RequestRoutingContext<'_>,
         routing_state: &mut OrchestratorRoutingState,
     ) -> RoutingDecision {
         route_by_score(
             routing_state,
+            request.backend_id_override,
             |backend_index, reserved_load, diagnostics| {
                 let state = *self.operational_state_receivers[backend_index].borrow();
                 diagnostics.operational_state = Some(state);
@@ -128,6 +131,7 @@ impl BackendRoutingPolicy for LeastEstimatedWorkPolicy {
         // measured rates for the backend and request workload.
         route_by_score(
             routing_state,
+            request.backend_id_override,
             |backend_index, reserved_load, diagnostics| {
                 let backend = &self.operational_state_receivers[backend_index];
                 let state = *backend.operational_state_receiver.borrow();
@@ -174,6 +178,7 @@ impl BackendRoutingPolicy for MostCachedPrefixPolicy {
     ) -> RoutingDecision {
         route_by_score(
             routing_state,
+            request.backend_id_override,
             |backend_index, _reserved_load, diagnostics| {
                 let state = self.cache_affinity_state_receivers[backend_index].borrow();
                 let estimated_cached_prefix_token_count =
@@ -226,6 +231,7 @@ impl BackendRoutingPolicy for CacheAwareLeastEstimatedWorkPolicy {
         // but excludes the reusable cached prefix from the incoming request's prefill work.
         route_by_score(
             routing_state,
+            request.backend_id_override,
             |backend_index, reserved_load, diagnostics| {
                 let backend = &self.backend_state_receivers[backend_index];
                 let operational_state = *backend.operational_state_receiver.borrow();
@@ -268,6 +274,7 @@ struct BackendScore<Score> {
 
 fn route_by_score<Score: Ord>(
     routing_state: &mut OrchestratorRoutingState,
+    backend_id_override: Option<BackendId>,
     scorer: impl Fn(usize, BackendReservedLoad, &mut RoutingCandidateDiagnostics) -> BackendScore<Score>,
 ) -> RoutingDecision {
     let scored_candidates: Vec<_> = routing_state
@@ -283,20 +290,25 @@ fn route_by_score<Score: Ord>(
             (score, diagnostics)
         })
         .collect();
-    let backend_index = scored_candidates
-        .iter()
-        .enumerate()
-        .min_by(
-            |(left_index, (left_score, _)), (right_index, (right_score, _))| {
-                left_score.score.cmp(&right_score.score).then_with(|| {
-                    routing_state.backends[*left_index]
-                        .last_selected_epoch
-                        .cmp(&routing_state.backends[*right_index].last_selected_epoch)
-                })
-            },
-        )
-        .map(|(backend_index, _)| backend_index)
-        .expect("the orchestrator always has at least one backend");
+    let backend_index = backend_id_override.map_or_else(
+        || {
+            scored_candidates
+                .iter()
+                .enumerate()
+                .min_by(
+                    |(left_index, (left_score, _)), (right_index, (right_score, _))| {
+                        left_score.score.cmp(&right_score.score).then_with(|| {
+                            routing_state.backends[*left_index]
+                                .last_selected_epoch
+                                .cmp(&routing_state.backends[*right_index].last_selected_epoch)
+                        })
+                    },
+                )
+                .map(|(backend_index, _)| backend_index)
+                .expect("the orchestrator always has at least one backend")
+        },
+        BackendId::index,
+    );
     routing_state.record_backend_selection(backend_index);
     RoutingDecision {
         routing_epoch: routing_state.selection_epoch,
@@ -468,6 +480,7 @@ mod tests {
             input_token_ids: &[],
             input_token_count: 0,
             max_new_token_count: estimated_token_count,
+            backend_id_override: None,
         }
     }
 
@@ -478,6 +491,7 @@ mod tests {
             input_token_ids: &[1, 2],
             input_token_count: 2,
             max_new_token_count: 3,
+            backend_id_override: None,
         };
         routing_state.backends[0].reserved_load = BackendReservedLoad {
             request_count: 1,
@@ -560,6 +574,26 @@ mod tests {
             vec![1, 2, 3, 4, 5]
         );
         assert_eq!(routing_state.selection_epoch, 5);
+    }
+
+    #[test]
+    fn backend_override_selects_the_requested_scored_candidate() {
+        let mut routing_state = OrchestratorRoutingState::new(2);
+
+        let decision = route_by_score(
+            &mut routing_state,
+            Some(BackendId::from_index(1)),
+            |backend_index, _, _| BackendScore {
+                score: backend_index,
+                estimated_cached_prefix_token_count: backend_index + 10,
+            },
+        );
+
+        assert_eq!(decision.backend_id, BackendId::from_index(1));
+        assert_eq!(decision.estimated_cached_prefix_token_count, 11);
+        assert_eq!(routing_state.selection_epoch, 1);
+        assert_eq!(routing_state.backends[0].last_selected_epoch, 0);
+        assert_eq!(routing_state.backends[1].last_selected_epoch, 1);
     }
 
     #[test]
@@ -753,6 +787,7 @@ mod tests {
                 input_token_ids: &[],
                 input_token_count,
                 max_new_token_count,
+                backend_id_override: None,
             };
 
             assert_eq!(
@@ -790,6 +825,7 @@ mod tests {
                         input_token_ids: &[],
                         input_token_count: 10,
                         max_new_token_count: 10,
+                        backend_id_override: None,
                     },
                     &mut routing_state
                 )
@@ -803,6 +839,7 @@ mod tests {
                         input_token_ids: &[],
                         input_token_count: 100,
                         max_new_token_count: 100,
+                        backend_id_override: None,
                     },
                     &mut routing_state
                 )
@@ -841,6 +878,7 @@ mod tests {
                     input_token_ids: &[],
                     input_token_count,
                     max_new_token_count,
+                    backend_id_override: None,
                 },
                 &mut routing_state,
             );
@@ -946,6 +984,7 @@ mod tests {
             input_token_ids: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             input_token_count: 10,
             max_new_token_count: 5,
+            backend_id_override: None,
         };
 
         let decision = policy.route_request(request, &mut routing_state);
@@ -978,6 +1017,7 @@ mod tests {
             input_token_ids: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             input_token_count: 10,
             max_new_token_count: 5,
+            backend_id_override: None,
         };
 
         let decision = policy.route_request(request, &mut routing_state);
@@ -1014,6 +1054,7 @@ mod tests {
                     input_token_ids: &[],
                     input_token_count,
                     max_new_token_count,
+                    backend_id_override: None,
                 },
                 &mut routing_state,
             );
@@ -1078,6 +1119,7 @@ mod tests {
             input_token_ids: &[1, 2, 3, 4, 5, 6],
             input_token_count: 6,
             max_new_token_count: 7,
+            backend_id_override: None,
         };
 
         assert_eq!(
@@ -1095,6 +1137,7 @@ mod tests {
             input_token_ids: &[1, 2],
             input_token_count: 2,
             max_new_token_count: 3,
+            backend_id_override: None,
         };
 
         assert_eq!(

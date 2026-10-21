@@ -29,6 +29,9 @@ message GenerateText {
   bool stream_output = 6;
   // Benchmarking only: ignore end-of-sequence tokens and generate until max_new_tokens is reached.
   bool ignore_eos_tokens = 7;
+  // Benchmarking only: one-based backend ID to use instead of orchestrator selection; zero lets
+  // the orchestrator select the backend normally.
+  uint64 benchmark_backend_id = 8;
 }
 
 message GenerateTextEvent {

@@ -89,6 +89,7 @@ impl TokenizerWrapper {
             repeat_last_n: request.repeat_last_n,
             end_of_sequence_token_ids,
             request_id: request.request_id,
+            benchmark_backend_id: request.benchmark_backend_id,
         })
     }
 
@@ -283,6 +284,7 @@ mod tests {
             repeat_last_n: 32,
             stream_output: true,
             ignore_eos_tokens: false,
+            benchmark_backend_id: 2,
         };
 
         let tokenized = tokenizer.create_generate_text_request(request).unwrap();
@@ -293,6 +295,7 @@ mod tests {
         assert_eq!(tokenized.repeat_penalty, 1.1);
         assert_eq!(tokenized.repeat_last_n, 32);
         assert_eq!(tokenized.request_id, 42);
+        assert_eq!(tokenized.benchmark_backend_id, 2);
     }
 
     #[test]

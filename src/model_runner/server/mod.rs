@@ -73,6 +73,11 @@ const GENERATION_EVENT_QUEUE_CAPACITY: usize = 32;
 pub(super) struct BackendId(NonZeroU64);
 
 impl BackendId {
+    /// Returns `None` for zero, which represents no backend override.
+    fn from_one_based(value: u64) -> Option<Self> {
+        NonZeroU64::new(value).map(Self)
+    }
+
     fn from_index(index: usize) -> Self {
         let value = u64::try_from(index)
             .expect("inference backend index does not fit in u64")
@@ -240,6 +245,11 @@ impl ModelRunnerService for ModelRunnerRpcService {
             model_context_length,
         )
         .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let backend_id_override = resolve_benchmark_backend_id(
+            request.benchmark_backend_id,
+            self.inference_message_senders.len(),
+        )
+        .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let request_id = request.request_id;
         let queued_at = Instant::now();
         let routing_started_at = Instant::now();
@@ -249,6 +259,7 @@ impl ModelRunnerService for ModelRunnerRpcService {
                     input_token_ids: &request.input_token_ids,
                     input_token_count: request.input_token_ids.len(),
                     max_new_token_count: request.max_new_tokens,
+                    backend_id_override,
                 });
         let routing_duration = routing_started_at.elapsed();
         for candidate in &routing_decision.candidate_diagnostics {
@@ -256,6 +267,13 @@ impl ModelRunnerService for ModelRunnerRpcService {
                 "Request routing candidate: request_id={request_id} routing_epoch={} selected={} {candidate}",
                 routing_decision.routing_epoch,
                 candidate.backend_id == routing_decision.backend_id,
+            );
+        }
+        if let Some(backend_id) = backend_id_override {
+            info!(
+                "Request routing override: request_id={request_id} routing_epoch={} \
+                 backend_id={backend_id}",
+                routing_decision.routing_epoch,
             );
         }
         info!(
@@ -453,6 +471,18 @@ fn normalize_generate_text_request(
     Ok(())
 }
 
+fn resolve_benchmark_backend_id(value: u64, backend_count: usize) -> Result<Option<BackendId>> {
+    let Some(backend_id) = BackendId::from_one_based(value) else {
+        return Ok(None);
+    };
+    ensure!(
+        backend_id.index() < backend_count,
+        "benchmark backend ID {backend_id} does not exist; configured backend count is \
+         {backend_count}"
+    );
+    Ok(Some(backend_id))
+}
+
 fn normalize_activation_dtype(
     activation_dtype: ActivationDType,
     inference_device: InferenceDevice,
@@ -511,6 +541,25 @@ mod tests {
             assert_eq!(backend_id.index(), index);
             assert_eq!(backend_id.0.get(), index as u64 + 1);
         }
+    }
+
+    #[test]
+    fn resolves_valid_benchmark_backend_ids() {
+        assert_eq!(resolve_benchmark_backend_id(0, 2).unwrap(), None);
+        assert_eq!(
+            resolve_benchmark_backend_id(2, 2).unwrap(),
+            Some(BackendId::from_index(1))
+        );
+    }
+
+    #[test]
+    fn rejects_benchmark_backend_ids_outside_the_backend_set() {
+        let error = resolve_benchmark_backend_id(3, 2).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "benchmark backend ID 3 does not exist; configured backend count is 2"
+        );
     }
 
     fn backend_handle(
