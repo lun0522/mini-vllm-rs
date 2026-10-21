@@ -23,6 +23,10 @@ fallback profile. Separate `Load` and `Affinity` workloads show whether
 balancing request counts, estimating execution time, or retaining cache
 locality leads to different placements and completion times.
 
+A [capacity follow-up](request_orchestration_capacity.md) holds the best-performing
+policy and request shape constant while increasing concurrency to find when the
+CPU becomes useful alongside the faster GPU.
+
 **Scope:**
 
 - This is a single-machine, small-model comparison at modest concurrency, not
@@ -46,7 +50,7 @@ locality leads to different placements and completion times.
 | Workloads | `Load` and `Affinity` scenarios with 12 requests submitted 50 ms apart under 2 fixed schedules; responses were consumed concurrently and EOS was ignored |
 | Throughput profiles | The complete measured 12-point [profile matrix](backend_throughput_profiles.textproto), or the fallback profile: CPU prefill/decode 75/48 tok/s and GPU prefill/decode 12,086/396 tok/s |
 | Measurements | 3 sequential untraced runs reporting the mean and sample standard deviation; wall-time and aggregate-throughput coefficients of variation were at most 3.76%, while the maximum headline coefficient of variation was 7.43% for **Round robin** `Load` A median TTFT; backend assignments, wall time, and throughput remained stable on inspection, so no additional runs were collected |
-| Environment overrides | `RUST_LOG=info`; tracing disabled; `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` unset |
+| Environment overrides | Tracing disabled; `CANDLE_NUM_THREADS` and `RAYON_NUM_THREADS` unset |
 
 The 50 ms submission interval and single input-preprocessing thread reduce
 arrival-order variation from concurrent preprocessing, making routing decisions

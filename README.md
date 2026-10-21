@@ -71,6 +71,9 @@ order:
 11. [Request orchestration](benchmarks/request_orchestration.md) compares five
     CPU/GPU routing policies across load and cache-affinity workloads, including
     detailed versus fallback throughput profiles.
+12. [Request orchestration capacity](benchmarks/request_orchestration_capacity.md)
+    measures when cache-aware estimated-work routing begins using the CPU and
+    compares its saturated capacity with a forced-GPU control.
 
 ## Run
 
