@@ -48,6 +48,7 @@ mod prefix_cache_flight;
 mod request_manager;
 mod request_orchestrator;
 mod routing_policy;
+mod sampler;
 mod scheduler;
 mod text_generation;
 

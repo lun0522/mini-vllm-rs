@@ -8,9 +8,6 @@ use anyhow::Result;
 use candle_core::DType;
 use candle_core::IndexOp;
 use candle_core::Tensor;
-use candle_transformers::generation::LogitsProcessor;
-use candle_transformers::generation::Sampling;
-use candle_transformers::utils::apply_repeat_penalty;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -24,6 +21,7 @@ use super::generation_stats::GenerationExecutionStats;
 use super::generation_stats::GenerationFinishReason;
 use super::generation_stats::PrefixTokenCounts;
 use super::model_instance::ModelInstance;
+use super::sampler::Sampler;
 
 #[derive(Debug)]
 pub(super) struct GenerationCancelled;
@@ -212,11 +210,9 @@ pub(super) struct RequestExecutionState {
     input_token_count: usize,
     draft_token_count_state: Option<DraftTokenCountState>,
     max_new_token_count: usize,
-    repeat_last_n: usize,
-    repeat_penalty: f32,
     eos_tokens: Vec<u32>,
-    target_logits_processor: LogitsProcessor,
-    draft_logits_processor: LogitsProcessor,
+    target_sampler: Sampler,
+    draft_sampler: Sampler,
     prefill_initial_positions: PrefillStartPositions,
     prefill_current_positions: PrefillStartPositions,
     generation_phase: GenerationPhase,
@@ -242,19 +238,16 @@ impl RequestExecutionState {
             determine_initial_phase(input_token_count, prefill_initial_positions);
         let max_new_token_count = usize::try_from(request.max_new_tokens)
             .context("max_new_tokens does not fit in usize")?;
-        let target_logits_processor = create_logits_processor(&request);
+        let (target_sampler, draft_sampler) = create_samplers(&request)?;
         Ok(Self {
             request_id: request.request_id,
             tokens: request.input_token_ids,
             input_token_count,
             draft_token_count_state: draft_token_count_controller.map(DraftTokenCountState::new),
             max_new_token_count,
-            repeat_last_n: usize::try_from(request.repeat_last_n)
-                .context("repeat_last_n does not fit in usize")?,
-            repeat_penalty: request.repeat_penalty,
             eos_tokens: request.end_of_sequence_token_ids,
-            target_logits_processor,
-            draft_logits_processor: LogitsProcessor::new(0, None, None),
+            target_sampler,
+            draft_sampler,
             prefill_initial_positions,
             prefill_current_positions: prefill_initial_positions,
             generation_phase,
@@ -621,23 +614,11 @@ impl RequestExecutionState {
         appended_tokens: &[u32],
         model_role: ModelRole,
     ) -> Result<u32> {
-        // Collect the repetition window from committed and speculative tokens.
-        let total_token_count = self.tokens.len() + appended_tokens.len();
-        let repeat_start = total_token_count.saturating_sub(self.repeat_last_n);
-        let mut repeat_tokens = Vec::with_capacity(total_token_count - repeat_start);
-        if repeat_start < self.tokens.len() {
-            repeat_tokens.extend_from_slice(&self.tokens[repeat_start..]);
-        }
-        let appended_start = repeat_start.saturating_sub(self.tokens.len());
-        repeat_tokens.extend_from_slice(&appended_tokens[appended_start..]);
-
-        // Apply the repetition penalty before sampling the next token.
-        let logits = apply_repeat_penalty(logits, self.repeat_penalty, &repeat_tokens)?;
-        let logits_processor = match model_role {
-            ModelRole::Target => &mut self.target_logits_processor,
-            ModelRole::Draft => &mut self.draft_logits_processor,
+        let sampler = match model_role {
+            ModelRole::Target => &mut self.target_sampler,
+            ModelRole::Draft => &mut self.draft_sampler,
         };
-        logits_processor.sample(&logits).map_err(Into::into)
+        sampler.sample(logits, &self.tokens, appended_tokens)
     }
 
     fn commit_next_token(&mut self, next_token: u32) -> bool {
@@ -1116,16 +1097,25 @@ impl RequestExecutionBatch {
     }
 }
 
-fn create_logits_processor(request: &GenerateTextRequest) -> LogitsProcessor {
+fn create_samplers(request: &GenerateTextRequest) -> Result<(Sampler, Sampler)> {
     let seed = request.seed.unwrap_or_else(rand::random);
-    let sampling = if request.temperature == 0.0 {
-        Sampling::ArgMax
-    } else {
-        Sampling::All {
-            temperature: f64::from(request.temperature),
-        }
-    };
-    LogitsProcessor::from_sampling(seed, sampling)
+    let repeat_last_n =
+        usize::try_from(request.repeat_last_n).context("repeat_last_n does not fit in usize")?;
+    // Keep the target's existing seed sequence and give the draft its own RNG stream.
+    Ok((
+        Sampler::new(
+            request.temperature,
+            seed,
+            request.repeat_penalty,
+            repeat_last_n,
+        ),
+        Sampler::new(
+            /* temperature */ 0.0,
+            seed.wrapping_add(1),
+            request.repeat_penalty,
+            repeat_last_n,
+        ),
+    ))
 }
 
 fn determine_initial_phase(
@@ -1191,6 +1181,27 @@ mod tests {
     use candle_core::Device;
     use std::sync::Arc;
     use std::sync::Mutex;
+
+    #[test]
+    fn configures_target_temperature_and_keeps_draft_decoding_greedy() -> Result<()> {
+        let request = GenerateTextRequest {
+            temperature: 0.7,
+            repeat_penalty: 1.0,
+            seed: Some(0),
+            ..Default::default()
+        };
+        let (mut target, mut draft) = create_samplers(&request)?;
+        let (mut reference_target, _) = create_samplers(&request)?;
+        let logits = Tensor::new(&[0.0f32, 0.5, 1.0], &Device::Cpu)?;
+        for _ in 0..32 {
+            assert_eq!(draft.sample(&logits, &[], &[])?, 2);
+            assert_eq!(
+                target.sample(&logits, &[], &[])?,
+                reference_target.sample(&logits, &[], &[])?
+            );
+        }
+        Ok(())
+    }
 
     fn acceptance_rate_controller() -> DraftTokenCountController {
         DraftTokenCountController::new(DraftTokenCountPolicy::AcceptanceRate {
@@ -1348,11 +1359,9 @@ mod tests {
                 }),
             )),
             max_new_token_count: 16,
-            repeat_last_n: 64,
-            repeat_penalty: 1.0,
             eos_tokens,
-            target_logits_processor: LogitsProcessor::new(0, None, None),
-            draft_logits_processor: LogitsProcessor::new(0, None, None),
+            target_sampler: Sampler::new(0.0, 0, 1.0, 64),
+            draft_sampler: Sampler::new(0.0, 1, 1.0, 64),
             prefill_initial_positions: PrefillStartPositions {
                 target: 0,
                 draft: None,
