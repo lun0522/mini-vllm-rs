@@ -260,10 +260,21 @@ impl PagedKvCache {
             request_state.page_ids_by_layer(),
         )?;
         self.physical_page_pool
-            .retain_allocated_pages_or_rollback(indexing_result.page_ids.iter())?;
-        let newly_indexed_token_count = request_state.record_prefix_publication(indexing_result)?;
+            .retain_allocated_pages_or_rollback(indexing_result.newly_indexed_page_ids.iter())?;
+
+        // Retain the existing cached pages before adopting them in the request's block tables
+        // and releasing the redundant computed pages. A failed retain leaves the mappings intact.
+        self.physical_page_pool.retain_allocated_pages_or_rollback(
+            indexing_result
+                .page_replacements
+                .iter()
+                .map(|replacement| &replacement.page_id),
+        )?;
+        let publication_result = request_state.record_prefix_publication(indexing_result)?;
+        self.physical_page_pool
+            .release_allocated_pages(publication_result.replaced_page_ids)?;
         self.prefix_cache_counters
-            .add_indexed_token_count(newly_indexed_token_count);
+            .add_indexed_token_count(publication_result.newly_indexed_token_count);
         Ok(())
     }
 
@@ -905,6 +916,232 @@ mod tests {
                 .page_ids_by_layer,
             vec![indexed_page_ids]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn adopts_duplicate_pages_across_layers_and_preserves_the_partial_tail() -> Result<()> {
+        let mut cache = paged_cache_with_prefix_caching(2, 2, 10, true)?;
+        let mut first = RequestPagedCacheState::new(2, 2);
+        for layer_index in 0..2 {
+            cache.cache.append_new_key_value(
+                &mut first,
+                layer_index,
+                0,
+                &cache_tensor(0, 4)?,
+                &cache_tensor(100, 4)?,
+            )?;
+            cache.append(layer_index, 0, &cache_tensor(0, 5)?, &cache_tensor(100, 5)?)?;
+        }
+        let canonical_pages: Vec<Vec<_>> =
+            first.page_ids_by_layer().map(<[PageId]>::to_vec).collect();
+        let original_pages: Vec<Vec<_>> = cache
+            .request_state
+            .page_ids_by_layer()
+            .map(<[PageId]>::to_vec)
+            .collect();
+        cache
+            .cache
+            .publish_completed_prefix(&mut first, &[1, 2, 3, 4])?;
+
+        // Repeated publication must neither retain the canonical pages twice nor publish the tail.
+        for _ in 0..2 {
+            cache
+                .cache
+                .publish_completed_prefix(&mut cache.request_state, &[1, 2, 3, 4, 5])?;
+            assert_eq!(cache.request_state.accumulated_indexed_token_count(), 0);
+            for layer_index in 0..2 {
+                assert_eq!(
+                    &cache.page_ids(layer_index)[..2],
+                    &canonical_pages[layer_index]
+                );
+                assert_eq!(
+                    cache.page_ids(layer_index)[2],
+                    original_pages[layer_index][2]
+                );
+                assert_eq!(cache.cached_token_count(layer_index), 5);
+                for &page_id in &canonical_pages[layer_index] {
+                    assert_eq!(
+                        cache.physical_page_pool.page_states[page_id.0],
+                        PageState::WrittenInUse { reader_count: 2 }
+                    );
+                }
+                for &page_id in &original_pages[layer_index][..2] {
+                    assert_eq!(
+                        cache.physical_page_pool.page_states[page_id.0],
+                        PageState::Unallocated
+                    );
+                }
+                let cached =
+                    cache.get_contiguous_cache_tensors(&cache.request_state, layer_index)?;
+                assert_eq!(tensor_values(&cached.key)?, vec![0, 1, 2, 3, 4]);
+                assert_eq!(tensor_values(&cached.value)?, vec![100, 101, 102, 103, 104]);
+            }
+            assert_eq!(cache.physical_page_pool.free_page_count(), 4);
+        }
+
+        cache.cache.reset_request(&mut first)?;
+        for (layer_index, canonical_layer_pages) in canonical_pages.iter().enumerate() {
+            for &page_id in canonical_layer_pages {
+                assert_eq!(
+                    cache.physical_page_pool.page_states[page_id.0],
+                    PageState::WrittenInUse { reader_count: 1 }
+                );
+            }
+            // The private partial tail stays writable after adopting the immutable prefix pages.
+            let cached =
+                cache.append(layer_index, 5, &cache_tensor(5, 1)?, &cache_tensor(105, 1)?)?;
+            assert_eq!(tensor_values(&cached.key)?, vec![0, 1, 2, 3, 4, 5]);
+            assert_eq!(
+                tensor_values(&cached.value)?,
+                vec![100, 101, 102, 103, 104, 105]
+            );
+        }
+        assert_eq!(finish_request(&mut cache, &[1, 2, 3, 4, 5, 6])?, 2);
+
+        // All adopted references must be released, including across layers, for full reuse.
+        for layer_index in 0..2 {
+            cache.append(
+                layer_index,
+                0,
+                &cache_tensor(10, 10)?,
+                &cache_tensor(110, 10)?,
+            )?;
+        }
+        let telemetry = cache.prefix_cache_telemetry().unwrap();
+        assert_eq!(telemetry.current_indexed_token_count, 0);
+        assert_eq!(telemetry.cumulative_evicted_token_count, 6);
+        cache.reset_active_block_tables()?;
+        assert_eq!(cache.physical_page_pool.free_page_count(), 10);
+        Ok(())
+    }
+
+    #[test]
+    fn rolls_back_duplicate_page_retains_before_changing_any_request_mappings() -> Result<()> {
+        let mut cache = paged_cache_with_prefix_caching(2, 2, 4, true)?;
+        let mut first = RequestPagedCacheState::new(2, 2);
+        for layer_index in 0..2 {
+            cache.cache.append_new_key_value(
+                &mut first,
+                layer_index,
+                0,
+                &cache_tensor(0, 2)?,
+                &cache_tensor(100, 2)?,
+            )?;
+            cache.append(layer_index, 0, &cache_tensor(0, 2)?, &cache_tensor(100, 2)?)?;
+        }
+        cache.cache.publish_completed_prefix(&mut first, &[1, 2])?;
+        let canonical_pages: Vec<_> = first.page_ids_by_layer().map(|pages| pages[0]).collect();
+        let original_pages: Vec<_> = cache
+            .request_state
+            .page_ids_by_layer()
+            .map(|pages| pages[0])
+            .collect();
+
+        // Fail in the second layer after the first canonical page has already been retained.
+        cache.physical_page_pool.page_states[canonical_pages[1].0] = PageState::WrittenInUse {
+            reader_count: u32::MAX,
+        };
+        let error = cache
+            .cache
+            .publish_completed_prefix(&mut cache.request_state, &[1, 2])
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("physical page reader count overflow"));
+        assert_eq!(
+            cache.physical_page_pool.page_states[canonical_pages[0].0],
+            PageState::WrittenInUse { reader_count: 1 }
+        );
+        assert_eq!(
+            cache.physical_page_pool.page_states[canonical_pages[1].0],
+            PageState::WrittenInUse {
+                reader_count: u32::MAX
+            }
+        );
+        for (layer_index, &page_id) in original_pages.iter().enumerate() {
+            assert_eq!(cache.page_ids(layer_index), &[page_id]);
+            assert_eq!(
+                cache.physical_page_pool.page_states[page_id.0],
+                PageState::PendingWrite
+            );
+        }
+        assert_eq!(
+            cache
+                .request_state
+                .prefix_block_cursor()
+                .matched_token_count(),
+            0
+        );
+        assert_eq!(cache.request_state.accumulated_indexed_token_count(), 0);
+        assert_eq!(cache.physical_page_pool.free_page_count(), 0);
+
+        // After removing the injected failure, publication can retry and normal cleanup works.
+        cache.physical_page_pool.page_states[canonical_pages[1].0] =
+            PageState::WrittenInUse { reader_count: 1 };
+        cache
+            .cache
+            .publish_completed_prefix(&mut cache.request_state, &[1, 2])?;
+        cache.cache.reset_request(&mut first)?;
+        cache.reset_active_block_tables()?;
+        for page_id in canonical_pages {
+            assert_eq!(
+                cache.physical_page_pool.page_states[page_id.0],
+                PageState::WrittenNotInUse
+            );
+        }
+        assert_eq!(cache.physical_page_pool.free_page_count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_publication_survives_eviction_pressure_and_releases_its_pages() -> Result<()> {
+        let mut cache = paged_cache_with_prefix_caching(1, 2, 3, true)?.cache;
+        let mut first = RequestPagedCacheState::new(1, 2);
+        let mut duplicate = RequestPagedCacheState::new(1, 2);
+        let mut other = RequestPagedCacheState::new(1, 2);
+        let key = cache_tensor(0, 2)?;
+        let value = cache_tensor(100, 2)?;
+
+        // Both requests compute the same prefix before either publishes it.
+        cache.append_new_key_value(&mut first, 0, 0, &key, &value)?;
+        cache.append_new_key_value(&mut duplicate, 0, 0, &key, &value)?;
+        cache.publish_completed_prefix(&mut first, &[1, 2])?;
+        cache.publish_completed_prefix(&mut duplicate, &[1, 2])?;
+        cache.reset_request(&mut first)?;
+
+        // Without replacing the duplicate's pages, these appends evict its cursor's parent.
+        cache.append_new_key_value(&mut other, 0, 0, &key, &value)?;
+        cache.append_new_key_value(
+            &mut duplicate,
+            0,
+            2,
+            &cache_tensor(2, 2)?,
+            &cache_tensor(102, 2)?,
+        )?;
+        cache.publish_completed_prefix(&mut duplicate, &[1, 2, 3, 4])?;
+        let cached = cache.get_contiguous_cache_tensors(&duplicate, 0)?;
+        assert_eq!(tensor_values(&cached.key)?, vec![0, 1, 2, 3]);
+        assert_eq!(tensor_values(&cached.value)?, vec![100, 101, 102, 103]);
+        assert_eq!(
+            cache
+                .prefix_cache_telemetry()
+                .unwrap()
+                .cumulative_evicted_token_count,
+            0
+        );
+
+        // Normal cleanup must release the adopted pages, allowing every cached block to evict.
+        cache.reset_request(&mut duplicate)?;
+        cache.reset_request(&mut other)?;
+        cache.append_new_key_value(
+            &mut other,
+            0,
+            0,
+            &cache_tensor(10, 6)?,
+            &cache_tensor(110, 6)?,
+        )?;
+        let telemetry = cache.prefix_cache_telemetry().unwrap();
+        assert_eq!(telemetry.cumulative_evicted_token_count, 4);
+        assert_eq!(telemetry.current_indexed_token_count, 0);
         Ok(())
     }
 

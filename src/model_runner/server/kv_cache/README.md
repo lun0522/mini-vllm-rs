@@ -61,9 +61,9 @@ stateDiagram-v2
     [*] --> Unallocated
     Unallocated --> PendingWrite: Allocate for active request
     PendingWrite --> WrittenInUse: Index completed block
-    PendingWrite --> Unallocated: Reset unindexed page
+    PendingWrite --> Unallocated: Release unindexed page
     WrittenInUse --> WrittenNotInUse: Release final active reader
-    WrittenNotInUse --> WrittenInUse: Restore cached block
+    WrittenNotInUse --> WrittenInUse: Restore or adopt cached block
     WrittenInUse --> WrittenInUse: Add or release readers
     WrittenNotInUse --> Unallocated: Evict under memory pressure
 ```
@@ -90,9 +90,13 @@ flowchart TD
     Attach --> Work[Prefill unmatched tokens and generate]
     Work -->|Reject draft tokens| Truncate[Truncate request cache]
     Truncate --> Work
-    Work -->|Request succeeds| Index["PrefixBlockIndex::index_cached_sequence"]
+    Work -->|Publication checkpoint or request succeeds| Index["PrefixBlockIndex::index_cached_sequence"]
     Index --> RetainNew["PhysicalPagePool retains newly indexed complete pages"]
-    RetainNew --> Reset["Reset virtual mappings and release active references"]
+    RetainNew --> RetainExisting["Retain canonical pages for duplicate blocks"]
+    RetainExisting --> Adopt["Replace duplicate mappings and release redundant pages"]
+    Adopt --> Complete{Request complete?}
+    Complete -->|No| Work
+    Complete -->|Yes| Reset["Reset virtual mappings and release active references"]
     Work -->|Request fails or is cancelled| Reset
     Restore -->|Restoration fails| Reset
     Reset --> Request
@@ -111,9 +115,27 @@ flowchart TD
 - Each concurrently scheduled request has its own block tables and cached-token
   counts. Truncation after rejected draft tokens releases pages that are no
   longer part of that request.
-- Eviction excludes the allocating request's active prefix cursor. Page
-  reference counts prevent storage used by any other active request from being
-  overwritten, even if its prefix-index leaf is evicted.
+- Eviction selects only leaf blocks whose pages have no active readers. Request
+  block-table references protect their indexed blocks, including the publication
+  cursor's block; ancestors remain protected by the index's parent-child links.
+
+### Duplicate prefix publication
+
+Concurrent requests may compute the same prefix before either publishes it.
+When publication finds a block already in the index, it adopts that block's
+canonical pages instead of keeping the request's redundant computed pages:
+
+1. `PrefixBlockIndex` returns a `PrefixPageReplacement` for each mapping that
+   differs from the canonical block's pages.
+2. `PagedKvCache` retains the canonical pages before `RequestPagedCacheState`
+   replaces the corresponding block-table entries and advances its cursor.
+3. `PrefixPublicationResult::page_ids_to_release` identifies the old pages for
+   `PagedKvCache` to release. Partial tail pages remain private and writable.
+
+The block tables therefore track every page reference needed to keep the
+publication cursor valid. Normal request cleanup releases the adopted pages;
+no separate cursor pin is needed. Repeated publication skips blocks already
+covered by the cursor, so it does not add references again.
 
 ## Prefix-block index example
 

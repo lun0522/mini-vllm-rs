@@ -26,6 +26,12 @@ pub(super) struct LayerCacheView<'a> {
     pub(super) cached_token_count: usize,
 }
 
+/// Publication accounting and replaced pages whose request ownership must be released.
+pub(super) struct PrefixPublicationResult {
+    pub(super) newly_indexed_token_count: usize,
+    pub(super) replaced_page_ids: Vec<PageId>,
+}
+
 /// Holds the virtual page mappings and prefix-publication progress for one request.
 pub(in crate::model_runner::server) struct RequestPagedCacheState {
     per_page_token_count: usize,
@@ -123,22 +129,37 @@ impl RequestPagedCacheState {
         Ok(())
     }
 
-    /// Advances prefix-publication progress and returns the number of tokens newly indexed by this
-    /// publication.
+    /// Adopts already-retained canonical pages and advances prefix-publication progress. Returns
+    /// the newly indexed token count and the replaced pages whose ownership must be released.
     pub(super) fn record_prefix_publication(
         &mut self,
         publication: PrefixIndexingResult,
-    ) -> Result<usize> {
+    ) -> Result<PrefixPublicationResult> {
         let newly_indexed_token_count = publication
             .block_count
             .checked_mul(self.per_page_token_count)
             .context("newly indexed prefix token count overflow")?;
-        self.accumulated_indexed_token_count = self
+        let accumulated_indexed_token_count = self
             .accumulated_indexed_token_count
             .checked_add(newly_indexed_token_count)
             .context("accumulated request prefix token count overflow")?;
+        let replaced_page_ids = publication
+            .page_replacements
+            .into_iter()
+            .map(|replacement| {
+                std::mem::replace(
+                    &mut self.layer_block_tables[replacement.layer_index].page_ids
+                        [replacement.block_index],
+                    replacement.page_id,
+                )
+            })
+            .collect();
+        self.accumulated_indexed_token_count = accumulated_indexed_token_count;
         self.prefix_block_cursor = publication.cursor;
-        Ok(newly_indexed_token_count)
+        Ok(PrefixPublicationResult {
+            newly_indexed_token_count,
+            replaced_page_ids,
+        })
     }
 
     /// Resets all request-local cache state and returns the physical pages it no longer references.

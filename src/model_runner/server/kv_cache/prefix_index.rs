@@ -114,9 +114,21 @@ pub(super) struct EvictedPrefixBlock {
     pub(super) page_ids_by_layer: Box<[PageId]>,
 }
 
+/// Replaces one request block-table entry with an already indexed canonical page when publication
+/// finds a duplicate prefix block. The caller retains the canonical page before swapping the entry
+/// and releasing the redundant page, so request ownership protects the publication cursor's block
+/// from eviction and normal request cleanup releases that ownership.
+#[derive(Debug)]
+pub(super) struct PrefixPageReplacement {
+    pub(super) layer_index: usize,
+    pub(super) block_index: usize,
+    pub(super) page_id: PageId,
+}
+
 #[derive(Debug)]
 pub(super) struct PrefixIndexingResult {
-    pub(super) page_ids: Vec<PageId>,
+    pub(super) newly_indexed_page_ids: Vec<PageId>,
+    pub(super) page_replacements: Vec<PrefixPageReplacement>,
     pub(super) block_count: usize,
     pub(super) cursor: PrefixBlockCursor,
 }
@@ -220,6 +232,7 @@ impl PrefixBlockIndex {
         let mut previous_block_key = cursor.block_key.clone();
         let mut is_appending_new_branch = false;
         let mut newly_indexed_page_ids = Vec::new();
+        let mut page_replacements = Vec::new();
         let mut newly_indexed_block_count = 0usize;
         for (block_index, token_id_block) in sequence_token_ids
             .chunks_exact(self.per_block_token_count)
@@ -234,6 +247,22 @@ impl PrefixBlockIndex {
             if !is_appending_new_branch {
                 if let Some(block) = self.blocks_map.get(&key) {
                     block.update_access_timestamp(current_timestamp);
+                    // The publication cursor will depend on this canonical block. Adopt its
+                    // pages in the request's tables so their ownership also protects the cursor.
+                    for (layer_index, (&page_id, cached_page_ids)) in block
+                        .page_ids_by_layer
+                        .iter()
+                        .zip(cached_page_ids_by_layer.clone())
+                        .enumerate()
+                    {
+                        if page_id != cached_page_ids[block_index] {
+                            page_replacements.push(PrefixPageReplacement {
+                                layer_index,
+                                block_index,
+                                page_id,
+                            });
+                        }
+                    }
                     parent_id = Some(block.block_id);
                     previous_block_key = Some(key);
                     // Continue walking the cached prefix after finding this existing block.
@@ -279,7 +308,8 @@ impl PrefixBlockIndex {
             .checked_mul(self.per_block_token_count)
             .context("indexed prefix token count overflow")?;
         Ok(PrefixIndexingResult {
-            page_ids: newly_indexed_page_ids,
+            newly_indexed_page_ids,
+            page_replacements,
             block_count: newly_indexed_block_count,
             cursor: PrefixBlockCursor {
                 block_id: parent_id,
