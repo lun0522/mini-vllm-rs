@@ -8,8 +8,8 @@ becomes useful despite that speed difference.
 The measured profile for this workload puts GPU prefill at 2,551 tok/s versus
 73 tok/s on CPU, a roughly 35× advantage. Decode narrows the gap to 293 versus
 45 tok/s, or about 6.5×. The benchmark therefore pre-populates the same prefix
-cache on both backends, leaving only a few input tokens to prefill, and requests
-128 output tokens so decode dominates. This gives the CPU its best plausible
+cache on both backends, leaving only a few input tokens to prefill, and uses
+128-token outputs so decode dominates. This gives the CPU its best plausible
 chance to help once GPU work accumulates.
 
 The benchmark holds the routing policy, request shape, cached prefix,
@@ -57,7 +57,7 @@ Each workload runs twice on a fresh server:
   to backend 2.
 - **Mixed routing:** **Cache-aware least estimated work** selects between the
   CPU and GPU from cache-affinity snapshots, published load, and outstanding
-  ingress reservations.
+  ingress reservations for dispatched work not yet reflected in worker load.
 
 Exploratory runs varied the request count and found that CPU offloading began
 with the 7th request; 6 requests still stayed entirely on the GPU. The measured
@@ -74,6 +74,20 @@ recalibrated after changing the model, hardware, request shape, pacing, or
 throughput profiles.
 
 ## Results
+
+### Metrics
+
+- **Wall time:** Time from the first measured submission until all responses
+  have been consumed; excludes server startup and seed requests.
+- **Aggregate output throughput:** Total generated tokens divided by wall time.
+- **TTFT (time to first token):** Time from client submission until its first
+  streamed output.
+- **E2E (end-to-end latency):** Time from client submission until its final
+  streamed output.
+- **p25, p75, and p95:** The 25th-, 75th-, and 95th-percentile request
+  latencies within one benchmark invocation.
+- **Restored tokens:** Page-aligned input tokens reused from a backend's prefix
+  cache, summed across measured requests.
 
 ### CPU Use Increased with GPU Backlog
 
@@ -203,11 +217,11 @@ both seed destinations, nonzero cache reuse, request IDs, routing epochs,
 candidate duration estimates, and selection of the minimum estimated score for
 every mixed-routing request.
 
-All wall-time and aggregate-throughput coefficients of variation were at most
-1.47%. Five small-workload TTFT metrics exceeded 5%, with a maximum of 19.15%
-for the mixed crossover median. Saturated mixed-routing p95 TTFT had 5.10% CV;
-its three values were 55.315, 50.608, and 55.402 seconds, with the lower value
-occurring in the run that sent six rather than five requests to CPU.
+All wall-time and aggregate-throughput coefficients of variation (CV) were at
+most 1.47%. Five small-workload TTFT metrics exceeded 5%, with a maximum of
+19.15% for the mixed crossover median. Saturated mixed-routing p95 TTFT had
+5.10% CV; its three values were 55.315, 50.608, and 55.402 seconds, with the
+lower value occurring in the run that sent six rather than five requests to CPU.
 
 The small-workload TTFT percentages are sensitive to millisecond-scale changes
 and medians over only four or seven requests. Placement, wall time, and output

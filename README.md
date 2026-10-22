@@ -7,8 +7,8 @@ completeness. The project currently supports macOS only.
 
 Supported features:
 
-- **Quantized GGUF inference** for Qwen2 and Llama, with streaming or buffered
-  output and generation statistics.
+- **Native Rust GGUF inference** for quantized Qwen2 and Llama models on CPU
+  and Metal, with streaming or buffered output and generation statistics.
 - **Continuous batching** with dynamic admission, cancellation, chunked prefill,
   and batched prefill, decode, and speculative verification.
 - **Speculative decoding** with a tokenizer-compatible draft model, batched
@@ -16,7 +16,8 @@ Supported features:
 - **Paged KV-cache management** and **prefix caching** on both CPU and Metal.
   **Paged attention** is currently CPU-only; Metal reconstructs contiguous
   tensors before attention.
-- Separate request-handling and model-inference processes.
+- **Heterogeneous CPU/Metal inference** with concurrent backend execution and
+  load- and cache-aware request routing.
 
 If you are interested in the project's design, see the
 [architecture and process model](ARCHITECTURE.md). It explains the three-process

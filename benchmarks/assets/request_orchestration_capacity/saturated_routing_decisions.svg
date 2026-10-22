@@ -62,7 +62,7 @@
 <g><title>Request 48: GPU, 5.166 s score margin</title><rect x="1110" y="279" width="58" height="60" rx="4" fill="#2563eb" fill-opacity="0.527" stroke="#2563eb" stroke-width="1.5"/><text x="1139" y="303" text-anchor="middle" class="number">48</text><text x="1139" y="323" text-anchor="middle" class="margin">5.2s</text></g>
 <rect x="258" y="378" width="20" height="14" rx="2" fill="#2563eb"/><text x="286" y="390" class="legend">Metal GPU</text>
 <rect x="382" y="378" width="20" height="14" rx="2" fill="#d97706"/><text x="410" y="390" class="legend">CPU</text>
-<rect x="480" y="378" width="180" height="14" rx="2" fill="url(#gpuStrength)" stroke="#2563eb" stroke-width="1"/><text x="470" y="390" text-anchor="end" class="legend">close</text><text x="670" y="390" class="legend">strong preference</text>
+<rect x="540" y="378" width="180" height="14" rx="2" fill="url(#gpuStrength)" stroke="#2563eb" stroke-width="1"/><text x="530" y="390" text-anchor="end" class="legend">close</text><text x="730" y="390" class="legend">strong preference</text>
 <text x="625" y="425" text-anchor="middle" class="note">Shade strength uses |CPU score − GPU score| / max(CPU score, GPU score); the displayed margin is the absolute difference.</text>
 </svg>
 
