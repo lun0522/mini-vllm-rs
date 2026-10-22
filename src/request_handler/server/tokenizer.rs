@@ -65,7 +65,6 @@ impl TokenizerWrapper {
         &self,
         request: GenerateText,
     ) -> Result<GenerateTextRequest> {
-        validate_generation_parameters(&request)?;
         let prompt = self.format_chat_prompt(&request.prompt);
         let encoding = self
             .tokenizer
@@ -85,6 +84,8 @@ impl TokenizerWrapper {
         Ok(GenerateTextRequest {
             input_token_ids,
             max_new_tokens: request.max_new_tokens,
+            temperature: request.temperature,
+            seed: request.seed,
             repeat_penalty: request.repeat_penalty,
             repeat_last_n: request.repeat_last_n,
             end_of_sequence_token_ids,
@@ -148,14 +149,6 @@ fn load_tokenizer(path: &Path) -> Result<Tokenizer> {
     Tokenizer::from_file(path)
         .map_err(Error::msg)
         .context("failed to load the tokenizer")
-}
-
-fn validate_generation_parameters(request: &GenerateText) -> Result<()> {
-    anyhow::ensure!(
-        request.repeat_penalty.is_finite() && request.repeat_penalty > 0.0,
-        "repeat_penalty must be finite and greater than zero"
-    );
-    Ok(())
 }
 
 fn resolve_end_of_sequence_token_ids(
@@ -285,6 +278,8 @@ mod tests {
             stream_output: true,
             ignore_eos_tokens: false,
             benchmark_backend_id: 2,
+            temperature: 0.7,
+            seed: Some(0),
         };
 
         let tokenized = tokenizer.create_generate_text_request(request).unwrap();
@@ -296,6 +291,8 @@ mod tests {
         assert_eq!(tokenized.repeat_last_n, 32);
         assert_eq!(tokenized.request_id, 42);
         assert_eq!(tokenized.benchmark_backend_id, 2);
+        assert_eq!(tokenized.temperature, 0.7);
+        assert_eq!(tokenized.seed, Some(0));
     }
 
     #[test]
@@ -316,18 +313,7 @@ mod tests {
         let tokenized = tokenizer.create_generate_text_request(request).unwrap();
 
         assert!(tokenized.end_of_sequence_token_ids.is_empty());
-    }
-
-    #[test]
-    fn rejects_invalid_repeat_penalties() {
-        for repeat_penalty in [0.0, -1.0, f32::INFINITY, f32::NAN] {
-            let request = GenerateText {
-                repeat_penalty,
-                ..Default::default()
-            };
-
-            assert!(validate_generation_parameters(&request).is_err());
-        }
+        assert_eq!(tokenized.seed, None);
     }
 
     #[test]

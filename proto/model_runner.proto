@@ -82,15 +82,19 @@ message GenerateTextRequest {
   repeated uint32 input_token_ids = 2;
   // Maximum number of tokens the model may generate before stopping.
   uint64 max_new_tokens = 3;
+  // Sampling temperature over the full vocabulary; zero selects greedy decoding.
+  float temperature = 4;
+  // Random sampling seed; omitted selects a random seed. Zero is a valid seed.
+  optional uint64 seed = 5;
   // Positive finite penalty applied to previously seen tokens; 1.0 disables it.
-  float repeat_penalty = 4;
+  float repeat_penalty = 6;
   // Number of recent tokens considered when applying the repetition penalty.
-  uint64 repeat_last_n = 5;
+  uint64 repeat_last_n = 7;
   // Token IDs that terminate generation without being emitted.
-  repeated uint32 end_of_sequence_token_ids = 6;
+  repeated uint32 end_of_sequence_token_ids = 8;
   // Benchmarking only: one-based backend ID to use instead of orchestrator selection; zero lets
   // the orchestrator select the backend normally.
-  uint64 benchmark_backend_id = 7;
+  uint64 benchmark_backend_id = 9;
 }
 
 message GenerateTextEvent {

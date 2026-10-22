@@ -243,6 +243,7 @@ impl ModelRunnerService for ModelRunnerRpcService {
             &mut request,
             self.metadata.kv_cache_token_capacity,
             model_context_length,
+            self.metadata.model_metadata.draft_model.is_some(),
         )
         .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let backend_id_override = resolve_benchmark_backend_id(
@@ -430,6 +431,7 @@ fn normalize_generate_text_request(
     request: &mut GenerateTextRequest,
     kv_cache_token_capacity: usize,
     model_context_length: usize,
+    is_speculative_decoding_enabled: bool,
 ) -> Result<()> {
     ensure!(
         !request.input_token_ids.is_empty(),
@@ -449,6 +451,19 @@ fn normalize_generate_text_request(
     ensure!(
         request.max_new_tokens > 0,
         "max_new_tokens must be greater than zero"
+    );
+    ensure!(
+        request.temperature.is_finite() && request.temperature >= 0.0,
+        "temperature must be finite and nonnegative"
+    );
+    // TODO: Support temperature sampling with speculative decoding.
+    ensure!(
+        !is_speculative_decoding_enabled || request.temperature == 0.0,
+        "speculative decoding requires temperature to be 0"
+    );
+    ensure!(
+        request.repeat_penalty.is_finite() && request.repeat_penalty > 0.0,
+        "repeat_penalty must be finite and greater than zero"
     );
 
     // The final generated token remains pending rather than being written to the cache, so one
@@ -646,10 +661,11 @@ mod tests {
         let mut request = GenerateTextRequest {
             input_token_ids: vec![1, 2, 3],
             max_new_tokens: 3,
+            repeat_penalty: 1.0,
             ..Default::default()
         };
 
-        normalize_generate_text_request(&mut request, 4, 32).unwrap();
+        normalize_generate_text_request(&mut request, 4, 32, false).unwrap();
 
         assert_eq!(request.max_new_tokens, 2);
     }
@@ -658,7 +674,7 @@ mod tests {
     fn rejects_empty_model_input() {
         let mut request = GenerateTextRequest::default();
 
-        let error = normalize_generate_text_request(&mut request, 16, 32).unwrap_err();
+        let error = normalize_generate_text_request(&mut request, 16, 32, false).unwrap_err();
 
         assert_eq!(error.to_string(), "input token IDs must not be empty");
     }
@@ -671,7 +687,7 @@ mod tests {
             ..Default::default()
         };
 
-        let error = normalize_generate_text_request(&mut request, 16, 32).unwrap_err();
+        let error = normalize_generate_text_request(&mut request, 16, 32, false).unwrap_err();
 
         assert_eq!(
             error.to_string(),
@@ -687,7 +703,7 @@ mod tests {
             ..Default::default()
         };
 
-        let error = normalize_generate_text_request(&mut request, 16, 32).unwrap_err();
+        let error = normalize_generate_text_request(&mut request, 16, 32, false).unwrap_err();
 
         assert!(error.to_string().contains("input contains 17 tokens"));
     }
@@ -697,10 +713,11 @@ mod tests {
         let mut request = GenerateTextRequest {
             input_token_ids: vec![1; 16],
             max_new_tokens: 8,
+            repeat_penalty: 1.0,
             ..Default::default()
         };
 
-        normalize_generate_text_request(&mut request, 16, 32).unwrap();
+        normalize_generate_text_request(&mut request, 16, 32, false).unwrap();
 
         assert_eq!(request.max_new_tokens, 1);
     }
@@ -716,12 +733,14 @@ mod tests {
             let mut request = GenerateTextRequest {
                 input_token_ids: vec![1; 3],
                 max_new_tokens: requested,
+                repeat_penalty: 1.0,
                 ..Default::default()
             };
             normalize_generate_text_request(
                 &mut request,
                 16,
                 get_effective_context_length(&metadata(target, draft)).unwrap(),
+                draft.is_some(),
             )
             .unwrap();
             assert_eq!(request.max_new_tokens, expected);
@@ -740,11 +759,66 @@ mod tests {
                 &mut request,
                 16,
                 get_effective_context_length(&metadata(target, draft)).unwrap(),
+                draft.is_some(),
             )
             .unwrap_err();
             assert!(error
                 .to_string()
                 .contains("effective model context limit is 3"));
+        }
+    }
+
+    #[test]
+    fn rejects_temperature_sampling_when_speculative_decoding_is_enabled() {
+        let mut request = GenerateTextRequest {
+            input_token_ids: vec![1],
+            max_new_tokens: 1,
+            temperature: 0.7,
+            ..Default::default()
+        };
+
+        let error = normalize_generate_text_request(&mut request, 16, 32, true).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "speculative decoding requires temperature to be 0"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_temperature_before_routing() {
+        for temperature in [-1.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            let mut request = GenerateTextRequest {
+                input_token_ids: vec![1],
+                max_new_tokens: 1,
+                temperature,
+                ..Default::default()
+            };
+
+            let error = normalize_generate_text_request(&mut request, 16, 32, false).unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "temperature must be finite and nonnegative"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_repeat_penalties_before_routing() {
+        for repeat_penalty in [0.0, -1.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            let mut request = GenerateTextRequest {
+                input_token_ids: vec![1],
+                max_new_tokens: 1,
+                repeat_penalty,
+                ..Default::default()
+            };
+
+            let error = normalize_generate_text_request(&mut request, 16, 32, false).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "repeat_penalty must be finite and greater than zero"
+            );
         }
     }
 }

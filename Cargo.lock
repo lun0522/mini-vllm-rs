@@ -1879,6 +1879,7 @@ dependencies = [
  "log",
  "prost",
  "prost-reflect",
+ "rand 0.9.5",
  "tempfile",
  "thousands",
  "tokenizers",

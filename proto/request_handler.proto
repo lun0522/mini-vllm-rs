@@ -21,17 +21,21 @@ message GenerateText {
   string prompt = 2;
   // Maximum number of tokens the model may generate before stopping.
   uint64 max_new_tokens = 3;
+  // Sampling temperature over the full vocabulary; zero selects greedy decoding.
+  float temperature = 4;
+  // Random sampling seed; omitted selects a random seed. Zero is a valid seed.
+  optional uint64 seed = 5;
   // Positive finite penalty applied to previously seen tokens; 1.0 disables it.
-  float repeat_penalty = 4;
+  float repeat_penalty = 6;
   // Number of recent tokens considered when applying the repetition penalty.
-  uint64 repeat_last_n = 5;
+  uint64 repeat_last_n = 7;
   // Whether text events contain incremental fragments or one buffered response.
-  bool stream_output = 6;
+  bool stream_output = 8;
   // Benchmarking only: ignore end-of-sequence tokens and generate until max_new_tokens is reached.
-  bool ignore_eos_tokens = 7;
+  bool ignore_eos_tokens = 9;
   // Benchmarking only: one-based backend ID to use instead of orchestrator selection; zero lets
   // the orchestrator select the backend normally.
-  uint64 benchmark_backend_id = 8;
+  uint64 benchmark_backend_id = 10;
 }
 
 message GenerateTextEvent {

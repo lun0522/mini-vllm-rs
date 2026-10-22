@@ -9,6 +9,7 @@ use candle_core::DType;
 use candle_core::IndexOp;
 use candle_core::Tensor;
 use candle_transformers::generation::LogitsProcessor;
+use candle_transformers::generation::Sampling;
 use candle_transformers::utils::apply_repeat_penalty;
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -225,6 +226,44 @@ pub(super) struct RequestExecutionState {
 }
 
 impl RequestExecutionState {
+    pub(super) fn new(
+        request: GenerateTextRequest,
+        draft_token_count_controller: Option<DraftTokenCountController>,
+        prefill_initial_positions: PrefillStartPositions,
+    ) -> Result<Self> {
+        let input_token_count = request.input_token_ids.len();
+        validate_prefill_start_positions(input_token_count, prefill_initial_positions)?;
+        ensure!(
+            draft_token_count_controller.is_some() == prefill_initial_positions.draft.is_some(),
+            "draft token-count controller and draft prefill position must both be present or absent"
+        );
+
+        let generation_phase =
+            determine_initial_phase(input_token_count, prefill_initial_positions);
+        let max_new_token_count = usize::try_from(request.max_new_tokens)
+            .context("max_new_tokens does not fit in usize")?;
+        let target_logits_processor = create_logits_processor(&request);
+        Ok(Self {
+            request_id: request.request_id,
+            tokens: request.input_token_ids,
+            input_token_count,
+            draft_token_count_state: draft_token_count_controller.map(DraftTokenCountState::new),
+            max_new_token_count,
+            repeat_last_n: usize::try_from(request.repeat_last_n)
+                .context("repeat_last_n does not fit in usize")?,
+            repeat_penalty: request.repeat_penalty,
+            eos_tokens: request.end_of_sequence_token_ids,
+            target_logits_processor,
+            draft_logits_processor: LogitsProcessor::new(0, None, None),
+            prefill_initial_positions,
+            prefill_current_positions: prefill_initial_positions,
+            generation_phase,
+            pending_output_token_ids: Vec::new(),
+            prefill_duration: Duration::ZERO,
+            decode_duration: Duration::ZERO,
+        })
+    }
+
     pub(super) fn request_id(&self) -> u64 {
         self.request_id
     }
@@ -237,47 +276,6 @@ impl RequestExecutionState {
 
     pub(super) fn phase(&self) -> GenerationPhase {
         self.generation_phase
-    }
-
-    pub(super) fn new(
-        request: GenerateTextRequest,
-        draft_token_count_controller: Option<DraftTokenCountController>,
-        prefill_initial_positions: PrefillStartPositions,
-    ) -> Result<Self> {
-        ensure!(
-            !request.input_token_ids.is_empty(),
-            "input token IDs must not be empty"
-        );
-        let input_token_count = request.input_token_ids.len();
-        validate_prefill_start_positions(input_token_count, prefill_initial_positions)?;
-        ensure!(
-            draft_token_count_controller.is_some() == prefill_initial_positions.draft.is_some(),
-            "draft token-count controller and draft prefill position must both be present or absent"
-        );
-
-        let generation_phase =
-            determine_initial_phase(input_token_count, prefill_initial_positions);
-        let max_new_token_count = usize::try_from(request.max_new_tokens)
-            .context("max_new_tokens does not fit in usize")?;
-        Ok(Self {
-            request_id: request.request_id,
-            tokens: request.input_token_ids,
-            input_token_count,
-            draft_token_count_state: draft_token_count_controller.map(DraftTokenCountState::new),
-            max_new_token_count,
-            repeat_last_n: usize::try_from(request.repeat_last_n)
-                .context("repeat_last_n does not fit in usize")?,
-            repeat_penalty: request.repeat_penalty,
-            eos_tokens: request.end_of_sequence_token_ids,
-            target_logits_processor: LogitsProcessor::new(0, None, None),
-            draft_logits_processor: LogitsProcessor::new(0, None, None),
-            prefill_initial_positions,
-            prefill_current_positions: prefill_initial_positions,
-            generation_phase,
-            pending_output_token_ids: Vec::new(),
-            prefill_duration: Duration::ZERO,
-            decode_duration: Duration::ZERO,
-        })
     }
 
     fn prepare_forward(
@@ -1116,6 +1114,18 @@ impl RequestExecutionBatch {
         }
         Ok(generation_steps)
     }
+}
+
+fn create_logits_processor(request: &GenerateTextRequest) -> LogitsProcessor {
+    let seed = request.seed.unwrap_or_else(rand::random);
+    let sampling = if request.temperature == 0.0 {
+        Sampling::ArgMax
+    } else {
+        Sampling::All {
+            temperature: f64::from(request.temperature),
+        }
+    };
+    LogitsProcessor::from_sampling(seed, sampling)
 }
 
 fn determine_initial_phase(
