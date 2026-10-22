@@ -28,7 +28,7 @@ impl LayerCache for ContiguousLayerCache {
 }
 
 /// Stores each layer's key and value tensors in fixed-size, preallocated pools.
-pub(in crate::model_runner::server) struct ContiguousKvCache {
+pub struct ContiguousKvCache {
     per_layer_token_capacity: usize,
     key_pool: Tensor,
     value_pool: Tensor,

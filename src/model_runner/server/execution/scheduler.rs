@@ -6,11 +6,11 @@ use anyhow::Context;
 use anyhow::Result;
 use std::cmp::Ordering;
 
-use super::kv_cache::KvCacheGeometry;
+use super::super::generation::text_generation::GenerationPhase;
+use super::super::kv_cache::KvCacheGeometry;
 use super::prefix_cache_flight::FlightAdmission;
 use super::prefix_cache_flight::PrefixCacheFlightCoordinator;
 use super::prefix_cache_flight::RequestTermination;
-use super::text_generation::GenerationPhase;
 
 struct RequestSchedulingMetadata {
     request_id: u64,
@@ -22,33 +22,33 @@ struct RequestSchedulingMetadata {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum SchedulingPhase {
+pub enum SchedulingPhase {
     Prefill { remaining_token_count: usize },
     Decode,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(super) struct ScheduledRequest {
-    pub(super) request_id: u64,
+pub struct ScheduledRequest {
+    pub request_id: u64,
     /// Caps prefill work. Decode receives one token of budget, but speculative decoding may emit
     /// multiple accepted tokens from that single scheduled step.
-    pub(super) token_budget: usize,
+    pub token_budget: usize,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(super) struct SchedulingDecision {
-    pub(super) requests: Vec<ScheduledRequest>,
+pub struct SchedulingDecision {
+    pub requests: Vec<ScheduledRequest>,
 }
 
 /// Aggregates raw request load facts without assigning policy-specific costs to them.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct SchedulerLoadSnapshot {
-    pub(super) queued_request_count: usize,
-    pub(super) active_request_count: usize,
-    pub(super) queued_remaining_prefill_token_count: usize,
-    pub(super) queued_remaining_max_output_token_count: usize,
-    pub(super) active_remaining_prefill_token_count: usize,
-    pub(super) active_remaining_max_output_token_count: usize,
+pub struct SchedulerLoadSnapshot {
+    pub queued_request_count: usize,
+    pub active_request_count: usize,
+    pub queued_remaining_prefill_token_count: usize,
+    pub queued_remaining_max_output_token_count: usize,
+    pub active_remaining_prefill_token_count: usize,
+    pub active_remaining_max_output_token_count: usize,
 }
 
 struct DecodeSchedulingResult {
@@ -62,7 +62,7 @@ struct PrefillSchedulingMetadata {
 }
 
 /// Owns scheduling metadata for requests waiting for admission and active execution.
-pub(super) struct Scheduler {
+pub struct Scheduler {
     max_batched_token_count: usize,
     max_active_request_count: usize,
     kv_cache_geometry: KvCacheGeometry,
@@ -74,7 +74,7 @@ pub(super) struct Scheduler {
 }
 
 impl Scheduler {
-    pub(super) fn new(config: SchedulerConfig, kv_cache_geometry: KvCacheGeometry) -> Self {
+    pub fn new(config: SchedulerConfig, kv_cache_geometry: KvCacheGeometry) -> Self {
         Self {
             max_batched_token_count: config.max_batched_token_count,
             max_active_request_count: config.max_active_request_count,
@@ -89,7 +89,7 @@ impl Scheduler {
         }
     }
 
-    pub(super) fn enqueue_request(
+    pub fn enqueue_request(
         &mut self,
         request_id: u64,
         input_token_ids: &[u32],
@@ -122,7 +122,7 @@ impl Scheduler {
     }
 
     /// Admits queued requests in policy order while active-request slots and cache pages remain.
-    pub(super) fn admit_queued_requests(&mut self) -> Vec<u64> {
+    pub fn admit_queued_requests(&mut self) -> Vec<u64> {
         if self.active_requests.len() >= self.max_active_request_count {
             return Vec::new();
         }
@@ -151,16 +151,16 @@ impl Scheduler {
         admitted_request_ids
     }
 
-    pub(super) fn complete_request(&mut self, request_id: u64) -> Result<()> {
+    pub fn complete_request(&mut self, request_id: u64) -> Result<()> {
         self.handle_request_termination(request_id, RequestTermination::Completed)
     }
 
-    pub(super) fn abort_request(&mut self, request_id: u64) -> Result<()> {
+    pub fn abort_request(&mut self, request_id: u64) -> Result<()> {
         self.handle_request_termination(request_id, RequestTermination::Aborted)
     }
 
     /// Releases requests waiting for the leader's successfully published prefix.
-    pub(super) fn release_prefix_flight(&mut self, request_id: u64) -> Result<()> {
+    pub fn release_prefix_flight(&mut self, request_id: u64) -> Result<()> {
         let Some(coordinator) = self.prefix_cache_flight_coordinator.as_mut() else {
             return Ok(());
         };
@@ -168,11 +168,11 @@ impl Scheduler {
         self.unblock_requests(runnable_request_ids)
     }
 
-    pub(super) fn is_vacant(&self) -> bool {
+    pub fn is_vacant(&self) -> bool {
         self.queued_requests.is_empty() && self.active_requests.is_empty()
     }
 
-    pub(super) fn create_load_snapshot(&self) -> SchedulerLoadSnapshot {
+    pub fn create_load_snapshot(&self) -> SchedulerLoadSnapshot {
         let mut snapshot = SchedulerLoadSnapshot {
             queued_request_count: self.queued_requests.len(),
             active_request_count: self.active_requests.len(),
@@ -195,7 +195,7 @@ impl Scheduler {
 
     /// Updates scheduling metadata and returns whether this transition requires prefix
     /// publication before the request's flight can be released.
-    pub(super) fn update_request_phase(
+    pub fn update_request_phase(
         &mut self,
         request_id: u64,
         generation_phase: GenerationPhase,
@@ -238,7 +238,7 @@ impl Scheduler {
         ))
     }
 
-    pub(super) fn remove_active_request(&mut self, request_id: u64) -> Result<()> {
+    pub fn remove_active_request(&mut self, request_id: u64) -> Result<()> {
         let request_index = self
             .active_requests
             .iter()
@@ -249,7 +249,7 @@ impl Scheduler {
     }
 
     /// Allocates the next model batch according to the configured scheduling policy.
-    pub(super) fn create_scheduling_decision(&mut self) -> SchedulingDecision {
+    pub fn create_scheduling_decision(&mut self) -> SchedulingDecision {
         let DecodeSchedulingResult {
             remaining_token_budget,
             mut requests,
@@ -465,7 +465,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_runner::server::generation_stats::GenerationFinishReason;
+    use crate::model_runner::server::generation::generation_stats::GenerationFinishReason;
     use crate::model_runner::PrefixCacheCoordinationPolicy;
 
     fn scheduler_with_token_budget(

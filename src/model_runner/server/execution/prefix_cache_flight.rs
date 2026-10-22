@@ -9,13 +9,13 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 #[derive(Debug, Eq, PartialEq)]
-pub(super) enum FlightAdmission {
+pub enum FlightAdmission {
     Leader,
     Follower,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RequestTermination {
+pub enum RequestTermination {
     Completed,
     Aborted,
 }
@@ -71,7 +71,7 @@ impl Flight {
 ///
 /// Flight membership is independent of the matching strategy. The initial exact-input index can
 /// later be replaced by prefix-aware matching without changing request or flight bookkeeping.
-pub(super) struct PrefixCacheFlightCoordinator {
+pub struct PrefixCacheFlightCoordinator {
     release_condition: FlightReleaseCondition,
     next_flight_id: FlightId,
     flights: HashMap<FlightId, Flight>,
@@ -82,7 +82,7 @@ pub(super) struct PrefixCacheFlightCoordinator {
 
 impl PrefixCacheFlightCoordinator {
     /// Creates a coordinator when the configured policy requires flight coordination.
-    pub(super) fn from_policy(policy: PrefixCacheCoordinationPolicy) -> Option<Self> {
+    pub fn from_policy(policy: PrefixCacheCoordinationPolicy) -> Option<Self> {
         match policy {
             PrefixCacheCoordinationPolicy::Independent => None,
             PrefixCacheCoordinationPolicy::ExactInputSingleFlightUntilRequestCompletion => {
@@ -106,7 +106,7 @@ impl PrefixCacheFlightCoordinator {
     }
 
     /// Returns whether the request leads a flight that releases after prefix publication.
-    pub(super) fn requires_prefix_publication(&self, request_id: u64) -> bool {
+    pub fn requires_prefix_publication(&self, request_id: u64) -> bool {
         if self.release_condition != FlightReleaseCondition::PrefixPublication {
             return false;
         }
@@ -117,7 +117,7 @@ impl PrefixCacheFlightCoordinator {
     }
 
     /// Adds a request and returns whether it should execute or wait for the current leader.
-    pub(super) fn add_request(
+    pub fn add_request(
         &mut self,
         request_id: u64,
         input_token_ids: &[u32],
@@ -140,7 +140,7 @@ impl PrefixCacheFlightCoordinator {
 
     /// Releases a leader's followers after successful prefix publication and returns their IDs.
     /// `request_id` must identify the flight's leader request.
-    pub(super) fn release_after_prefix_publication(&mut self, request_id: u64) -> Result<Vec<u64>> {
+    pub fn release_after_prefix_publication(&mut self, request_id: u64) -> Result<Vec<u64>> {
         if self.release_condition != FlightReleaseCondition::PrefixPublication {
             return Ok(Vec::new());
         }
@@ -163,7 +163,7 @@ impl PrefixCacheFlightCoordinator {
     /// A completed leader releases every follower. An aborted leader promotes the oldest follower.
     /// Followers can only be removed as aborted before release because they have not started
     /// execution. Released requests remain tracked until termination and return no runnable IDs.
-    pub(super) fn remove_request(
+    pub fn remove_request(
         &mut self,
         request_id: u64,
         request_termination: RequestTermination,

@@ -31,21 +31,35 @@ through the lifecycle client.
 
 ## Component responsibilities
 
+The server modules are grouped by responsibility:
+
+- `server/routing/` selects a backend and reserves its capacity.
+- `server/execution/` manages requests, schedules work, and runs the worker loop.
+  `prefix_cache_flight` belongs here because it coordinates request admission.
+- `server/generation/` implements token generation, sampling, and speculative
+  decoding behavior.
+- `server/kv_cache/` owns KV-cache storage and prefix reuse.
+
+`model_executor.rs` and `model_instance.rs` remain directly under `server/` and
+connect generation with model and cache ownership.
+
 | Component | Responsibility |
 | --- | --- |
 | `client.rs` | Starts and stops the process, waits for readiness, and owns socket cleanup. |
 | `server/cli.rs` | Receives model paths, device mode, cache settings, and scheduler settings from the main process. |
 | `server/mod.rs` | Serves tonic RPCs, validates request capacity, and dispatches requests to inference backends. |
-| `server/request_orchestrator.rs` | Selects an inference backend and reserves its pending request load without owning or dispatching through backend queues. |
-| `server/routing_policy.rs` | Scores candidate backends using worker snapshots and outstanding reservations, with policy-specific selection and tie-breaking. |
-| `server/inference_worker.rs` | Coordinates admission, scheduled execution, event delivery, timing, and cleanup for one backend. |
-| `server/request_manager.rs` | Owns request payloads, resumable execution state, response channels, and lifecycle timing. |
-| `server/scheduler.rs` | Owns scheduling metadata and applies active-request, KV-cache reservation, and token-budget limits. |
-| `server/prefix_cache_flight.rs` | Coordinates exact-input single flights and tracks whether followers wait for leader completion or prefix publication. |
+| `server/routing/request_orchestrator.rs` | Selects an inference backend and reserves its pending request load without owning or dispatching through backend queues. |
+| `server/routing/routing_policy.rs` | Scores candidate backends using worker snapshots and outstanding reservations, with policy-specific selection and tie-breaking. |
+| `server/execution/inference_worker.rs` | Coordinates admission, scheduled execution, event delivery, timing, and cleanup for one backend. |
+| `server/execution/request_manager.rs` | Owns request payloads, resumable execution state, response channels, and lifecycle timing. |
+| `server/execution/scheduler.rs` | Owns scheduling metadata and applies active-request, KV-cache reservation, and token-budget limits. |
+| `server/execution/prefix_cache_flight.rs` | Coordinates exact-input single flights and tracks whether followers wait for leader completion or prefix publication. |
 | `server/model_executor.rs` | Owns the target and optional draft model instances and manages their request lifecycles. |
 | `server/model_instance.rs` | Pairs one loaded model with its request-aware KV-cache manager. |
-| `server/text_generation.rs` | Implements resumable prefill, ordinary decoding, speculative decoding, and sampling. |
-| `server/generation_stats.rs` | Defines generation outcomes and execution, draft-model, and prefix-cache statistics. |
+| `server/generation/text_generation.rs` | Implements resumable prefill, ordinary decoding, speculative decoding, and sampling. |
+| `server/generation/sampler.rs` | Applies repetition penalties and greedy or seeded temperature sampling. |
+| `server/generation/draft_token_count.rs` | Controls the number of draft tokens proposed per speculative iteration. |
+| `server/generation/generation_stats.rs` | Defines generation outcomes and execution, draft-model, and prefix-cache statistics. |
 | [`server/kv_cache/`](server/kv_cache/README.md) | Implements contiguous and paged storage, prefix reuse, and per-request cache state. |
 
 Tokenization, tokenizer compatibility checks, and incremental text decoding

@@ -3,7 +3,7 @@ use crate::proto::inference_config::DraftTokenCountPolicy as DraftTokenCountPoli
 use anyhow::Result;
 
 #[derive(Clone, Copy)]
-pub(super) enum DraftTokenCountPolicy {
+pub enum DraftTokenCountPolicy {
     Fixed {
         draft_token_count: usize,
     },
@@ -59,12 +59,12 @@ impl TryFrom<&DraftTokenCountPolicyProto> for DraftTokenCountPolicy {
     }
 }
 
-pub(super) struct DraftTokenCountController {
+pub struct DraftTokenCountController {
     policy: Box<dyn DraftTokenCountPolicyController>,
 }
 
 impl DraftTokenCountController {
-    pub(super) fn new(policy: DraftTokenCountPolicy) -> Self {
+    pub fn new(policy: DraftTokenCountPolicy) -> Self {
         let policy: Box<dyn DraftTokenCountPolicyController> = match policy {
             DraftTokenCountPolicy::Fixed { draft_token_count } => {
                 Box::new(FixedDraftTokenCountController { draft_token_count })
@@ -99,12 +99,12 @@ impl DraftTokenCountController {
     }
 
     /// Returns the policy selection to use before applying an output-length cap.
-    pub(super) fn draft_token_count(&self) -> usize {
+    pub fn draft_token_count(&self) -> usize {
         self.policy.draft_token_count()
     }
 
     /// Updates the policy after target verification using the actual proposal counts.
-    pub(super) fn update(
+    pub fn update(
         &mut self,
         accepted_token_count: usize,
         proposed_token_count: usize,

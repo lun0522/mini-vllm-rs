@@ -9,7 +9,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 
 /// Sampling configuration and RNG state owned by a single request and model role.
-pub(super) struct Sampler {
+pub struct Sampler {
     temperature: f64,
     repeat_penalty: f32,
     repeat_last_n: usize,
@@ -17,12 +17,7 @@ pub(super) struct Sampler {
 }
 
 impl Sampler {
-    pub(super) fn new(
-        temperature: f32,
-        seed: u64,
-        repeat_penalty: f32,
-        repeat_last_n: usize,
-    ) -> Self {
+    pub fn new(temperature: f32, seed: u64, repeat_penalty: f32, repeat_last_n: usize) -> Self {
         Self {
             temperature: f64::from(temperature),
             repeat_penalty,
@@ -31,7 +26,7 @@ impl Sampler {
         }
     }
 
-    pub(super) fn sample(
+    pub fn sample(
         &mut self,
         logits: &Tensor,
         committed_tokens: &[u32],

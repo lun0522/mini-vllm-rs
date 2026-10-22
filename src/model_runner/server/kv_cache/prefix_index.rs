@@ -54,16 +54,13 @@ impl IndexedPrefixBlock {
 
 /// Immutable, token-only view of a prefix index for cache-affinity routing.
 #[derive(Debug, Eq, PartialEq)]
-pub(in crate::model_runner::server) struct PrefixCacheAffinitySnapshot {
+pub struct PrefixCacheAffinitySnapshot {
     per_block_token_count: usize,
     blocks_map: HashMap<PrefixBlockKey, PrefixBlockId>,
 }
 
 impl PrefixCacheAffinitySnapshot {
-    pub(in crate::model_runner::server) fn find_longest_prefix_token_count(
-        &self,
-        input_token_ids: &[u32],
-    ) -> usize {
+    pub fn find_longest_prefix_token_count(&self, input_token_ids: &[u32]) -> usize {
         let mut parent_id = None;
         let mut matched_block_count = 0usize;
         for token_ids in input_token_ids.chunks_exact(self.per_block_token_count) {

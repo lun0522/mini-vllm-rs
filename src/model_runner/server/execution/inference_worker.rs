@@ -18,23 +18,23 @@ use thousands::Separable;
 use tokio::sync::mpsc;
 use tonic::Status;
 
-use super::generation_stats::DraftGenerationStats;
-use super::generation_stats::PrefixCacheModelStats;
-use super::generation_stats::TextGenerationStats;
-use super::kv_cache::PrefixCacheTelemetry;
-use super::model_executor::ModelExecutor;
+use super::super::generation::generation_stats::DraftGenerationStats;
+use super::super::generation::generation_stats::PrefixCacheModelStats;
+use super::super::generation::generation_stats::TextGenerationStats;
+use super::super::generation::text_generation;
+use super::super::kv_cache::PrefixCacheTelemetry;
+use super::super::model_executor::ModelExecutor;
+use super::super::routing::request_orchestrator::CacheAffinityState;
+use super::super::routing::request_orchestrator::OperationalState;
+use super::super::routing::request_orchestrator::RoutingReservation;
+use super::super::BackendId;
+use super::super::InferenceRequest;
+use super::super::InferenceWorkerMessage;
 use super::request_manager::RequestExecutionResult;
 use super::request_manager::RequestManager;
 use super::request_manager::RequestOutcome;
-use super::request_orchestrator::CacheAffinityState;
-use super::request_orchestrator::OperationalState;
-use super::request_orchestrator::RoutingReservation;
 use super::scheduler::Scheduler;
 use super::scheduler::SchedulingDecision;
-use super::text_generation;
-use super::BackendId;
-use super::InferenceRequest;
-use super::InferenceWorkerMessage;
 use tokio::sync::watch;
 
 struct StatePublisher<State> {
@@ -57,7 +57,7 @@ impl<State> StatePublisher<State> {
 }
 
 /// Coordinates request storage, scheduling, model execution, and result delivery.
-pub(super) struct InferenceWorker {
+pub struct InferenceWorker {
     backend_id: BackendId,
     model_executor: ModelExecutor,
     request_manager: RequestManager,
@@ -67,7 +67,7 @@ pub(super) struct InferenceWorker {
 }
 
 impl InferenceWorker {
-    pub(super) fn new(
+    pub fn new(
         backend_id: BackendId,
         model_executor: ModelExecutor,
         scheduler_config: SchedulerConfig,
@@ -87,7 +87,7 @@ impl InferenceWorker {
         }
     }
 
-    pub(super) fn run(mut self, mut message_receiver: mpsc::Receiver<InferenceWorkerMessage>) {
+    pub fn run(mut self, mut message_receiver: mpsc::Receiver<InferenceWorkerMessage>) {
         self.publish_operational_state();
         self.publish_cache_affinity_state();
         loop {
@@ -572,9 +572,9 @@ impl From<&DraftGenerationStats> for DraftTokenStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_runner::server::generation_stats::GenerationExecutionStats;
-    use crate::model_runner::server::generation_stats::GenerationFinishReason;
-    use crate::model_runner::server::generation_stats::PrefixCacheGenerationStats;
+    use crate::model_runner::server::generation::generation_stats::GenerationExecutionStats;
+    use crate::model_runner::server::generation::generation_stats::GenerationFinishReason;
+    use crate::model_runner::server::generation::generation_stats::PrefixCacheGenerationStats;
     use std::collections::BTreeMap;
 
     #[test]

@@ -12,26 +12,26 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tonic::Status;
 
-use super::generation_stats::TextGenerationStats;
+use super::super::generation::generation_stats::TextGenerationStats;
+use super::super::generation::text_generation;
+use super::super::generation::text_generation::GenerationPhase;
+use super::super::generation::text_generation::GenerationStep;
+use super::super::generation::text_generation::RequestExecutionState;
+use super::super::InferenceRequest;
 use super::scheduler::ScheduledRequest;
-use super::text_generation;
-use super::text_generation::GenerationPhase;
-use super::text_generation::GenerationStep;
-use super::text_generation::RequestExecutionState;
-use super::InferenceRequest;
 
-pub(super) struct RequestContext {
-    pub(super) queued_at: Instant,
-    pub(super) input_token_count: usize,
+pub struct RequestContext {
+    pub queued_at: Instant,
+    pub input_token_count: usize,
     event_sender: mpsc::Sender<Result<GenerateTextEvent, Status>>,
 }
 
 impl RequestContext {
-    pub(super) fn send_stats(&self, stats: crate::proto::model_runner::TextGenerationStats) {
+    pub fn send_stats(&self, stats: crate::proto::model_runner::TextGenerationStats) {
         let _ = send_event(&self.event_sender, generate_text_event::Event::Stats(stats));
     }
 
-    pub(super) fn send_error(&self, status: Status) {
+    pub fn send_error(&self, status: Status) {
         let _ = self.event_sender.blocking_send(Err(status));
     }
 }
@@ -60,29 +60,29 @@ enum RequestState {
     },
 }
 
-pub(super) struct RequestExecutionMetrics {
-    pub(super) execution_started_at: Instant,
-    pub(super) first_token_at: Option<Instant>,
-    pub(super) last_token_at: Option<Instant>,
-    pub(super) output_token_count: usize,
+pub struct RequestExecutionMetrics {
+    pub execution_started_at: Instant,
+    pub first_token_at: Option<Instant>,
+    pub last_token_at: Option<Instant>,
+    pub output_token_count: usize,
 }
 
-pub(super) struct StartedRequest {
-    pub(super) input_token_count: usize,
-    pub(super) ignore_eos_tokens: bool,
-    pub(super) queue_duration: Duration,
-    pub(super) generation_phase: GenerationPhase,
+pub struct StartedRequest {
+    pub input_token_count: usize,
+    pub ignore_eos_tokens: bool,
+    pub queue_duration: Duration,
+    pub generation_phase: GenerationPhase,
 }
 
-pub(super) struct RequestOutcome {
-    pub(super) context: RequestContext,
-    pub(super) metrics: RequestExecutionMetrics,
-    pub(super) result: Result<TextGenerationStats>,
+pub struct RequestOutcome {
+    pub context: RequestContext,
+    pub metrics: RequestExecutionMetrics,
+    pub result: Result<TextGenerationStats>,
 }
 
-pub(super) struct RequestExecutionResult {
-    pub(super) request_id: u64,
-    pub(super) result: Result<GenerationPhase>,
+pub struct RequestExecutionResult {
+    pub request_id: u64,
+    pub result: Result<GenerationPhase>,
 }
 
 struct ScheduledExecutionMetadata {
@@ -92,18 +92,18 @@ struct ScheduledExecutionMetadata {
 }
 
 /// Owns request payloads, execution state, response channels, and lifecycle timing.
-pub(super) struct RequestManager {
+pub struct RequestManager {
     request_states: HashMap<u64, RequestState>,
 }
 
 impl RequestManager {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             request_states: HashMap::new(),
         }
     }
 
-    pub(super) fn add_request(
+    pub fn add_request(
         &mut self,
         request: InferenceRequest,
         prepare_request: impl FnOnce(&GenerateTextRequest) -> Result<()>,
@@ -129,7 +129,7 @@ impl RequestManager {
     }
 
     /// Transitions a queued request into execution using the supplied model initializer.
-    pub(super) fn start_execution(
+    pub fn start_execution(
         &mut self,
         request_id: u64,
         create_execution_state: impl FnOnce(GenerateTextRequest) -> Result<RequestExecutionState>,
@@ -182,7 +182,7 @@ impl RequestManager {
     /// Results may not preserve `scheduled_requests` order because invalid or
     /// cancelled requests are recorded before the remaining batch executes.
     /// Each result therefore includes its request ID.
-    pub(super) fn advance_executions(
+    pub fn advance_executions(
         &mut self,
         scheduled_requests: &[ScheduledRequest],
         run_steps: impl FnOnce(
@@ -218,14 +218,14 @@ impl RequestManager {
         results
     }
 
-    pub(super) fn has_started_execution(&self, request_id: u64) -> bool {
+    pub fn has_started_execution(&self, request_id: u64) -> bool {
         self.request_states
             .get(&request_id)
             .is_some_and(|state| !matches!(state, RequestState::Queued { .. }))
     }
 
     /// Returns committed token IDs for a request that is currently executing.
-    pub(super) fn committed_token_ids(&self, request_id: u64) -> Result<&[u32]> {
+    pub fn committed_token_ids(&self, request_id: u64) -> Result<&[u32]> {
         let request = self
             .request_states
             .get(&request_id)
@@ -240,7 +240,7 @@ impl RequestManager {
     }
 
     /// Removes an executing request and applies its model-side completion operation.
-    pub(super) fn finish_request(
+    pub fn finish_request(
         &mut self,
         request_id: u64,
         complete_execution: impl FnOnce(RequestExecutionState) -> Result<TextGenerationStats>,
@@ -263,7 +263,7 @@ impl RequestManager {
     }
 
     /// Removes a failed or cancelled request after any required model-side cleanup.
-    pub(super) fn abort_request(
+    pub fn abort_request(
         &mut self,
         request_id: u64,
         error: anyhow::Error,
@@ -463,8 +463,8 @@ fn send_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_runner::server::generation_stats::GenerationFinishReason;
-    use crate::model_runner::server::text_generation::PrefillStartPositions;
+    use crate::model_runner::server::generation::generation_stats::GenerationFinishReason;
+    use crate::model_runner::server::generation::text_generation::PrefillStartPositions;
 
     fn request(
         request_id: u64,

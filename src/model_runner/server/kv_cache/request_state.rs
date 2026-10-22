@@ -33,7 +33,7 @@ pub(super) struct PrefixPublicationResult {
 }
 
 /// Holds the virtual page mappings and prefix-publication progress for one request.
-pub(in crate::model_runner::server) struct RequestPagedCacheState {
+pub struct RequestPagedCacheState {
     per_page_token_count: usize,
     layer_block_tables: Vec<LayerBlockTable>,
     prefix_block_cursor: PrefixBlockCursor,
@@ -41,10 +41,7 @@ pub(in crate::model_runner::server) struct RequestPagedCacheState {
 }
 
 impl RequestPagedCacheState {
-    pub(in crate::model_runner::server) fn new(
-        layer_count: usize,
-        per_page_token_count: usize,
-    ) -> Self {
+    pub fn new(layer_count: usize, per_page_token_count: usize) -> Self {
         Self {
             per_page_token_count,
             layer_block_tables: (0..layer_count)

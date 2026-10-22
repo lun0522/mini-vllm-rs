@@ -9,30 +9,30 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::watch;
 
-use super::kv_cache::PrefixCacheAffinitySnapshot;
+use super::super::kv_cache::PrefixCacheAffinitySnapshot;
+use super::super::BackendId;
 use super::routing_policy::BackendRoutingPolicy;
 use super::routing_policy::CacheAwareLeastEstimatedWorkPolicy;
 use super::routing_policy::LeastEstimatedWorkPolicy;
 use super::routing_policy::LeastRequestsPolicy;
 use super::routing_policy::MostCachedPrefixPolicy;
 use super::routing_policy::RoundRobinPolicy;
-use super::BackendId;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct OperationalState {
-    pub(super) epoch: u64,
-    pub(super) queued_request_count: usize,
-    pub(super) active_request_count: usize,
-    pub(super) queued_remaining_prefill_token_count: usize,
-    pub(super) queued_remaining_max_output_token_count: usize,
-    pub(super) active_remaining_prefill_token_count: usize,
-    pub(super) active_remaining_max_output_token_count: usize,
+pub struct OperationalState {
+    pub epoch: u64,
+    pub queued_request_count: usize,
+    pub active_request_count: usize,
+    pub queued_remaining_prefill_token_count: usize,
+    pub queued_remaining_max_output_token_count: usize,
+    pub active_remaining_prefill_token_count: usize,
+    pub active_remaining_max_output_token_count: usize,
 }
 
 impl OperationalState {
     /// Includes dispatched requests not yet observed by the worker as additional queued work.
     /// The epoch still identifies the original worker publication.
-    pub(super) fn with_reserved_load(mut self, reserved_load: BackendReservedLoad) -> Self {
+    pub fn with_reserved_load(mut self, reserved_load: BackendReservedLoad) -> Self {
         self.queued_request_count = self
             .queued_request_count
             .saturating_add(reserved_load.request_count);
@@ -52,13 +52,13 @@ impl OperationalState {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(super) struct CacheAffinityState {
-    pub(super) epoch: u64,
-    pub(super) prefix_cache: Option<Arc<PrefixCacheAffinitySnapshot>>,
+pub struct CacheAffinityState {
+    pub epoch: u64,
+    pub prefix_cache: Option<Arc<PrefixCacheAffinitySnapshot>>,
 }
 
 impl CacheAffinityState {
-    pub(super) fn new(epoch: u64, prefix_cache: Option<PrefixCacheAffinitySnapshot>) -> Self {
+    pub fn new(epoch: u64, prefix_cache: Option<PrefixCacheAffinitySnapshot>) -> Self {
         Self {
             epoch,
             prefix_cache: prefix_cache.map(Arc::new),
@@ -66,40 +66,40 @@ impl CacheAffinityState {
     }
 }
 
-pub(super) struct BackendStateReceivers {
-    pub(super) device: InferenceDevice,
-    pub(super) operational: watch::Receiver<OperationalState>,
-    pub(super) cache_affinity: watch::Receiver<CacheAffinityState>,
+pub struct BackendStateReceivers {
+    pub device: InferenceDevice,
+    pub operational: watch::Receiver<OperationalState>,
+    pub cache_affinity: watch::Receiver<CacheAffinityState>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct RoutingDecision {
+pub struct RoutingDecision {
     /// One-based selection order within this orchestrator, independent of log emission order.
     /// Assigned during selection while the orchestrator holds the routing-state lock.
-    pub(super) routing_epoch: u64,
-    pub(super) backend_id: BackendId,
-    pub(super) estimated_cached_prefix_token_count: usize,
-    pub(super) candidate_diagnostics: Vec<RoutingCandidateDiagnostics>,
+    pub routing_epoch: u64,
+    pub backend_id: BackendId,
+    pub estimated_cached_prefix_token_count: usize,
+    pub candidate_diagnostics: Vec<RoutingCandidateDiagnostics>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct RoutingCandidateDiagnostics {
-    pub(super) backend_id: BackendId,
-    pub(super) operational_state: Option<OperationalState>,
-    pub(super) reserved_load: Option<BackendReservedLoad>,
-    pub(super) cache_affinity_state_epoch: Option<u64>,
-    pub(super) cached_prefix_token_count: Option<usize>,
-    pub(super) estimated_prefill_token_count: Option<u128>,
-    pub(super) estimated_decode_token_count: Option<u128>,
+pub struct RoutingCandidateDiagnostics {
+    pub backend_id: BackendId,
+    pub operational_state: Option<OperationalState>,
+    pub reserved_load: Option<BackendReservedLoad>,
+    pub cache_affinity_state_epoch: Option<u64>,
+    pub cached_prefix_token_count: Option<usize>,
+    pub estimated_prefill_token_count: Option<u128>,
+    pub estimated_decode_token_count: Option<u128>,
     /// The exact nanosecond score used by estimated-work policies, not elapsed time.
-    pub(super) estimated_duration_ns: Option<u128>,
-    pub(super) prefill_tokens_per_second: Option<u64>,
-    pub(super) decode_tokens_per_second: Option<u64>,
-    pub(super) last_selected_epoch: Option<u64>,
+    pub estimated_duration_ns: Option<u128>,
+    pub prefill_tokens_per_second: Option<u64>,
+    pub decode_tokens_per_second: Option<u64>,
+    pub last_selected_epoch: Option<u64>,
 }
 
 impl RoutingCandidateDiagnostics {
-    pub(super) fn new(backend_id: BackendId) -> Self {
+    pub fn new(backend_id: BackendId) -> Self {
         Self {
             backend_id,
             operational_state: None,
@@ -189,15 +189,15 @@ impl fmt::Display for RoutingCandidateDiagnostics {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct RequestRoutingContext<'a> {
-    pub(super) input_token_ids: &'a [u32],
-    pub(super) input_token_count: usize,
-    pub(super) max_new_token_count: u64,
-    pub(super) backend_id_override: Option<BackendId>,
+pub struct RequestRoutingContext<'a> {
+    pub input_token_ids: &'a [u32],
+    pub input_token_count: usize,
+    pub max_new_token_count: u64,
+    pub backend_id_override: Option<BackendId>,
 }
 
 impl RequestRoutingContext<'_> {
-    pub(super) fn restorable_input_token_ids(&self) -> &[u32] {
+    pub fn restorable_input_token_ids(&self) -> &[u32] {
         self.input_token_ids
             .split_last()
             .map_or(&[], |(_, prefix)| prefix)
@@ -206,11 +206,11 @@ impl RequestRoutingContext<'_> {
 
 /// Tracks requests routed to a backend but not yet reflected in its operational snapshot.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct BackendReservedLoad {
-    pub(super) request_count: usize,
-    pub(super) prefill_token_count: usize,
-    pub(super) cached_prefix_token_count: usize,
-    pub(super) max_output_token_count: u64,
+pub struct BackendReservedLoad {
+    pub request_count: usize,
+    pub prefill_token_count: usize,
+    pub cached_prefix_token_count: usize,
+    pub max_output_token_count: u64,
 }
 
 impl BackendReservedLoad {
@@ -226,26 +226,26 @@ impl BackendReservedLoad {
 
 /// Mutable selection and pending-load bookkeeping for one inference backend.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct BackendRoutingState {
-    pub(super) reserved_load: BackendReservedLoad,
-    pub(super) last_selected_epoch: u64,
+pub struct BackendRoutingState {
+    pub reserved_load: BackendReservedLoad,
+    pub last_selected_epoch: u64,
 }
 
 /// Coordinates backend selection order and pending reservations under one shared lock.
-pub(super) struct OrchestratorRoutingState {
-    pub(super) selection_epoch: u64,
-    pub(super) backends: Vec<BackendRoutingState>,
+pub struct OrchestratorRoutingState {
+    pub selection_epoch: u64,
+    pub backends: Vec<BackendRoutingState>,
 }
 
 impl OrchestratorRoutingState {
-    pub(super) fn new(backend_count: usize) -> Self {
+    pub fn new(backend_count: usize) -> Self {
         Self {
             selection_epoch: 0,
             backends: vec![BackendRoutingState::default(); backend_count],
         }
     }
 
-    pub(super) fn record_backend_selection(&mut self, backend_index: usize) {
+    pub fn record_backend_selection(&mut self, backend_index: usize) {
         self.selection_epoch = self
             .selection_epoch
             .checked_add(1)
@@ -291,7 +291,7 @@ impl OrchestratorRoutingState {
 }
 
 /// Releases a backend's reserved load when a routed request is dropped or observed by a worker.
-pub(super) struct RoutingReservation {
+pub struct RoutingReservation {
     backend_id: BackendId,
     load: Option<BackendReservedLoad>,
     routing_state: Arc<Mutex<OrchestratorRoutingState>>,
@@ -312,7 +312,7 @@ impl RoutingReservation {
 
     /// Publishes the worker's updated load and removes the corresponding reservation atomically
     /// with respect to routing decisions.
-    pub(super) fn release_after(mut self, publish_operational_state: impl FnOnce()) {
+    pub fn release_after(mut self, publish_operational_state: impl FnOnce()) {
         let load = self
             .load
             .take()
@@ -339,7 +339,7 @@ impl Drop for RoutingReservation {
 }
 
 /// Selects an inference backend for each request without owning or dispatching to the backend.
-pub(super) struct RequestOrchestrator {
+pub struct RequestOrchestrator {
     policy: Box<dyn BackendRoutingPolicy>,
     // Keep critical sections over this mutex small because inference workers also acquire it to
     // publish updated operational state and release the corresponding reservations.
@@ -347,7 +347,7 @@ pub(super) struct RequestOrchestrator {
 }
 
 impl RequestOrchestrator {
-    pub(super) fn new(
+    pub fn new(
         backend_state_receivers: Vec<BackendStateReceivers>,
         config: RequestOrchestratorConfig,
     ) -> Result<Self> {
@@ -387,7 +387,7 @@ impl RequestOrchestrator {
     }
 
     /// Selects a backend according to the configured routing policy.
-    pub(super) fn route_request(
+    pub fn route_request(
         &self,
         request: RequestRoutingContext<'_>,
     ) -> (RoutingDecision, RoutingReservation) {

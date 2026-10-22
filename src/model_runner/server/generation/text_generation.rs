@@ -15,16 +15,16 @@ use std::ops::Range;
 use std::time::Duration;
 use std::time::Instant;
 
+use super::super::model_instance::ModelInstance;
 use super::draft_token_count::DraftTokenCountController;
 use super::generation_stats::DraftGenerationStats;
 use super::generation_stats::GenerationExecutionStats;
 use super::generation_stats::GenerationFinishReason;
 use super::generation_stats::PrefixTokenCounts;
-use super::model_instance::ModelInstance;
 use super::sampler::Sampler;
 
 #[derive(Debug)]
-pub(super) struct GenerationCancelled;
+pub struct GenerationCancelled;
 
 impl fmt::Display for GenerationCancelled {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -35,7 +35,7 @@ impl fmt::Display for GenerationCancelled {
 impl Error for GenerationCancelled {}
 
 #[derive(Clone, Copy)]
-pub(super) enum GenerationPhase {
+pub enum GenerationPhase {
     Prefill {
         remaining_token_count: usize,
     },
@@ -69,9 +69,9 @@ impl fmt::Display for GenerationPhase {
     }
 }
 
-pub(super) struct GenerationStep {
-    pub(super) output_token_ids: Vec<u32>,
-    pub(super) generation_phase: GenerationPhase,
+pub struct GenerationStep {
+    pub output_token_ids: Vec<u32>,
+    pub generation_phase: GenerationPhase,
 }
 
 struct TokenRange(Range<usize>);
@@ -157,15 +157,15 @@ struct DecodeIterationResult {
 #[derive(Clone, Copy)]
 /// Records how many input tokens each model restored from its prefix cache, so prefill starts at
 /// the first uncached token instead of position zero.
-pub(super) struct PrefillStartPositions {
-    pub(super) target: usize,
-    pub(super) draft: Option<usize>,
+pub struct PrefillStartPositions {
+    pub target: usize,
+    pub draft: Option<usize>,
 }
 
-pub(super) struct GenerationOutput {
-    pub(super) committed_token_ids: Vec<u32>,
-    pub(super) execution_stats: GenerationExecutionStats,
-    pub(super) restored_prefix_token_counts: PrefixTokenCounts,
+pub struct GenerationOutput {
+    pub committed_token_ids: Vec<u32>,
+    pub execution_stats: GenerationExecutionStats,
+    pub restored_prefix_token_counts: PrefixTokenCounts,
 }
 
 struct DraftTokenCountState {
@@ -204,7 +204,7 @@ impl DraftTokenCountState {
 }
 
 /// Owns the generation progress and sampling state for one resumable request.
-pub(super) struct RequestExecutionState {
+pub struct RequestExecutionState {
     request_id: u64,
     tokens: Vec<u32>,
     input_token_count: usize,
@@ -222,7 +222,7 @@ pub(super) struct RequestExecutionState {
 }
 
 impl RequestExecutionState {
-    pub(super) fn new(
+    pub fn new(
         request: GenerateTextRequest,
         draft_token_count_controller: Option<DraftTokenCountController>,
         prefill_initial_positions: PrefillStartPositions,
@@ -257,17 +257,17 @@ impl RequestExecutionState {
         })
     }
 
-    pub(super) fn request_id(&self) -> u64 {
+    pub fn request_id(&self) -> u64 {
         self.request_id
     }
 
     /// Returns the committed sequence. A model's KV cache may contain only a prefix of it because
     /// the final sampled token has not necessarily passed through that model yet.
-    pub(super) fn committed_token_ids(&self) -> &[u32] {
+    pub fn committed_token_ids(&self) -> &[u32] {
         &self.tokens
     }
 
-    pub(super) fn phase(&self) -> GenerationPhase {
+    pub fn phase(&self) -> GenerationPhase {
         self.generation_phase
     }
 
@@ -476,7 +476,7 @@ impl RequestExecutionState {
         })
     }
 
-    pub(super) fn into_generation_output(self) -> Result<GenerationOutput> {
+    pub fn into_generation_output(self) -> Result<GenerationOutput> {
         let GenerationPhase::Finished { finish_reason } = self.generation_phase else {
             bail!("generation request is not finished")
         };
@@ -657,49 +657,45 @@ struct RequestExecution {
 }
 
 /// Owns the request states selected for one batched model execution.
-pub(super) struct RequestExecutionBatch {
+pub struct RequestExecutionBatch {
     requests: Vec<RequestExecution>,
 }
 
 impl RequestExecutionBatch {
-    pub(super) fn with_capacity(capacity: usize) -> Self {
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
             requests: Vec::with_capacity(capacity),
         }
     }
 
-    pub(super) fn push(
-        &mut self,
-        execution_state: Box<RequestExecutionState>,
-        token_budget: usize,
-    ) {
+    pub fn push(&mut self, execution_state: Box<RequestExecutionState>, token_budget: usize) {
         self.requests.push(RequestExecution {
             execution_state,
             token_budget,
         });
     }
 
-    pub(super) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.requests.is_empty()
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.requests.len()
     }
 
-    pub(super) fn into_execution_states(self) -> impl Iterator<Item = Box<RequestExecutionState>> {
+    pub fn into_execution_states(self) -> impl Iterator<Item = Box<RequestExecutionState>> {
         self.requests
             .into_iter()
             .map(|request| request.execution_state)
     }
 
-    pub(super) fn execution_states(&self) -> impl Iterator<Item = &RequestExecutionState> {
+    pub fn execution_states(&self) -> impl Iterator<Item = &RequestExecutionState> {
         self.requests
             .iter()
             .map(|request| request.execution_state.as_ref())
     }
 
-    pub(super) fn run_steps(
+    pub fn run_steps(
         &mut self,
         target: &mut ModelInstance,
         draft: Option<&mut ModelInstance>,
@@ -1167,7 +1163,7 @@ fn validate_prefill_start_positions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_runner::server::draft_token_count::DraftTokenCountPolicy;
+    use crate::model_runner::server::generation::draft_token_count::DraftTokenCountPolicy;
     use crate::model_runner::server::kv_cache::create_kv_cache;
     use crate::model_runner::server::BackendId;
     use crate::model_runner::KvCacheType;

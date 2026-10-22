@@ -38,32 +38,25 @@ use tonic::Response;
 use tonic::Status;
 
 mod cli;
-mod draft_token_count;
-mod generation_stats;
-mod inference_worker;
+mod execution;
+mod generation;
 mod kv_cache;
 mod model_executor;
 mod model_instance;
-mod prefix_cache_flight;
-mod request_manager;
-mod request_orchestrator;
-mod routing_policy;
-mod sampler;
-mod scheduler;
-mod text_generation;
+mod routing;
 
 pub(crate) use cli::ModelRunnerProcessArgs;
-use draft_token_count::DraftTokenCountPolicy;
-use inference_worker::InferenceWorker;
+use execution::inference_worker::InferenceWorker;
+use generation::draft_token_count::DraftTokenCountPolicy;
 use model_executor::DraftModelConfig;
 use model_executor::ModelExecutor;
 use model_executor::ModelExecutorMetadata;
-use request_orchestrator::BackendStateReceivers;
-use request_orchestrator::CacheAffinityState;
-use request_orchestrator::OperationalState;
-use request_orchestrator::RequestOrchestrator;
-use request_orchestrator::RequestRoutingContext;
-use request_orchestrator::RoutingReservation;
+use routing::request_orchestrator::BackendStateReceivers;
+use routing::request_orchestrator::CacheAffinityState;
+use routing::request_orchestrator::OperationalState;
+use routing::request_orchestrator::RequestOrchestrator;
+use routing::request_orchestrator::RequestRoutingContext;
+use routing::request_orchestrator::RoutingReservation;
 
 pub(crate) const PROCESS_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_MODEL_RUNNER";
 const INFERENCE_MESSAGE_QUEUE_CAPACITY: usize = 32;
@@ -115,7 +108,7 @@ struct InferenceBackends {
     channels: Vec<InferenceBackendChannels>,
 }
 
-pub(in crate::model_runner::server) enum InferenceWorkerMessage {
+enum InferenceWorkerMessage {
     Generate {
         request: InferenceRequest,
         routing_reservation: RoutingReservation,

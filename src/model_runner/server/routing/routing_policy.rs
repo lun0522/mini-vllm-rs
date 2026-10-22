@@ -4,6 +4,7 @@ use crate::model_runner::InferenceDevice;
 use std::cmp::Reverse;
 use tokio::sync::watch;
 
+use super::super::BackendId;
 use super::request_orchestrator::BackendReservedLoad;
 use super::request_orchestrator::BackendStateReceivers;
 use super::request_orchestrator::CacheAffinityState;
@@ -12,9 +13,8 @@ use super::request_orchestrator::OrchestratorRoutingState;
 use super::request_orchestrator::RequestRoutingContext;
 use super::request_orchestrator::RoutingCandidateDiagnostics;
 use super::request_orchestrator::RoutingDecision;
-use super::BackendId;
 
-pub(super) trait BackendRoutingPolicy: Send + Sync {
+pub trait BackendRoutingPolicy: Send + Sync {
     fn route_request(
         &self,
         request: RequestRoutingContext<'_>,
@@ -22,7 +22,7 @@ pub(super) trait BackendRoutingPolicy: Send + Sync {
     ) -> RoutingDecision;
 }
 
-pub(super) struct RoundRobinPolicy;
+pub struct RoundRobinPolicy;
 
 impl BackendRoutingPolicy for RoundRobinPolicy {
     fn route_request(
@@ -40,12 +40,12 @@ impl BackendRoutingPolicy for RoundRobinPolicy {
     }
 }
 
-pub(super) struct LeastRequestsPolicy {
+pub struct LeastRequestsPolicy {
     operational_state_receivers: Vec<watch::Receiver<OperationalState>>,
 }
 
 impl LeastRequestsPolicy {
-    pub(super) fn new(backend_state_receivers: Vec<BackendStateReceivers>) -> Self {
+    pub fn new(backend_state_receivers: Vec<BackendStateReceivers>) -> Self {
         Self {
             operational_state_receivers: backend_state_receivers
                 .into_iter()
@@ -89,13 +89,13 @@ impl BackendRoutingPolicy for LeastRequestsPolicy {
     }
 }
 
-pub(super) struct LeastEstimatedWorkPolicy {
+pub struct LeastEstimatedWorkPolicy {
     operational_state_receivers: Vec<BackendOperationalStateReceiver>,
     throughput_profiles: BackendThroughputProfiles,
 }
 
 impl LeastEstimatedWorkPolicy {
-    pub(super) fn new(
+    pub fn new(
         backend_state_receivers: Vec<BackendStateReceivers>,
         throughput_profiles: Vec<BackendThroughputProfile>,
     ) -> Self {
@@ -155,12 +155,12 @@ impl BackendRoutingPolicy for LeastEstimatedWorkPolicy {
     }
 }
 
-pub(super) struct MostCachedPrefixPolicy {
+pub struct MostCachedPrefixPolicy {
     cache_affinity_state_receivers: Vec<watch::Receiver<CacheAffinityState>>,
 }
 
 impl MostCachedPrefixPolicy {
-    pub(super) fn new(backend_state_receivers: Vec<BackendStateReceivers>) -> Self {
+    pub fn new(backend_state_receivers: Vec<BackendStateReceivers>) -> Self {
         Self {
             cache_affinity_state_receivers: backend_state_receivers
                 .into_iter()
@@ -197,13 +197,13 @@ impl BackendRoutingPolicy for MostCachedPrefixPolicy {
     }
 }
 
-pub(super) struct CacheAwareLeastEstimatedWorkPolicy {
+pub struct CacheAwareLeastEstimatedWorkPolicy {
     backend_state_receivers: Vec<BackendStateReceiver>,
     throughput_profiles: BackendThroughputProfiles,
 }
 
 impl CacheAwareLeastEstimatedWorkPolicy {
-    pub(super) fn new(
+    pub fn new(
         backend_state_receivers: Vec<BackendStateReceivers>,
         throughput_profiles: Vec<BackendThroughputProfile>,
     ) -> Self {

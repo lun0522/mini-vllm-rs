@@ -23,7 +23,7 @@ use thousands::Separable;
 use crate::model_runner::server::BackendId;
 
 /// Coordinates shared physical pages and prefix metadata with request-specific virtual tables.
-pub(in crate::model_runner::server) struct PagedKvCache {
+pub struct PagedKvCache {
     physical_page_pool: PhysicalPagePool,
     prefix_block_index: Option<PrefixBlockIndex>,
     token_capacity: usize,

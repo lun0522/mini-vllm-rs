@@ -16,18 +16,18 @@ use log::info;
 use std::path::Path;
 use std::path::PathBuf;
 
-use super::draft_token_count::DraftTokenCountController;
-use super::draft_token_count::DraftTokenCountPolicy;
-use super::generation_stats::PrefixCacheGenerationStats;
-use super::generation_stats::PrefixCacheModelStats;
-use super::generation_stats::PrefixTokenCounts;
-use super::generation_stats::TextGenerationStats;
+use super::generation::draft_token_count::DraftTokenCountController;
+use super::generation::draft_token_count::DraftTokenCountPolicy;
+use super::generation::generation_stats::PrefixCacheGenerationStats;
+use super::generation::generation_stats::PrefixCacheModelStats;
+use super::generation::generation_stats::PrefixTokenCounts;
+use super::generation::generation_stats::TextGenerationStats;
+use super::generation::text_generation;
 use super::kv_cache::create_kv_cache;
 use super::kv_cache::KvCacheGeometry;
 use super::kv_cache::PrefixCacheAffinitySnapshot;
 use super::kv_cache::PrefixCacheTelemetry;
 use super::model_instance::ModelInstance;
-use super::text_generation;
 use super::BackendId;
 
 pub(super) struct ModelExecutorMetadata {
