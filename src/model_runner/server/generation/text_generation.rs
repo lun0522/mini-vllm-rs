@@ -1,5 +1,4 @@
 use crate::models::ForwardInput;
-use crate::models::ModelRole;
 use crate::proto::model_runner::GenerateTextRequest;
 use anyhow::bail;
 use anyhow::ensure;
@@ -21,6 +20,7 @@ use super::generation_stats::DraftGenerationStats;
 use super::generation_stats::GenerationExecutionStats;
 use super::generation_stats::GenerationFinishReason;
 use super::generation_stats::PrefixTokenCounts;
+use super::sampler::SampleWithProbabilities;
 use super::sampler::Sampler;
 
 #[derive(Debug)]
@@ -132,6 +132,8 @@ struct DraftProposal {
     original_cached_token_count: usize,
     maximum_token_count: usize,
     token_ids: Vec<u32>,
+    // One full q distribution per token for stochastic decoding; empty for greedy decoding.
+    probabilities: Vec<Vec<f32>>,
 }
 
 struct TargetVerificationInput {
@@ -451,8 +453,8 @@ impl RequestExecutionState {
 
     fn complete_speculative_decode(
         &mut self,
-        prepared: PreparedSpeculativeDecode,
-        draft_tokens: &[u32],
+        prepared_decode: PreparedSpeculativeDecode,
+        draft_proposal: &DraftProposal,
         verification_logits: &Tensor,
         target: &mut ModelInstance,
         draft: &mut ModelInstance,
@@ -463,12 +465,12 @@ impl RequestExecutionState {
         } = self.complete_speculative_iteration(
             target,
             draft,
-            prepared.original_cached_token_count,
-            draft_tokens,
+            prepared_decode.original_cached_token_count,
+            draft_proposal,
             verification_logits,
         )?;
-        self.decode_duration += prepared.started_at.elapsed();
-        let generated_token_count = prepared.generated_token_count + committed_token_count;
+        self.decode_duration += prepared_decode.started_at.elapsed();
+        let generated_token_count = prepared_decode.generated_token_count + committed_token_count;
         self.generation_phase = self.determine_decode_phase(generated_token_count, should_continue);
         Ok(GenerationStep {
             output_token_ids: std::mem::take(&mut self.pending_output_token_ids),
@@ -512,15 +514,14 @@ impl RequestExecutionState {
         target: &mut ModelInstance,
         draft: &mut ModelInstance,
         original_cached_token_count: usize,
-        draft_tokens: &[u32],
+        draft_proposal: &DraftProposal,
         verification_logits: &Tensor,
     ) -> Result<DecodeIterationResult> {
-        // Accept the longest prefix on which target and draft sampling agree. At the first
-        // mismatch, retain the target token as the replacement output.
+        let draft_tokens = &draft_proposal.token_ids;
         let DraftVerificationResult {
             accepted_token_count,
             maybe_replacement_token,
-        } = self.verify_draft_tokens(draft_tokens, verification_logits)?;
+        } = self.verify_draft_tokens(draft_proposal, verification_logits)?;
         self.draft_token_count_state
             .as_mut()
             .expect("speculative decoding requires draft token-count state")
@@ -534,8 +535,8 @@ impl RequestExecutionState {
         target.truncate_cache(self.request_id, retained_cached_token_count)?;
         draft.truncate_cache(self.request_id, retained_cached_token_count)?;
 
-        // Publish the accepted draft prefix, followed by the target replacement when the models
-        // disagreed. EOS is observed but never added to the generated output.
+        // Publish the accepted draft prefix, then the replacement after a rejection.
+        // EOS is observed but never added to the generated output.
         Ok(self.commit_speculative_tokens(
             &draft_tokens[..accepted_token_count],
             maybe_replacement_token,
@@ -544,20 +545,34 @@ impl RequestExecutionState {
 
     fn verify_draft_tokens(
         &mut self,
-        draft_tokens: &[u32],
+        draft_proposal: &DraftProposal,
         verification_logits: &Tensor,
     ) -> Result<DraftVerificationResult> {
+        let draft_tokens = &draft_proposal.token_ids;
         let mut accepted_token_count = 0;
         for (position, &draft_token) in draft_tokens.iter().enumerate() {
-            let target_token = self.sample_logits(
-                &verification_logits.i(position)?,
-                &draft_tokens[..position],
-                ModelRole::Target,
-            )?;
-            if target_token != draft_token {
+            let logits = verification_logits.i(position)?;
+            let appended_tokens = &draft_tokens[..position];
+            let maybe_replacement_token = if self.target_sampler.is_greedy() {
+                self.target_sampler.verify_greedy_draft_token(
+                    draft_token,
+                    &logits,
+                    &self.tokens,
+                    appended_tokens,
+                )?
+            } else {
+                self.target_sampler.verify_stochastic_draft_token(
+                    draft_token,
+                    &logits,
+                    &self.tokens,
+                    appended_tokens,
+                    &draft_proposal.probabilities[position],
+                )?
+            };
+            if let Some(replacement_token) = maybe_replacement_token {
                 return Ok(DraftVerificationResult {
                     accepted_token_count,
-                    maybe_replacement_token: Some(target_token),
+                    maybe_replacement_token: Some(replacement_token),
                 });
             }
             accepted_token_count += 1;
@@ -604,21 +619,9 @@ impl RequestExecutionState {
     fn sample_and_commit_target_token(&mut self, logits: &Tensor) -> Result<bool> {
         let logits = logits.to_dtype(DType::F32)?;
         let next_token =
-            self.sample_logits(&logits, /* appended_tokens */ &[], ModelRole::Target)?;
+            self.target_sampler
+                .sample(&logits, &self.tokens, /* appended_tokens */ &[])?;
         Ok(self.commit_next_token(next_token))
-    }
-
-    fn sample_logits(
-        &mut self,
-        logits: &Tensor,
-        appended_tokens: &[u32],
-        model_role: ModelRole,
-    ) -> Result<u32> {
-        let sampler = match model_role {
-            ModelRole::Target => &mut self.target_sampler,
-            ModelRole::Draft => &mut self.draft_sampler,
-        };
-        sampler.sample(logits, &self.tokens, appended_tokens)
     }
 
     fn commit_next_token(&mut self, next_token: u32) -> bool {
@@ -862,6 +865,7 @@ impl RequestExecutionBatch {
                         original_cached_token_count: prepared.original_cached_token_count,
                         maximum_token_count: prepared.maximum_draft_token_count,
                         token_ids: Vec::new(),
+                        probabilities: Vec::new(),
                     });
                 }
             }
@@ -950,8 +954,24 @@ impl RequestExecutionBatch {
             let proposal = &mut proposals[proposal_index];
             let execution_state = &mut self.requests[proposal.request_index].execution_state;
             let logits = logits.to_dtype(DType::F32)?;
-            let next_token =
-                execution_state.sample_logits(&logits, &proposal.token_ids, ModelRole::Draft)?;
+            let next_token = if execution_state.draft_sampler.is_greedy() {
+                execution_state.draft_sampler.sample(
+                    &logits,
+                    &execution_state.tokens,
+                    &proposal.token_ids,
+                )?
+            } else {
+                let SampleWithProbabilities {
+                    token_id,
+                    probabilities,
+                } = execution_state.draft_sampler.sample_with_probabilities(
+                    &logits,
+                    &execution_state.tokens,
+                    &proposal.token_ids,
+                )?;
+                proposal.probabilities.push(probabilities);
+                token_id
+            };
             proposal.token_ids.push(next_token);
         }
         Ok(())
@@ -1052,11 +1072,12 @@ impl RequestExecutionBatch {
         target: &mut ModelInstance,
         draft: &mut ModelInstance,
     ) -> Result<Vec<GenerationStep>> {
-        let mut draft_tokens = std::iter::repeat_with(|| None)
+        let mut proposals = std::iter::repeat_with(|| None)
             .take(self.requests.len())
             .collect::<Vec<_>>();
         for proposal in draft_proposals {
-            draft_tokens[proposal.request_index] = Some(proposal.token_ids);
+            let request_index = proposal.request_index;
+            proposals[request_index] = Some(proposal);
         }
 
         let mut generation_steps = Vec::with_capacity(self.requests.len());
@@ -1076,9 +1097,9 @@ impl RequestExecutionBatch {
                 PreparedForward::SpeculativeDecode(prepared) => {
                     request.execution_state.complete_speculative_decode(
                         prepared,
-                        &draft_tokens[request_index]
+                        &proposals[request_index]
                             .take()
-                            .context("draft proposal tokens are missing")?,
+                            .context("draft proposal is missing")?,
                         &target_logits.verification[request_index]
                             .take()
                             .context("target verification logits are missing")?,
@@ -1106,7 +1127,7 @@ fn create_samplers(request: &GenerateTextRequest) -> Result<(Sampler, Sampler)> 
             repeat_last_n,
         ),
         Sampler::new(
-            /* temperature */ 0.0,
+            request.temperature,
             seed.wrapping_add(1),
             request.repeat_penalty,
             repeat_last_n,
@@ -1179,7 +1200,7 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn configures_target_temperature_and_keeps_draft_decoding_greedy() -> Result<()> {
+    fn configures_both_samplers_with_temperature_and_independent_seeded_streams() -> Result<()> {
         let request = GenerateTextRequest {
             temperature: 0.7,
             repeat_penalty: 1.0,
@@ -1187,10 +1208,14 @@ mod tests {
             ..Default::default()
         };
         let (mut target, mut draft) = create_samplers(&request)?;
-        let (mut reference_target, _) = create_samplers(&request)?;
+        let mut reference_target = Sampler::new(0.7, 0, 1.0, 0);
+        let mut reference_draft = Sampler::new(0.7, 1, 1.0, 0);
         let logits = Tensor::new(&[0.0f32, 0.5, 1.0], &Device::Cpu)?;
         for _ in 0..32 {
-            assert_eq!(draft.sample(&logits, &[], &[])?, 2);
+            assert_eq!(
+                draft.sample(&logits, &[], &[])?,
+                reference_draft.sample(&logits, &[], &[])?
+            );
             assert_eq!(
                 target.sample(&logits, &[], &[])?,
                 reference_target.sample(&logits, &[], &[])?
@@ -1373,6 +1398,382 @@ mod tests {
             prefill_duration: Duration::ZERO,
             decode_duration: Duration::ZERO,
         }
+    }
+
+    struct CachedForwardCall {
+        request_id: u64,
+        start_position: usize,
+        cached_tokens: Vec<u32>,
+    }
+
+    /// Uses the previous token to choose logits, and stores actual input tokens in the KV cache.
+    struct SamplingTestModel {
+        info: ModelInfo,
+        logits: Vec<Vec<f32>>,
+        calls: Arc<Mutex<Vec<CachedForwardCall>>>,
+    }
+
+    impl CausalLanguageModel for SamplingTestModel {
+        fn info(&self) -> &ModelInfo {
+            &self.info
+        }
+
+        fn forward_with_speculative_verification(
+            &mut self,
+            generation_inputs: &[ForwardInput],
+            verification_inputs: &[ForwardInput],
+            kv_cache: &mut dyn KvCache,
+        ) -> Result<ForwardOutput> {
+            let mut forward = |input: &ForwardInput, verification: bool| -> Result<Tensor> {
+                let cached_tokens = if input.start_position == 0 {
+                    Vec::new()
+                } else {
+                    kv_cache
+                        .get_contiguous_cache_tensors(input.request_id, 0)?
+                        .key
+                        .flatten_all()?
+                        .to_vec1::<u32>()?
+                };
+                self.calls.lock().unwrap().push(CachedForwardCall {
+                    request_id: input.request_id,
+                    start_position: input.start_position,
+                    cached_tokens,
+                });
+                let tokens = input.input.flatten_all()?.to_vec1::<u32>()?;
+                let values = input.input.reshape((1, 1, tokens.len(), 1))?;
+                kv_cache.append_new_key_value(
+                    input.request_id,
+                    0,
+                    input.start_position,
+                    &values,
+                    &values,
+                )?;
+                let logits: Vec<Vec<f32>> = tokens
+                    .iter()
+                    .map(|&token| self.logits[token as usize].clone())
+                    .collect();
+                if verification {
+                    Ok(Tensor::new(logits, &Device::Cpu)?)
+                } else {
+                    Ok(Tensor::new(
+                        logits.last().unwrap().as_slice(),
+                        &Device::Cpu,
+                    )?)
+                }
+            };
+            Ok(ForwardOutput {
+                generation_logits: generation_inputs
+                    .iter()
+                    .map(|input| forward(input, false))
+                    .collect::<Result<_>>()?,
+                verification_logits: verification_inputs
+                    .iter()
+                    .map(|input| forward(input, true))
+                    .collect::<Result<_>>()?,
+            })
+        }
+    }
+
+    fn create_sampling_test_model(
+        logits: Vec<Vec<f32>>,
+        cache_type: KvCacheType,
+    ) -> Result<(ModelInstance, Arc<Mutex<Vec<CachedForwardCall>>>)> {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let model = LoadedModel::for_test(Box::new(SamplingTestModel {
+            info: ModelInfo {
+                layer_count: 1,
+                num_kv_heads: 1,
+                head_dim: 1,
+                activation_dtype: DType::U32,
+                context_length: 128,
+            },
+            logits,
+            calls: Arc::clone(&calls),
+        }));
+        let cache = create_kv_cache(
+            BackendId::from_index(0),
+            cache_type,
+            &model,
+            ModelRole::Target,
+            1024,
+        )?;
+        Ok((ModelInstance::new(model, cache), calls))
+    }
+
+    fn forced_logits(next_tokens: &[usize]) -> Vec<Vec<f32>> {
+        next_tokens
+            .iter()
+            .map(|&next_token| {
+                let mut logits = vec![f32::NEG_INFINITY; next_tokens.len()];
+                logits[next_token] = 0.0;
+                logits
+            })
+            .collect()
+    }
+
+    #[test]
+    fn speculative_rejection_rolls_back_both_cache_types_and_resumes() -> Result<()> {
+        for cache_type in [
+            KvCacheType::Contiguous,
+            KvCacheType::Paged {
+                per_page_token_count: 2,
+                enable_prefix_caching: true,
+            },
+        ] {
+            for temperature in [0.0, 0.7] {
+                // Accept token 1, then reject draft token 3 in favor of target token 2.
+                let (mut target, target_calls) =
+                    create_sampling_test_model(forced_logits(&[1, 2, 1, 1]), cache_type)?;
+                let (mut draft, draft_calls) =
+                    create_sampling_test_model(forced_logits(&[1, 3, 1, 1]), cache_type)?;
+                target.start_request(1)?;
+                draft.start_request(1)?;
+                let mut state = create_test_execution_state(vec![0], vec![]);
+                state.target_sampler = Sampler::new(temperature, 42, 1.0, 64);
+                state.draft_sampler = Sampler::new(temperature, 43, 1.0, 64);
+                state.max_new_token_count = 5;
+                let mut batch = RequestExecutionBatch::with_capacity(1);
+                batch.push(Box::new(state), 1);
+                for expected in [vec![1, 2], vec![1, 2], vec![1]] {
+                    let step = batch.run_steps(&mut target, Some(&mut draft))?.remove(0);
+                    assert_eq!(step.output_token_ids, expected);
+                }
+                let state = batch.into_execution_states().next().unwrap();
+                assert_eq!(state.tokens, [0, 1, 2, 1, 2, 1]);
+                assert!(matches!(
+                    state.phase(),
+                    GenerationPhase::Finished {
+                        finish_reason: GenerationFinishReason::MaxNewTokensReached
+                    }
+                ));
+                let output = state.into_generation_output()?;
+                let stats = output.execution_stats.draft_stats.unwrap();
+                assert_eq!(stats.accepted_token_count, 3);
+                assert_eq!(stats.proposed_token_count, 8); // 4 + 3 + 1, capped by remaining output.
+                for calls in [target_calls, draft_calls] {
+                    let calls = calls.lock().unwrap();
+                    let resumed = calls.iter().find(|call| call.start_position == 2).unwrap();
+                    assert_eq!(resumed.cached_tokens, [0, 1]);
+                    let resumed = calls.iter().find(|call| call.start_position == 4).unwrap();
+                    assert_eq!(resumed.cached_tokens, [0, 1, 2, 1]);
+                    assert_eq!(resumed.request_id, 1);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stochastic_full_acceptance_uses_matching_penalties_and_seeded_draft_samples() -> Result<()> {
+        let logits = vec![
+            vec![0.2f32, 1.2, -0.3],
+            vec![0.3, -0.2, 1.4],
+            vec![1.1, 0.4, -0.1],
+        ];
+        for temperature in [0.00001, 0.7, 2.0] {
+            for cache_type in [
+                KvCacheType::Contiguous,
+                KvCacheType::Paged {
+                    per_page_token_count: 2,
+                    enable_prefix_caching: true,
+                },
+            ] {
+                let (mut target, target_calls) =
+                    create_sampling_test_model(logits.clone(), cache_type)?;
+                let (mut draft, _) = create_sampling_test_model(logits.clone(), cache_type)?;
+                target.start_request(1)?;
+                draft.start_request(1)?;
+                let request = GenerateTextRequest {
+                    request_id: 1,
+                    input_token_ids: vec![0, 1],
+                    max_new_tokens: 5,
+                    temperature,
+                    seed: Some(42),
+                    repeat_penalty: 1.7,
+                    repeat_last_n: 3,
+                    ..Default::default()
+                };
+                let state = RequestExecutionState::new(
+                    request,
+                    Some(DraftTokenCountController::new(
+                        DraftTokenCountPolicy::Fixed {
+                            draft_token_count: 4,
+                        },
+                    )),
+                    PrefillStartPositions {
+                        target: 0,
+                        draft: Some(0),
+                    },
+                )?;
+                let mut reference = Sampler::new(temperature, 43, 1.7, 3);
+                let mut expected_tokens = vec![0, 1];
+                for _ in 0..5 {
+                    let next = reference.sample(
+                        &Tensor::new(
+                            logits[*expected_tokens.last().unwrap() as usize].as_slice(),
+                            &Device::Cpu,
+                        )?,
+                        &expected_tokens,
+                        &[],
+                    )?;
+                    expected_tokens.push(next);
+                }
+                let mut batch = RequestExecutionBatch::with_capacity(1);
+                batch.push(Box::new(state), 1);
+                let prefill = batch.run_steps(&mut target, Some(&mut draft))?.remove(0);
+                assert!(prefill.output_token_ids.is_empty());
+                let first = batch.run_steps(&mut target, Some(&mut draft))?.remove(0);
+                assert_eq!(first.output_token_ids, expected_tokens[2..6]);
+                let second = batch.run_steps(&mut target, Some(&mut draft))?.remove(0);
+                assert_eq!(second.output_token_ids, expected_tokens[6..]);
+                let output = batch
+                    .into_execution_states()
+                    .next()
+                    .unwrap()
+                    .into_generation_output()?;
+                assert_eq!(output.committed_token_ids, expected_tokens);
+                let stats = output.execution_stats.draft_stats.unwrap();
+                assert_eq!(stats.accepted_token_count, 5);
+                assert_eq!(stats.proposed_token_count, 5);
+                // The final accepted token is pending, and both models consume it next iteration.
+                let calls = target_calls.lock().unwrap();
+                assert_eq!(calls.last().unwrap().start_position, 5);
+                assert_eq!(calls.last().unwrap().cached_tokens, expected_tokens[..5]);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stochastic_speculation_stops_at_accepted_and_replacement_eos() -> Result<()> {
+        for accepted_eos in [false, true] {
+            let cache_type = KvCacheType::Paged {
+                per_page_token_count: 2,
+                enable_prefix_caching: true,
+            };
+            let (mut target, _) =
+                create_sampling_test_model(forced_logits(&[1, 2, 1, 1]), cache_type)?;
+            let (mut draft, draft_calls) = create_sampling_test_model(
+                forced_logits(&[1, if accepted_eos { 2 } else { 3 }, 1, 1]),
+                cache_type,
+            )?;
+            target.start_request(1)?;
+            draft.start_request(1)?;
+            let mut state = create_test_execution_state(vec![0], vec![2]);
+            state.target_sampler = Sampler::new(0.7, 42, 1.0, 64);
+            state.draft_sampler = Sampler::new(0.7, 43, 1.0, 64);
+            let mut batch = RequestExecutionBatch::with_capacity(1);
+            batch.push(Box::new(state), 1);
+            let step = batch.run_steps(&mut target, Some(&mut draft))?.remove(0);
+            assert_eq!(step.output_token_ids, [1]);
+            assert!(matches!(
+                step.generation_phase,
+                GenerationPhase::Finished {
+                    finish_reason: GenerationFinishReason::EndOfSequenceToken
+                }
+            ));
+            let output = batch
+                .into_execution_states()
+                .next()
+                .unwrap()
+                .into_generation_output()?;
+            assert_eq!(output.committed_token_ids, [0, 1]);
+            let stats = output.execution_stats.draft_stats.unwrap();
+            assert_eq!(stats.accepted_token_count, if accepted_eos { 2 } else { 1 });
+            assert_eq!(stats.proposed_token_count, if accepted_eos { 2 } else { 4 });
+            assert_eq!(
+                draft_calls.lock().unwrap().len(),
+                if accepted_eos { 2 } else { 4 }
+            );
+            // Completing the request publishes only committed prefix pages, even with EOS.
+            target.finish_request(1, &output.committed_token_ids)?;
+            draft.finish_request(1, &output.committed_token_ids)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn seeded_speculative_requests_are_independent_of_batch_composition() -> Result<()> {
+        let cache_type = KvCacheType::Paged {
+            per_page_token_count: 2,
+            enable_prefix_caching: true,
+        };
+        let run = |request_ids: &[u64]| -> Result<BTreeMap<u64, Vec<u32>>> {
+            let (mut target, _) = create_sampling_test_model(
+                vec![
+                    vec![0.3, 1.4, -0.2],
+                    vec![1.1, -0.4, 0.5],
+                    vec![0.2, -0.3, 1.2],
+                ],
+                cache_type,
+            )?;
+            let (mut draft, _) = create_sampling_test_model(
+                vec![
+                    vec![1.1, -0.2, 0.4],
+                    vec![-0.1, 1.3, 0.2],
+                    vec![0.9, 0.4, -0.3],
+                ],
+                cache_type,
+            )?;
+            let mut batch = RequestExecutionBatch::with_capacity(request_ids.len());
+            for &id in request_ids {
+                target.start_request(id)?;
+                draft.start_request(id)?;
+                let request = GenerateTextRequest {
+                    request_id: id,
+                    input_token_ids: vec![0, 1, 2][..id as usize].to_vec(),
+                    max_new_tokens: 12,
+                    temperature: if id == 1 { 0.0 } else { 0.7 },
+                    seed: Some(42),
+                    repeat_penalty: 1.5,
+                    repeat_last_n: 3,
+                    ..Default::default()
+                };
+                let state = RequestExecutionState::new(
+                    request,
+                    Some(DraftTokenCountController::new(
+                        DraftTokenCountPolicy::Fixed {
+                            draft_token_count: 4,
+                        },
+                    )),
+                    PrefillStartPositions {
+                        target: 0,
+                        draft: Some(0),
+                    },
+                )?;
+                batch.push(Box::new(state), 1);
+            }
+            let mut outputs = BTreeMap::new();
+            while !batch.is_empty() {
+                batch.run_steps(&mut target, Some(&mut draft))?;
+                let mut next_batch = RequestExecutionBatch::with_capacity(batch.len());
+                for state in batch.into_execution_states() {
+                    if matches!(state.phase(), GenerationPhase::Finished { .. }) {
+                        let id = state.request_id();
+                        let output = state.into_generation_output()?;
+                        assert_eq!(output.execution_stats.output_token_count, 12);
+                        let stats = output.execution_stats.draft_stats.unwrap();
+                        if id != 1 {
+                            assert!(stats.accepted_token_count > 0);
+                        }
+                        assert!(stats.accepted_token_count < stats.proposed_token_count);
+                        target.finish_request(id, &output.committed_token_ids)?;
+                        draft.finish_request(id, &output.committed_token_ids)?;
+                        outputs.insert(id, output.committed_token_ids);
+                    } else {
+                        next_batch.push(state, 1);
+                    }
+                }
+                batch = next_batch;
+            }
+            Ok(outputs)
+        };
+        let batched = run(&[1, 2, 3])?;
+        assert_eq!(batched, run(&[3, 2, 1])?);
+        for id in [1, 2, 3] {
+            assert_eq!(batched[&id], run(&[id])?[&id]);
+        }
+        Ok(())
     }
 
     #[test]
@@ -1628,6 +2029,7 @@ mod tests {
             original_cached_token_count: 1,
             maximum_token_count: 3,
             token_ids: Vec::new(),
+            probabilities: Vec::new(),
         }];
 
         batch.generate_draft_proposals(&mut draft, &mut proposals)?;
@@ -1751,7 +2153,14 @@ mod tests {
             &Device::Cpu,
         )?;
 
-        let result = execution_state.verify_draft_tokens(&draft_tokens, &verification_logits)?;
+        let proposal = DraftProposal {
+            request_index: 0,
+            original_cached_token_count: 0,
+            maximum_token_count: draft_tokens.len(),
+            token_ids: draft_tokens.to_vec(),
+            probabilities: Vec::new(),
+        };
+        let result = execution_state.verify_draft_tokens(&proposal, &verification_logits)?;
 
         assert_eq!(result.accepted_token_count, 1);
         assert_eq!(result.maybe_replacement_token, Some(4));
@@ -1771,7 +2180,14 @@ mod tests {
             &Device::Cpu,
         )?;
 
-        let result = execution_state.verify_draft_tokens(&draft_tokens, &verification_logits)?;
+        let proposal = DraftProposal {
+            request_index: 0,
+            original_cached_token_count: 0,
+            maximum_token_count: draft_tokens.len(),
+            token_ids: draft_tokens.to_vec(),
+            probabilities: Vec::new(),
+        };
+        let result = execution_state.verify_draft_tokens(&proposal, &verification_logits)?;
 
         assert_eq!(result.accepted_token_count, draft_tokens.len());
         assert_eq!(result.maybe_replacement_token, None);

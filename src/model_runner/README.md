@@ -57,7 +57,7 @@ connect generation with model and cache ownership.
 | `server/model_executor.rs` | Owns the target and optional draft model instances and manages their request lifecycles. |
 | `server/model_instance.rs` | Pairs one loaded model with its request-aware KV-cache manager. |
 | `server/generation/text_generation.rs` | Implements resumable prefill, ordinary decoding, speculative decoding, and sampling. |
-| `server/generation/sampler.rs` | Applies repetition penalties and greedy or seeded temperature sampling. |
+| `server/generation/sampler.rs` | Applies repetition penalties, greedy or seeded temperature sampling, and stochastic speculative acceptance and residual sampling. |
 | `server/generation/draft_token_count.rs` | Controls the number of draft tokens proposed per speculative iteration. |
 | `server/generation/generation_stats.rs` | Defines generation outcomes and execution, draft-model, and prefix-cache statistics. |
 | [`server/kv_cache/`](server/kv_cache/README.md) | Implements contiguous and paged storage, prefix reuse, and per-request cache state. |
@@ -271,9 +271,23 @@ automatically limits its scheduler accordingly.
 When a draft model is configured, target and draft models restore cached prompt
 prefixes independently and prefill through the second-to-last input token. The
 draft model proposes tokens, and the target verifies proposals for scheduled
-requests in a batched forward pass. The longest matching prefix is accepted;
-after verification, both caches are truncated to discard state derived from
-any rejected proposals.
+requests in a batched forward pass.
+
+With `temperature = 0`, verification accepts the longest prefix matching the
+target's greedy choices. With positive temperature, both models sample over the
+full vocabulary using the request's temperature and repetition penalty. Each
+draft proposal retains its full distribution `q`; the target calculates `p` for
+the same token prefix and accepts the proposed token `x` with probability
+`min(1, p(x) / q(x))`. At the first rejection, a replacement is sampled from the
+normalized positive residual `max(p - q, 0)`, and the remaining proposals are
+discarded. This preserves the target sampling distribution. Both caches are
+truncated to the verified prefix before the next iteration.
+
+The request's optional `seed` initializes independent target and draft RNG
+streams. Seeded speculative requests are reproducible for the same execution
+configuration, but need not produce the same tokens as target-only sampling
+with that seed. After full acceptance, this implementation emits the accepted
+proposals without an additional bonus target token.
 
 Without a draft model, requests use ordinary target-only prefill and decode.
 Both paths remain resumable between scheduling iterations and report
