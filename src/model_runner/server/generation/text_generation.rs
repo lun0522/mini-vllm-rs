@@ -228,6 +228,7 @@ impl RequestExecutionState {
         request: GenerateTextRequest,
         draft_token_count_controller: Option<DraftTokenCountController>,
         prefill_initial_positions: PrefillStartPositions,
+        tokenizer_vocabulary_size: usize,
     ) -> Result<Self> {
         let input_token_count = request.input_token_ids.len();
         validate_prefill_start_positions(input_token_count, prefill_initial_positions)?;
@@ -240,7 +241,7 @@ impl RequestExecutionState {
             determine_initial_phase(input_token_count, prefill_initial_positions);
         let max_new_token_count = usize::try_from(request.max_new_tokens)
             .context("max_new_tokens does not fit in usize")?;
-        let (target_sampler, draft_sampler) = create_samplers(&request)?;
+        let (target_sampler, draft_sampler) = create_samplers(&request, tokenizer_vocabulary_size)?;
         Ok(Self {
             request_id: request.request_id,
             tokens: request.input_token_ids,
@@ -1114,19 +1115,24 @@ impl RequestExecutionBatch {
     }
 }
 
-fn create_samplers(request: &GenerateTextRequest) -> Result<(Sampler, Sampler)> {
+fn create_samplers(
+    request: &GenerateTextRequest,
+    tokenizer_vocabulary_size: usize,
+) -> Result<(Sampler, Sampler)> {
     let seed = request.seed.unwrap_or_else(rand::random);
     let repeat_last_n =
         usize::try_from(request.repeat_last_n).context("repeat_last_n does not fit in usize")?;
     // Keep the target's existing seed sequence and give the draft its own RNG stream.
     Ok((
         Sampler::new(
+            tokenizer_vocabulary_size,
             request.temperature,
             seed,
             request.repeat_penalty,
             repeat_last_n,
         ),
         Sampler::new(
+            tokenizer_vocabulary_size,
             request.temperature,
             seed.wrapping_add(1),
             request.repeat_penalty,
@@ -1207,9 +1213,9 @@ mod tests {
             seed: Some(0),
             ..Default::default()
         };
-        let (mut target, mut draft) = create_samplers(&request)?;
-        let mut reference_target = Sampler::new(0.7, 0, 1.0, 0);
-        let mut reference_draft = Sampler::new(0.7, 1, 1.0, 0);
+        let (mut target, mut draft) = create_samplers(&request, 3)?;
+        let mut reference_target = Sampler::new(3, 0.7, 0, 1.0, 0);
+        let mut reference_draft = Sampler::new(3, 0.7, 1, 1.0, 0);
         let logits = Tensor::new(&[0.0f32, 0.5, 1.0], &Device::Cpu)?;
         for _ in 0..32 {
             assert_eq!(
@@ -1381,8 +1387,8 @@ mod tests {
             )),
             max_new_token_count: 16,
             eos_tokens,
-            target_sampler: Sampler::new(0.0, 0, 1.0, 64),
-            draft_sampler: Sampler::new(0.0, 1, 1.0, 64),
+            target_sampler: Sampler::new(3, 0.0, 0, 1.0, 64),
+            draft_sampler: Sampler::new(3, 0.0, 1, 1.0, 64),
             prefill_initial_positions: PrefillStartPositions {
                 target: 0,
                 draft: None,
@@ -1529,8 +1535,8 @@ mod tests {
                 target.start_request(1)?;
                 draft.start_request(1)?;
                 let mut state = create_test_execution_state(vec![0], vec![]);
-                state.target_sampler = Sampler::new(temperature, 42, 1.0, 64);
-                state.draft_sampler = Sampler::new(temperature, 43, 1.0, 64);
+                state.target_sampler = Sampler::new(4, temperature, 42, 1.0, 64);
+                state.draft_sampler = Sampler::new(4, temperature, 43, 1.0, 64);
                 state.max_new_token_count = 5;
                 let mut batch = RequestExecutionBatch::with_capacity(1);
                 batch.push(Box::new(state), 1);
@@ -1604,8 +1610,9 @@ mod tests {
                         target: 0,
                         draft: Some(0),
                     },
+                    3,
                 )?;
-                let mut reference = Sampler::new(temperature, 43, 1.7, 3);
+                let mut reference = Sampler::new(3, temperature, 43, 1.7, 3);
                 let mut expected_tokens = vec![0, 1];
                 for _ in 0..5 {
                     let next = reference.sample(
@@ -1660,8 +1667,8 @@ mod tests {
             target.start_request(1)?;
             draft.start_request(1)?;
             let mut state = create_test_execution_state(vec![0], vec![2]);
-            state.target_sampler = Sampler::new(0.7, 42, 1.0, 64);
-            state.draft_sampler = Sampler::new(0.7, 43, 1.0, 64);
+            state.target_sampler = Sampler::new(4, 0.7, 42, 1.0, 64);
+            state.draft_sampler = Sampler::new(4, 0.7, 43, 1.0, 64);
             let mut batch = RequestExecutionBatch::with_capacity(1);
             batch.push(Box::new(state), 1);
             let step = batch.run_steps(&mut target, Some(&mut draft))?.remove(0);
@@ -1740,6 +1747,7 @@ mod tests {
                         target: 0,
                         draft: Some(0),
                     },
+                    3,
                 )?;
                 batch.push(Box::new(state), 1);
             }
@@ -1790,6 +1798,7 @@ mod tests {
                 target: 2,
                 draft: None,
             },
+            32,
         )?;
 
         assert!(matches!(
@@ -1819,6 +1828,7 @@ mod tests {
                 target: 3,
                 draft: Some(1),
             },
+            32,
         )?;
 
         assert!(matches!(
@@ -2101,6 +2111,7 @@ mod tests {
                 target: 3,
                 draft: None,
             },
+            32,
         )
         .err()
         .expect("invalid prefill position should be rejected")
@@ -2129,6 +2140,7 @@ mod tests {
                 target: 0,
                 draft: Some(3),
             },
+            32,
         )
         .err()
         .expect("invalid draft prefill position should be rejected")

@@ -17,6 +17,7 @@ pub struct SampleWithProbabilities {
 
 /// Sampling configuration and RNG state owned by a single request and model role.
 pub struct Sampler {
+    tokenizer_vocabulary_size: usize,
     temperature: f64,
     repeat_penalty: f32,
     repeat_last_n: usize,
@@ -24,8 +25,15 @@ pub struct Sampler {
 }
 
 impl Sampler {
-    pub fn new(temperature: f32, seed: u64, repeat_penalty: f32, repeat_last_n: usize) -> Self {
+    pub fn new(
+        tokenizer_vocabulary_size: usize,
+        temperature: f32,
+        seed: u64,
+        repeat_penalty: f32,
+        repeat_last_n: usize,
+    ) -> Self {
         Self {
+            tokenizer_vocabulary_size,
             temperature: f64::from(temperature),
             repeat_penalty,
             repeat_last_n,
@@ -167,7 +175,12 @@ impl Sampler {
     ) -> Result<Vec<f32>> {
         let logits = self
             .apply_repetition_penalty(logits, committed_tokens, appended_tokens)?
-            .to_dtype(DType::F32)?;
+            .to_dtype(DType::F32)?
+            .narrow(
+                /* dim */ 0,
+                /* start */ 0,
+                self.tokenizer_vocabulary_size,
+            )?;
         let scaled_logits = (&logits / self.temperature)?;
         Ok(candle_nn::ops::softmax_last_dim(&scaled_logits)?.to_vec1()?)
     }
@@ -193,7 +206,7 @@ mod tests {
         for temperature in [0.0f32, 0.00001, 0.7, 1.0, 2.0] {
             for seed in [0, 42, u64::MAX] {
                 for repeat_penalty in [1.0, 1.5] {
-                    let mut sampler = Sampler::new(temperature, seed, repeat_penalty, 3);
+                    let mut sampler = Sampler::new(4, temperature, seed, repeat_penalty, 3);
                     let sampling = if temperature == 0.0 {
                         Sampling::ArgMax
                     } else {
@@ -219,9 +232,9 @@ mod tests {
     #[test]
     fn samplers_have_independent_rng_state() -> Result<()> {
         let logits = Tensor::new(&[0.0f32, 0.5, 1.0], &Device::Cpu)?;
-        let mut target = Sampler::new(0.7, 0, 1.0, 64);
-        let mut draft = Sampler::new(0.7, 1, 1.0, 64);
-        let mut reference_target = Sampler::new(0.7, 0, 1.0, 64);
+        let mut target = Sampler::new(3, 0.7, 0, 1.0, 64);
+        let mut draft = Sampler::new(3, 0.7, 1, 1.0, 64);
+        let mut reference_target = Sampler::new(3, 0.7, 0, 1.0, 64);
         for _ in 0..32 {
             draft.sample(&logits, &[], &[])?;
             assert_eq!(
@@ -238,7 +251,7 @@ mod tests {
             &[0.0f32, 2.0 * 2.0f32.ln(), 2.0 * 3.0f32.ln()],
             &Device::Cpu,
         )?;
-        let mut sampler = Sampler::new(2.0, 0, 1.0, 64);
+        let mut sampler = Sampler::new(3, 2.0, 0, 1.0, 64);
         let sample = sampler.sample_with_probabilities(&logits, &[], &[])?;
         for (actual, expected) in sample
             .probabilities
@@ -253,9 +266,22 @@ mod tests {
     #[test]
     fn never_samples_tokens_with_zero_probability() -> Result<()> {
         let logits = Tensor::new(&[f32::NEG_INFINITY, 5.0, f32::NEG_INFINITY], &Device::Cpu)?;
-        let mut sampler = Sampler::new(1.0, 0, 1.0, 64);
+        let mut sampler = Sampler::new(3, 1.0, 0, 1.0, 64);
         for _ in 0..32 {
             assert_eq!(sampler.sample(&logits, &[], &[])?, 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn excludes_model_padding_rows_from_temperature_sampling() -> Result<()> {
+        let logits = Tensor::new(&[0.0f32, 1.0, 100.0, 200.0], &Device::Cpu)?;
+        let mut sampler = Sampler::new(2, 1.0, 0, 1.0, 64);
+
+        for _ in 0..32 {
+            let sample = sampler.sample_with_probabilities(&logits, &[], &[])?;
+            assert!(sample.token_id < 2);
+            assert_eq!(sample.probabilities.len(), 2);
         }
         Ok(())
     }
@@ -270,7 +296,7 @@ mod tests {
 
     #[test]
     fn accepts_identical_distributions_and_preserves_tiny_residual_mass() -> Result<()> {
-        let mut sampler = Sampler::new(1.0, 42, 1.0, 64);
+        let mut sampler = Sampler::new(3, 1.0, 42, 1.0, 64);
         for token in [0, 1, 2] {
             assert_eq!(
                 sampler.verify_stochastic_draft_token(
@@ -307,8 +333,8 @@ mod tests {
             ([0.0, 0.4, 0.6], [0.2, 0.0, 0.8]),
             ([0.1, 0.2, 0.7000001], [0.7000001, 0.2, 0.1]),
         ] {
-            let mut target = Sampler::new(1.0, 42, 1.0, 64);
-            let mut draft = Sampler::new(1.0, 43, 1.0, 64);
+            let mut target = Sampler::new(3, 1.0, 42, 1.0, 64);
+            let mut draft = Sampler::new(3, 1.0, 43, 1.0, 64);
             let mut counts = [0usize; 3];
             let mut accepted = 0usize;
             const SAMPLES: usize = 40_000;
@@ -343,7 +369,7 @@ mod tests {
 
     #[test]
     fn rejects_incompatible_speculative_distributions() -> Result<()> {
-        let mut sampler = Sampler::new(1.0, 0, 1.0, 64);
+        let mut sampler = Sampler::new(2, 1.0, 0, 1.0, 64);
         for (token, p, q) in [
             (0, &[1.0, 0.0][..], &[][..]),
             (0, &[1.0, 0.0], &[1.0]),
@@ -363,7 +389,7 @@ mod tests {
     fn applies_repetition_penalty_across_committed_and_appended_tokens() -> Result<()> {
         let logits = Tensor::new(&[2.0f32, 4.0, -3.0, 6.0], &Device::Cpu)?;
         let penalized =
-            Sampler::new(1.0, 0, 2.0, 3).apply_repetition_penalty(&logits, &[0, 1], &[2, 1])?;
+            Sampler::new(4, 1.0, 0, 2.0, 3).apply_repetition_penalty(&logits, &[0, 1], &[2, 1])?;
         assert_eq!(penalized.to_vec1::<f32>()?, vec![2.0, 2.0, -6.0, 6.0]);
         Ok(())
     }
@@ -376,7 +402,7 @@ mod tests {
             (1, vec![2.0, 4.0, 6.0, 4.0]),
             (8, vec![1.0, 2.0, 3.0, 4.0]),
         ] {
-            let penalized = Sampler::new(1.0, 0, 2.0, repeat_last_n).apply_repetition_penalty(
+            let penalized = Sampler::new(4, 1.0, 0, 2.0, repeat_last_n).apply_repetition_penalty(
                 &logits,
                 &[0],
                 &[1, 2, 3],

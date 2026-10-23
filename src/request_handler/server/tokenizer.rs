@@ -224,6 +224,12 @@ fn validate_model_vocabulary(
         .max()
         .map_or(0, |maximum_id| u64::from(maximum_id) + 1);
     anyhow::ensure!(
+        model_metadata.tokenizer_vocabulary_size == required_size,
+        "{model_role} model GGUF tokenizer defines {} token IDs but the shared tokenizer requires \
+        {required_size}",
+        model_metadata.tokenizer_vocabulary_size,
+    );
+    anyhow::ensure!(
         model_metadata.input_vocabulary_size >= required_size,
         "{model_role} model input vocabulary has {} entries but the shared tokenizer requires \
          token IDs through {}",
@@ -379,8 +385,24 @@ mod tests {
             input_vocabulary_size: 3,
             output_vocabulary_size: 3,
             context_length: 4096,
+            tokenizer_vocabulary_size: 3,
         };
         assert!(validate_model_vocabulary(&tokenizer, &metadata, ModelRole::Target).is_ok());
+
+        let tokenizer_error = validate_model_vocabulary(
+            &tokenizer,
+            &ModelMetadata {
+                tokenizer_vocabulary_size: 2,
+                ..metadata
+            },
+            ModelRole::Target,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            tokenizer_error.contains("GGUF tokenizer defines 2 token IDs"),
+            "{tokenizer_error}"
+        );
 
         let input_error = validate_model_vocabulary(
             &tokenizer,

@@ -18,6 +18,7 @@ struct LoadedBackend {
     architecture: ModelArchitecture,
     input_vocabulary_size: usize,
     output_vocabulary_size: usize,
+    tokenizer_vocabulary_size: usize,
 }
 
 /// Owns a fully initialized model and the resources reused by each inference.
@@ -39,6 +40,7 @@ impl LoadedModel {
             architecture,
             input_vocabulary_size,
             output_vocabulary_size,
+            tokenizer_vocabulary_size,
         } = load_model_backend(gguf_path, &device, activation_dtype)?;
         let metadata = ModelMetadata {
             context_length: u64::try_from(model.info().context_length)
@@ -48,7 +50,17 @@ impl LoadedModel {
                 .context("model input vocabulary size does not fit in u64")?,
             output_vocabulary_size: u64::try_from(output_vocabulary_size)
                 .context("model output vocabulary size does not fit in u64")?,
+            tokenizer_vocabulary_size: u64::try_from(tokenizer_vocabulary_size)
+                .context("model tokenizer vocabulary size does not fit in u64")?,
         };
+        anyhow::ensure!(
+            tokenizer_vocabulary_size <= input_vocabulary_size,
+            "model input vocabulary has {input_vocabulary_size} entries but its tokenizer defines {tokenizer_vocabulary_size} token IDs"
+        );
+        anyhow::ensure!(
+            tokenizer_vocabulary_size <= output_vocabulary_size,
+            "model output vocabulary has {output_vocabulary_size} entries but its tokenizer defines {tokenizer_vocabulary_size} token IDs"
+        );
         Ok(Self {
             model,
             device,
@@ -90,6 +102,13 @@ fn load_model_backend(
     let mut gguf_file = File::open(gguf_path).context("failed to open the GGUF model")?;
     let content =
         gguf_file::Content::read(&mut gguf_file).context("failed to read GGUF metadata")?;
+    let architecture = content
+        .metadata
+        .get("general.architecture")
+        .context("GGUF metadata does not contain general.architecture")?
+        .to_string()
+        .context("GGUF general.architecture is not a string")?
+        .clone();
     let input_vocabulary_size = content
         .tensor_infos
         .get("token_embd.weight")
@@ -111,13 +130,7 @@ fn load_model_backend(
                     .copied()
                     .context("GGUF output tensor has no dimensions")
             })?;
-    let architecture = content
-        .metadata
-        .get("general.architecture")
-        .context("GGUF metadata does not contain general.architecture")?
-        .to_string()
-        .context("GGUF general.architecture is not a string")?
-        .clone();
+    let tokenizer_vocabulary_size = get_tokenizer_vocabulary_size(&content)?;
     match architecture.as_str() {
         "llama" => Ok(LoadedBackend {
             model: Box::new(LlamaBackend::new(
@@ -129,6 +142,7 @@ fn load_model_backend(
             architecture: ModelArchitecture::Llama,
             input_vocabulary_size,
             output_vocabulary_size,
+            tokenizer_vocabulary_size,
         }),
         "qwen2" => Ok(LoadedBackend {
             model: Box::new(Qwen2Backend::new(
@@ -140,7 +154,60 @@ fn load_model_backend(
             architecture: ModelArchitecture::Qwen2,
             input_vocabulary_size,
             output_vocabulary_size,
+            tokenizer_vocabulary_size,
         }),
         unsupported => bail!("unsupported model architecture: {unsupported}"),
     }
+}
+
+/// Returns the usable token-ID range, excluding trailing GGUF tokenizer entries marked `UNUSED`.
+/// Older GGUF files without token-type metadata use the full tokenizer token array.
+fn get_tokenizer_vocabulary_size(content: &gguf_file::Content) -> Result<usize> {
+    let tokenizer_tokens = match content
+        .metadata
+        .get("tokenizer.ggml.tokens")
+        .context("GGUF metadata does not contain tokenizer.ggml.tokens")?
+    {
+        gguf_file::Value::Array(tokens) => tokens,
+        value => bail!(
+            "GGUF tokenizer.ggml.tokens metadata is not an array: {:?}",
+            value.value_type()
+        ),
+    };
+    let tokenizer_vocabulary_size = content.metadata.get("tokenizer.ggml.token_type").map_or(
+        Ok(tokenizer_tokens.len()),
+        |value| {
+            let gguf_file::Value::Array(token_types) = value else {
+                bail!(
+                    "GGUF tokenizer.ggml.token_type metadata is not an array: {:?}",
+                    value.value_type()
+                )
+            };
+            anyhow::ensure!(
+                token_types.len() == tokenizer_tokens.len(),
+                "GGUF tokenizer contains {} tokens but {} token types",
+                tokenizer_tokens.len(),
+                token_types.len()
+            );
+            anyhow::ensure!(
+                token_types
+                    .iter()
+                    .all(|token_type| matches!(token_type, gguf_file::Value::I32(_))),
+                "GGUF tokenizer.ggml.token_type metadata contains a non-i32 value"
+            );
+            const UNUSED_TOKEN_TYPE: i32 = 5;
+            token_types
+                .iter()
+                .rposition(|token_type| {
+                    !matches!(token_type, gguf_file::Value::I32(UNUSED_TOKEN_TYPE))
+                })
+                .map(|index| index + 1)
+                .context("GGUF tokenizer marks every token as unused")
+        },
+    )?;
+    anyhow::ensure!(
+        tokenizer_vocabulary_size > 0,
+        "GGUF tokenizer.ggml.tokens metadata is empty"
+    );
+    Ok(tokenizer_vocabulary_size)
 }

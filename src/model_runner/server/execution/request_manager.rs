@@ -517,6 +517,7 @@ mod tests {
                     target: 0,
                     draft: None,
                 },
+                32,
             )
         })?;
         let (queued_request, _queued_event_receiver) = request(9);

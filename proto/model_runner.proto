@@ -22,10 +22,19 @@ enum ModelArchitecture {
 message GetModelMetadataRequest {}
 
 message ModelMetadata {
+  // Model family used to select the architecture-specific implementation.
   ModelArchitecture architecture = 1;
+  // Number of rows in the input token-embedding tensor. This is the range of token IDs the model
+  // can accept and may include padding rows that are not defined by the tokenizer.
   uint64 input_vocabulary_size = 2;
+  // Number of logits produced by the model's output projection. This may differ from the input
+  // tensor size and may include padding logits that do not correspond to tokenizer tokens.
   uint64 output_vocabulary_size = 3;
-  uint64 context_length = 4;
+  // Number of usable token IDs defined by the tokenizer embedded in the GGUF model. Trailing tokens
+  // marked unused and extra model tensor rows are excluded from tokenization and sampling.
+  uint64 tokenizer_vocabulary_size = 4;
+  // Maximum sequence length supported by the model.
+  uint64 context_length = 5;
 }
 
 message GetModelMetadataResponse {
@@ -82,7 +91,7 @@ message GenerateTextRequest {
   repeated uint32 input_token_ids = 2;
   // Maximum number of tokens the model may generate before stopping.
   uint64 max_new_tokens = 3;
-  // Sampling temperature over the full vocabulary; zero selects greedy decoding.
+  // Sampling temperature over the tokenizer vocabulary; zero selects greedy decoding.
   float temperature = 4;
   // Random sampling seed; omitted selects a random seed. Zero is a valid seed.
   optional uint64 seed = 5;

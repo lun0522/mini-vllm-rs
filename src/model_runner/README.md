@@ -275,9 +275,10 @@ requests in a batched forward pass.
 
 With `temperature = 0`, verification accepts the longest prefix matching the
 target's greedy choices. With positive temperature, both models sample over the
-full vocabulary using the request's temperature and repetition penalty. Each
-draft proposal retains its full distribution `q`; the target calculates `p` for
-the same token prefix and accepts the proposed token `x` with probability
+shared tokenizer vocabulary using the request's temperature and repetition
+penalty. Model output rows beyond that vocabulary are padding and are excluded.
+Each draft proposal retains its full distribution `q`; the target calculates `p`
+for the same token prefix and accepts the proposed token `x` with probability
 `min(1, p(x) / q(x))`. At the first rejection, a replacement is sampled from the
 normalized positive residual `max(p - q, 0)`, and the remaining proposals are
 discarded. This preserves the target sampling distribution. Both caches are

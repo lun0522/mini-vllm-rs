@@ -56,6 +56,7 @@ pub(super) struct ModelExecutorPrefixCacheTelemetry {
 pub(super) struct ModelExecutor {
     target: ModelInstance,
     draft: Option<DraftModel>,
+    tokenizer_vocabulary_size: usize,
     prefix_cache_publication_policy: PrefixCachePublicationPolicy,
 }
 
@@ -81,6 +82,19 @@ impl ModelExecutor {
                 Ok::<_, Error>((model, config.token_count_policy))
             })
             .transpose()?;
+        let tokenizer_vocabulary_size =
+            usize::try_from(loaded_model.metadata().tokenizer_vocabulary_size)
+                .context("target tokenizer vocabulary size does not fit in usize")?;
+        if let Some((draft_model, _)) = &loaded_draft_model {
+            let draft_tokenizer_vocabulary_size =
+                usize::try_from(draft_model.metadata().tokenizer_vocabulary_size)
+                    .context("draft tokenizer vocabulary size does not fit in usize")?;
+            anyhow::ensure!(
+                draft_tokenizer_vocabulary_size == tokenizer_vocabulary_size,
+                "target and draft GGUF tokenizers define different vocabulary sizes: \
+                 {tokenizer_vocabulary_size} and {draft_tokenizer_vocabulary_size}"
+            );
+        }
         info!(
             "[Backend {backend_id}] Selected inference device {:?} for quantized GGUF inference",
             loaded_model.device()
@@ -116,6 +130,7 @@ impl ModelExecutor {
         Ok(Self {
             target: ModelInstance::new(loaded_model, target_kv_cache),
             draft,
+            tokenizer_vocabulary_size,
             prefix_cache_publication_policy,
         })
     }
@@ -199,6 +214,7 @@ impl ModelExecutor {
                     .as_ref()
                     .map(|draft| DraftTokenCountController::new(draft.token_count_policy)),
                 prefill_initial_positions,
+                self.tokenizer_vocabulary_size,
             )
         })() {
             Ok(execution_state) => Ok(execution_state),
@@ -473,6 +489,7 @@ mod tests {
         Ok(ModelExecutor {
             target: test_model_instance(/* next_token */ 1)?,
             draft: None,
+            tokenizer_vocabulary_size: 2,
             prefix_cache_publication_policy: policy,
         })
     }
@@ -486,6 +503,7 @@ mod tests {
                     draft_token_count: 2,
                 },
             }),
+            tokenizer_vocabulary_size: 2,
             prefix_cache_publication_policy: PrefixCachePublicationPolicy::Incremental,
         })
     }

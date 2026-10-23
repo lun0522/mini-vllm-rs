@@ -21,7 +21,7 @@ message GenerateText {
   string prompt = 2;
   // Maximum number of tokens the model may generate before stopping.
   uint64 max_new_tokens = 3;
-  // Sampling temperature over the full vocabulary; zero selects greedy decoding.
+  // Sampling temperature over the tokenizer vocabulary; zero selects greedy decoding.
   float temperature = 4;
   // Random sampling seed; omitted selects a random seed. Zero is a valid seed.
   optional uint64 seed = 5;
