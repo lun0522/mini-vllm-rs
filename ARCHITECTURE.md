@@ -159,10 +159,9 @@ remain in native Rust and avoid Python interpreter overhead.
 
 ## Future directions
 
-1. Add seeded temperature and top-p sampling for target-only generation.
+1. Add top-p sampling with matching truncation semantics for target-only and
+   speculative generation.
 2. Improve overload and cancellation handling, including early removal of
    cancelled queued requests and explicit capacity errors.
 3. Support and verify CUDA inference on Linux with NVIDIA GPUs.
 4. Add GPU paged attention, potentially using `candle-flash-attn`.
-5. Extend stochastic sampling to speculative decoding with a
-   distribution-correct acceptance algorithm.

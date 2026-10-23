@@ -76,6 +76,9 @@ order:
 12. [Request orchestration capacity](benchmarks/request_orchestration_capacity.md)
     measures when cache-aware estimated-work routing begins using the CPU and
     compares its saturated capacity with a forced-GPU control.
+13. [Speculative sampling tradeoffs](benchmarks/speculative_sampling_tradeoff.md)
+    measures how temperature and a total-variation budget affect fixed-4 draft
+    acceptance, latency, throughput, and representative creative-writing output.
 
 ## Run
 
