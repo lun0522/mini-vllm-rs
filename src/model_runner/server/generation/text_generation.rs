@@ -1127,6 +1127,7 @@ fn create_samplers(
         Sampler::new(
             tokenizer_vocabulary_size,
             request.temperature,
+            request.total_variation_budget,
             seed,
             request.repeat_penalty,
             repeat_last_n,
@@ -1134,6 +1135,7 @@ fn create_samplers(
         Sampler::new(
             tokenizer_vocabulary_size,
             request.temperature,
+            request.total_variation_budget,
             seed.wrapping_add(1),
             request.repeat_penalty,
             repeat_last_n,
@@ -1209,13 +1211,14 @@ mod tests {
     fn configures_both_samplers_with_temperature_and_independent_seeded_streams() -> Result<()> {
         let request = GenerateTextRequest {
             temperature: 0.7,
+            total_variation_budget: 0.1,
             repeat_penalty: 1.0,
             seed: Some(0),
             ..Default::default()
         };
         let (mut target, mut draft) = create_samplers(&request, 3)?;
-        let mut reference_target = Sampler::new(3, 0.7, 0, 1.0, 0);
-        let mut reference_draft = Sampler::new(3, 0.7, 1, 1.0, 0);
+        let mut reference_target = Sampler::new(3, 0.7, 0.0, 0, 1.0, 0);
+        let mut reference_draft = Sampler::new(3, 0.7, 0.0, 1, 1.0, 0);
         let logits = Tensor::new(&[0.0f32, 0.5, 1.0], &Device::Cpu)?;
         for _ in 0..32 {
             assert_eq!(
@@ -1387,8 +1390,8 @@ mod tests {
             )),
             max_new_token_count: 16,
             eos_tokens,
-            target_sampler: Sampler::new(3, 0.0, 0, 1.0, 64),
-            draft_sampler: Sampler::new(3, 0.0, 1, 1.0, 64),
+            target_sampler: Sampler::new(3, 0.0, 0.0, 0, 1.0, 64),
+            draft_sampler: Sampler::new(3, 0.0, 0.0, 1, 1.0, 64),
             prefill_initial_positions: PrefillStartPositions {
                 target: 0,
                 draft: None,
@@ -1535,8 +1538,8 @@ mod tests {
                 target.start_request(1)?;
                 draft.start_request(1)?;
                 let mut state = create_test_execution_state(vec![0], vec![]);
-                state.target_sampler = Sampler::new(4, temperature, 42, 1.0, 64);
-                state.draft_sampler = Sampler::new(4, temperature, 43, 1.0, 64);
+                state.target_sampler = Sampler::new(4, temperature, 0.0, 42, 1.0, 64);
+                state.draft_sampler = Sampler::new(4, temperature, 0.0, 43, 1.0, 64);
                 state.max_new_token_count = 5;
                 let mut batch = RequestExecutionBatch::with_capacity(1);
                 batch.push(Box::new(state), 1);
@@ -1612,7 +1615,7 @@ mod tests {
                     },
                     3,
                 )?;
-                let mut reference = Sampler::new(3, temperature, 43, 1.7, 3);
+                let mut reference = Sampler::new(3, temperature, 0.0, 43, 1.7, 3);
                 let mut expected_tokens = vec![0, 1];
                 for _ in 0..5 {
                     let next = reference.sample(
@@ -1667,8 +1670,8 @@ mod tests {
             target.start_request(1)?;
             draft.start_request(1)?;
             let mut state = create_test_execution_state(vec![0], vec![2]);
-            state.target_sampler = Sampler::new(4, 0.7, 42, 1.0, 64);
-            state.draft_sampler = Sampler::new(4, 0.7, 43, 1.0, 64);
+            state.target_sampler = Sampler::new(4, 0.7, 0.0, 42, 1.0, 64);
+            state.draft_sampler = Sampler::new(4, 0.7, 0.0, 43, 1.0, 64);
             let mut batch = RequestExecutionBatch::with_capacity(1);
             batch.push(Box::new(state), 1);
             let step = batch.run_steps(&mut target, Some(&mut draft))?.remove(0);

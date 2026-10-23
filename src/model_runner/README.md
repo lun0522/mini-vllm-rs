@@ -278,11 +278,29 @@ target's greedy choices. With positive temperature, both models sample over the
 shared tokenizer vocabulary using the request's temperature and repetition
 penalty. Model output rows beyond that vocabulary are padding and are excluded.
 Each draft proposal retains its full distribution `q`; the target calculates `p`
-for the same token prefix and accepts the proposed token `x` with probability
-`min(1, p(x) / q(x))`. At the first rejection, a replacement is sampled from the
-normalized positive residual `max(p - q, 0)`, and the remaining proposals are
-discarded. This preserves the target sampling distribution. Both caches are
-truncated to the verified prefix before the next iteration.
+for the same token prefix. Given the request's `total_variation_budget` `D`, the
+sampler calculates
+
+```text
+d = D_TV(p, q) = sum_token max(p(token) - q(token), 0)
+theta = 1 if d <= D, otherwise D / d
+pi = theta * q + (1 - theta) * p
+```
+
+It accepts a proposed token `x` with probability
+`min(1, theta + (1 - theta) * p(x) / q(x))`. At the first rejection, a
+replacement is sampled from the normalized positive residual `max(p - q, 0)`,
+and the remaining proposals are discarded. The resulting token follows `pi`,
+whose total variation distance from the target distribution is at most `D` for
+that verification step. This is the linear interpolation solution derived from
+Lemma 3.2 and Theorem 3.4 of
+[Tran-Thien and Nock, *Mentored Decoding: Faster Inference meets Boosting*](https://arxiv.org/abs/2609.30474).
+
+With `D = 0`, the algorithm reduces to lossless speculative decoding and
+preserves the target distribution; when `p` and `q` differ, `theta = 0`. When
+`D >= D_TV(p, q)`, `theta = 1`, the mentored distribution equals the draft
+distribution, and every draft token is accepted. Both caches are truncated to
+the verified prefix before the next iteration.
 
 The request's optional `seed` initializes independent target and draft RNG
 streams. Seeded speculative requests are reproducible for the same execution

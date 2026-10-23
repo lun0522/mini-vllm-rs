@@ -19,6 +19,7 @@ pub struct SampleWithProbabilities {
 pub struct Sampler {
     tokenizer_vocabulary_size: usize,
     temperature: f64,
+    total_variation_budget: f64,
     repeat_penalty: f32,
     repeat_last_n: usize,
     rng: StdRng,
@@ -28,6 +29,7 @@ impl Sampler {
     pub fn new(
         tokenizer_vocabulary_size: usize,
         temperature: f32,
+        total_variation_budget: f32,
         seed: u64,
         repeat_penalty: f32,
         repeat_last_n: usize,
@@ -35,6 +37,7 @@ impl Sampler {
         Self {
             tokenizer_vocabulary_size,
             temperature: f64::from(temperature),
+            total_variation_budget: f64::from(total_variation_budget),
             repeat_penalty,
             repeat_last_n,
             rng: StdRng::seed_from_u64(seed),
@@ -96,12 +99,17 @@ impl Sampler {
     /// the draft token is rejected and a replacement is sampled from the residual distribution.
     ///
     /// Let p be the target distribution and q the draft distribution, both after temperature
-    /// and repetition penalties. For a draft token x sampled from q:
-    /// - Accept x with probability min(1, p(x) / q(x)), returning None.
-    /// - Otherwise calculate weight(token) = max(p(token) - q(token), 0) for every
-    ///   token in the vocabulary. Let total_weight be the sum of these weights.
-    ///   Sample a replacement with probability weight(token) / total_weight.
-    /// This makes the resulting token follow p while allowing draft tokens to be reused.
+    /// and repetition penalties, and let D be `total_variation_budget`. For a draft token x
+    /// sampled from q:
+    /// - Let D_TV(p || q) = sum_token max(p(token) - q(token), 0) and
+    ///   theta = min(1, D / D_TV(p || q)).
+    /// - Accept x with probability min(1, theta + (1 - theta) * p(x) / q(x)), returning None.
+    /// - Otherwise sample a replacement with weight(token) = max(p(token) - q(token), 0).
+    /// This makes the resulting token follow the mentored distribution:
+    ///   pi = theta * q + (1 - theta) * p
+    ///
+    /// See Lemma 3.2 and Theorem 3.4 in Tran-Thien and Nock, "Mentored Decoding:
+    /// Faster Inference meets Boosting," arXiv:2609.30474 (2026).
     pub fn verify_stochastic_draft_token(
         &mut self,
         draft_token: u32,
@@ -128,7 +136,7 @@ impl Sampler {
         let token_id = draft_token as usize;
         let q = f64::from(draft_probabilities[token_id]) / draft_sum;
         let p = f64::from(target_probabilities[token_id]) / target_sum;
-        if p >= q || self.rng.random::<f64>() < p / q {
+        if p >= q {
             return Ok(None);
         }
 
@@ -137,6 +145,17 @@ impl Sampler {
             .zip(draft_probabilities)
             .map(|(&p, &q)| (f64::from(p) / target_sum - f64::from(q) / draft_sum).max(0.0))
             .collect();
+        let total_variation_distance: f64 = residual.iter().sum();
+        if total_variation_distance <= self.total_variation_budget {
+            return Ok(None);
+        }
+
+        let theta = self.total_variation_budget / total_variation_distance;
+        let acceptance_probability = theta + (1.0 - theta) * p / q;
+        if self.rng.random::<f64>() < acceptance_probability {
+            return Ok(None);
+        }
+
         // WeightedIndex normalizes the residual. Rejection implies strictly positive mass, so
         // there is no fallback to p (which would change the output distribution).
         let distribution = WeightedIndex::new(&residual)
@@ -206,7 +225,7 @@ mod tests {
         for temperature in [0.0f32, 0.00001, 0.7, 1.0, 2.0] {
             for seed in [0, 42, u64::MAX] {
                 for repeat_penalty in [1.0, 1.5] {
-                    let mut sampler = Sampler::new(4, temperature, seed, repeat_penalty, 3);
+                    let mut sampler = Sampler::new(4, temperature, 0.0, seed, repeat_penalty, 3);
                     let sampling = if temperature == 0.0 {
                         Sampling::ArgMax
                     } else {
@@ -232,9 +251,9 @@ mod tests {
     #[test]
     fn samplers_have_independent_rng_state() -> Result<()> {
         let logits = Tensor::new(&[0.0f32, 0.5, 1.0], &Device::Cpu)?;
-        let mut target = Sampler::new(3, 0.7, 0, 1.0, 64);
-        let mut draft = Sampler::new(3, 0.7, 1, 1.0, 64);
-        let mut reference_target = Sampler::new(3, 0.7, 0, 1.0, 64);
+        let mut target = Sampler::new(3, 0.7, 0.0, 0, 1.0, 64);
+        let mut draft = Sampler::new(3, 0.7, 0.0, 1, 1.0, 64);
+        let mut reference_target = Sampler::new(3, 0.7, 0.0, 0, 1.0, 64);
         for _ in 0..32 {
             draft.sample(&logits, &[], &[])?;
             assert_eq!(
@@ -251,7 +270,7 @@ mod tests {
             &[0.0f32, 2.0 * 2.0f32.ln(), 2.0 * 3.0f32.ln()],
             &Device::Cpu,
         )?;
-        let mut sampler = Sampler::new(3, 2.0, 0, 1.0, 64);
+        let mut sampler = Sampler::new(3, 2.0, 0.0, 0, 1.0, 64);
         let sample = sampler.sample_with_probabilities(&logits, &[], &[])?;
         for (actual, expected) in sample
             .probabilities
@@ -266,7 +285,7 @@ mod tests {
     #[test]
     fn never_samples_tokens_with_zero_probability() -> Result<()> {
         let logits = Tensor::new(&[f32::NEG_INFINITY, 5.0, f32::NEG_INFINITY], &Device::Cpu)?;
-        let mut sampler = Sampler::new(3, 1.0, 0, 1.0, 64);
+        let mut sampler = Sampler::new(3, 1.0, 0.0, 0, 1.0, 64);
         for _ in 0..32 {
             assert_eq!(sampler.sample(&logits, &[], &[])?, 1);
         }
@@ -276,7 +295,7 @@ mod tests {
     #[test]
     fn excludes_model_padding_rows_from_temperature_sampling() -> Result<()> {
         let logits = Tensor::new(&[0.0f32, 1.0, 100.0, 200.0], &Device::Cpu)?;
-        let mut sampler = Sampler::new(2, 1.0, 0, 1.0, 64);
+        let mut sampler = Sampler::new(2, 1.0, 0.0, 0, 1.0, 64);
 
         for _ in 0..32 {
             let sample = sampler.sample_with_probabilities(&logits, &[], &[])?;
@@ -296,7 +315,7 @@ mod tests {
 
     #[test]
     fn accepts_identical_distributions_and_preserves_tiny_residual_mass() -> Result<()> {
-        let mut sampler = Sampler::new(3, 1.0, 42, 1.0, 64);
+        let mut sampler = Sampler::new(3, 1.0, 0.0, 42, 1.0, 64);
         for token in [0, 1, 2] {
             assert_eq!(
                 sampler.verify_stochastic_draft_token(
@@ -323,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn speculative_sampling_recovers_the_target_distribution() -> Result<()> {
+    fn zero_budget_speculative_sampling_recovers_the_target_distribution() -> Result<()> {
         // Includes equal models, disjoint support, overlap, zero weights, and f32 sums
         // slightly different from one. Checking acceptance also catches target-only resampling.
         for (p, q) in [
@@ -333,8 +352,8 @@ mod tests {
             ([0.0, 0.4, 0.6], [0.2, 0.0, 0.8]),
             ([0.1, 0.2, 0.7000001], [0.7000001, 0.2, 0.1]),
         ] {
-            let mut target = Sampler::new(3, 1.0, 42, 1.0, 64);
-            let mut draft = Sampler::new(3, 1.0, 43, 1.0, 64);
+            let mut target = Sampler::new(3, 1.0, 0.0, 42, 1.0, 64);
+            let mut draft = Sampler::new(3, 1.0, 0.0, 43, 1.0, 64);
             let mut counts = [0usize; 3];
             let mut accepted = 0usize;
             const SAMPLES: usize = 40_000;
@@ -368,8 +387,63 @@ mod tests {
     }
 
     #[test]
+    fn positive_budget_samples_the_interpolated_distribution() -> Result<()> {
+        let p = [0.6f32, 0.3, 0.1];
+        let q = [0.1f32, 0.3, 0.6];
+        let mut target = Sampler::new(3, 1.0, 0.2, 42, 1.0, 64);
+        let mut draft = Sampler::new(3, 1.0, 0.2, 43, 1.0, 64);
+        let mut counts = [0usize; 3];
+        let mut accepted = 0usize;
+        const SAMPLES: usize = 40_000;
+        let target_logits = logits_from_weights(&p)?;
+        let draft_logits = logits_from_weights(&q)?;
+
+        for _ in 0..SAMPLES {
+            let sample = draft.sample_with_probabilities(&draft_logits, &[], &[])?;
+            let replacement = target.verify_stochastic_draft_token(
+                sample.token_id,
+                &target_logits,
+                &[],
+                &[],
+                &sample.probabilities,
+            )?;
+            accepted += usize::from(replacement.is_none());
+            counts[replacement.unwrap_or(sample.token_id) as usize] += 1;
+        }
+
+        // D_TV(p, q) = 0.5, so theta = 0.2 / 0.5 = 0.4 and
+        // pi = 0.4q + 0.6p = [0.4, 0.3, 0.3].
+        for (count, expected) in counts.into_iter().zip([0.4, 0.3, 0.3]) {
+            assert!((count as f64 / SAMPLES as f64 - expected).abs() < 0.012);
+        }
+        // Acceptance is 1 - D_TV(pi, q) = 1 - 0.3 = 0.7.
+        assert!((accepted as f64 / SAMPLES as f64 - 0.7).abs() < 0.012);
+        Ok(())
+    }
+
+    #[test]
+    fn full_budget_accepts_every_draft_token() -> Result<()> {
+        let mut sampler = Sampler::new(3, 1.0, 1.0, 42, 1.0, 64);
+        let target_logits = logits_from_weights(&[0.6, 0.3, 0.1])?;
+
+        for token in [0, 1, 2] {
+            assert_eq!(
+                sampler.verify_stochastic_draft_token(
+                    token,
+                    &target_logits,
+                    &[],
+                    &[],
+                    &[0.1, 0.3, 0.6],
+                )?,
+                None
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn rejects_incompatible_speculative_distributions() -> Result<()> {
-        let mut sampler = Sampler::new(2, 1.0, 0, 1.0, 64);
+        let mut sampler = Sampler::new(2, 1.0, 0.0, 0, 1.0, 64);
         for (token, p, q) in [
             (0, &[1.0, 0.0][..], &[][..]),
             (0, &[1.0, 0.0], &[1.0]),
@@ -388,8 +462,11 @@ mod tests {
     #[test]
     fn applies_repetition_penalty_across_committed_and_appended_tokens() -> Result<()> {
         let logits = Tensor::new(&[2.0f32, 4.0, -3.0, 6.0], &Device::Cpu)?;
-        let penalized =
-            Sampler::new(4, 1.0, 0, 2.0, 3).apply_repetition_penalty(&logits, &[0, 1], &[2, 1])?;
+        let penalized = Sampler::new(4, 1.0, 0.0, 0, 2.0, 3).apply_repetition_penalty(
+            &logits,
+            &[0, 1],
+            &[2, 1],
+        )?;
         assert_eq!(penalized.to_vec1::<f32>()?, vec![2.0, 2.0, -6.0, 6.0]);
         Ok(())
     }
@@ -402,11 +479,8 @@ mod tests {
             (1, vec![2.0, 4.0, 6.0, 4.0]),
             (8, vec![1.0, 2.0, 3.0, 4.0]),
         ] {
-            let penalized = Sampler::new(4, 1.0, 0, 2.0, repeat_last_n).apply_repetition_penalty(
-                &logits,
-                &[0],
-                &[1, 2, 3],
-            )?;
+            let penalized = Sampler::new(4, 1.0, 0.0, 0, 2.0, repeat_last_n)
+                .apply_repetition_penalty(&logits, &[0], &[1, 2, 3])?;
             assert_eq!(penalized.to_vec1::<f32>()?, expected);
         }
         Ok(())

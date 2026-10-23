@@ -23,19 +23,22 @@ message GenerateText {
   uint64 max_new_tokens = 3;
   // Sampling temperature over the tokenizer vocabulary; zero selects greedy decoding.
   float temperature = 4;
+  // Maximum total variation distance [0.0, 1.0] allowed from the target distribution during
+  // stochastic speculative verification; zero requires exact target-distribution matching.
+  float total_variation_budget = 5;
   // Random sampling seed; omitted selects a random seed. Zero is a valid seed.
-  optional uint64 seed = 5;
+  optional uint64 seed = 6;
   // Positive finite penalty applied to previously seen tokens; 1.0 disables it.
-  float repeat_penalty = 6;
+  float repeat_penalty = 7;
   // Number of recent tokens considered when applying the repetition penalty.
-  uint64 repeat_last_n = 7;
+  uint64 repeat_last_n = 8;
   // Whether text events contain incremental fragments or one buffered response.
-  bool stream_output = 8;
+  bool stream_output = 9;
   // Benchmarking only: ignore end-of-sequence tokens and generate until max_new_tokens is reached.
-  bool ignore_eos_tokens = 9;
+  bool ignore_eos_tokens = 10;
   // Benchmarking only: one-based backend ID to use instead of orchestrator selection; zero lets
   // the orchestrator select the backend normally.
-  uint64 benchmark_backend_id = 10;
+  uint64 benchmark_backend_id = 11;
 }
 
 message GenerateTextEvent {

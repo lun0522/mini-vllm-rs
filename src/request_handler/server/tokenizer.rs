@@ -85,6 +85,7 @@ impl TokenizerWrapper {
             input_token_ids,
             max_new_tokens: request.max_new_tokens,
             temperature: request.temperature,
+            total_variation_budget: request.total_variation_budget,
             seed: request.seed,
             repeat_penalty: request.repeat_penalty,
             repeat_last_n: request.repeat_last_n,
@@ -285,6 +286,7 @@ mod tests {
             ignore_eos_tokens: false,
             benchmark_backend_id: 2,
             temperature: 0.7,
+            total_variation_budget: 0.1,
             seed: Some(0),
         };
 
@@ -298,6 +300,7 @@ mod tests {
         assert_eq!(tokenized.request_id, 42);
         assert_eq!(tokenized.benchmark_backend_id, 2);
         assert_eq!(tokenized.temperature, 0.7);
+        assert_eq!(tokenized.total_variation_budget, 0.1);
         assert_eq!(tokenized.seed, Some(0));
     }
 

@@ -109,6 +109,7 @@ async fn validate_text_generation(channel: Channel) -> anyhow::Result<()> {
             prompt: PROMPT.to_owned(),
             max_new_tokens: 4,
             temperature: 0.0,
+            total_variation_budget: 0.0,
             seed: None,
             repeat_penalty: 1.0,
             repeat_last_n: 64,

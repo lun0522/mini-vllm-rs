@@ -12,7 +12,8 @@ Supported features:
 - **Continuous batching** with dynamic admission, cancellation, chunked prefill,
   and batched prefill, decode, and speculative verification.
 - **Speculative decoding** with a tokenizer-compatible draft model, batched
-  target verification, and cache commit or rollback.
+  target verification, lossless or total-variation-budgeted mentored sampling,
+  and cache commit or rollback.
 - **Paged KV-cache management** and **prefix caching** on both CPU and Metal.
   **Paged attention** is currently CPU-only; Metal reconstructs contiguous
   tensors before attention.

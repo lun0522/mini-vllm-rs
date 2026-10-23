@@ -446,11 +446,18 @@ fn normalize_generate_text_request(
     );
     ensure!(
         request.temperature.is_finite() && request.temperature >= 0.0,
-        "temperature must be finite and nonnegative"
+        "temperature {} must be finite and nonnegative",
+        request.temperature
+    );
+    ensure!(
+        (0.0..=1.0).contains(&request.total_variation_budget),
+        "total_variation_budget {} must be between 0.0 and 1.0 inclusive",
+        request.total_variation_budget
     );
     ensure!(
         request.repeat_penalty.is_finite() && request.repeat_penalty > 0.0,
-        "repeat_penalty must be finite and greater than zero"
+        "repeat_penalty {} must be finite and greater than zero",
+        request.repeat_penalty
     );
 
     // The final generated token remains pending rather than being written to the cache, so one
@@ -782,7 +789,35 @@ mod tests {
 
             assert_eq!(
                 error.to_string(),
-                "temperature must be finite and nonnegative"
+                format!("temperature {temperature} must be finite and nonnegative")
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_total_variation_budgets_before_routing() {
+        for total_variation_budget in [
+            -1.0,
+            1.00001,
+            2.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ] {
+            let mut request = GenerateTextRequest {
+                input_token_ids: vec![1],
+                max_new_tokens: 1,
+                total_variation_budget,
+                ..Default::default()
+            };
+
+            let error = normalize_generate_text_request(&mut request, 16, 32).unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "total_variation_budget {total_variation_budget} must be between 0.0 and 1.0 inclusive"
+                )
             );
         }
     }
@@ -800,7 +835,7 @@ mod tests {
             let error = normalize_generate_text_request(&mut request, 16, 32).unwrap_err();
             assert_eq!(
                 error.to_string(),
-                "repeat_penalty must be finite and greater than zero"
+                format!("repeat_penalty {repeat_penalty} must be finite and greater than zero")
             );
         }
     }
