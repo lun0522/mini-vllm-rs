@@ -81,6 +81,9 @@ order:
 13. [Speculative sampling tradeoffs](benchmarks/speculative_sampling_tradeoff.md)
     measures how temperature and a total-variation budget affect fixed-4 draft
     acceptance, latency, throughput, and representative creative-writing output.
+14. [Speculative sampling proposal break-even](benchmarks/speculative_sampling_proposal_breakeven.md)
+    tests whether longer fixed proposals overcome target-only decoding overhead
+    and brackets the TV budget needed for a clear latency win.
 
 ## Run
 

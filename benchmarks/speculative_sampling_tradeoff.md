@@ -19,6 +19,11 @@ temperature affects lossless acceptance, how increasing that budget changes
 speed, and whether the resulting creative-writing samples remain plausible to
 a reader.
 
+A focused [proposal break-even follow-up](speculative_sampling_proposal_breakeven.md)
+tests whether fixed-6 and fixed-8 proposals can overcome the overhead that
+remains with fixed-4, and brackets the lowest tested TV budget that clearly
+beats target-only decoding.
+
 ## Scope
 
 - The experiment covers one Qwen target/draft pair and one creative-writing
