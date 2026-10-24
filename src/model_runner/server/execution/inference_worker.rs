@@ -134,6 +134,8 @@ impl InferenceWorker {
         request: InferenceRequest,
         routing_reservation: RoutingReservation,
     ) -> Result<()> {
+        let estimated_cached_prefix_token_count =
+            routing_reservation.estimated_cached_prefix_token_count();
         let scheduler = &mut self.scheduler;
         self.request_manager
             .add_request(request, |generate_text_request| {
@@ -143,6 +145,7 @@ impl InferenceWorker {
                     generate_text_request.request_id,
                     &generate_text_request.input_token_ids,
                     max_new_token_count,
+                    estimated_cached_prefix_token_count,
                 )
             })?;
         // If adding the request fails, this line is not reached, but the reservation's RAII
@@ -302,6 +305,7 @@ impl InferenceWorker {
                 active_request_count: scheduler_load.active_request_count,
                 queued_remaining_prefill_token_count: scheduler_load
                     .queued_remaining_prefill_token_count,
+                queued_cached_prefix_token_count: scheduler_load.queued_cached_prefix_token_count,
                 queued_remaining_max_output_token_count: scheduler_load
                     .queued_remaining_max_output_token_count,
                 active_remaining_prefill_token_count: scheduler_load

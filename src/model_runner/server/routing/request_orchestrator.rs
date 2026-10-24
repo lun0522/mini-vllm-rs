@@ -24,6 +24,9 @@ pub struct OperationalState {
     pub queued_request_count: usize,
     pub active_request_count: usize,
     pub queued_remaining_prefill_token_count: usize,
+    /// Reusable tokens estimated from orchestrator-side cache snapshots when requests are routed.
+    /// Cache pages may be evicted before execution, so this is not a guarantee of restoration.
+    pub queued_cached_prefix_token_count: usize,
     pub queued_remaining_max_output_token_count: usize,
     pub active_remaining_prefill_token_count: usize,
     pub active_remaining_max_output_token_count: usize,
@@ -36,13 +39,12 @@ impl OperationalState {
         self.queued_request_count = self
             .queued_request_count
             .saturating_add(reserved_load.request_count);
-        // Policies that do not estimate cache affinity reserve zero cached-prefix tokens.
-        let prefill_token_count = reserved_load
-            .prefill_token_count
-            .saturating_sub(reserved_load.cached_prefix_token_count);
         self.queued_remaining_prefill_token_count = self
             .queued_remaining_prefill_token_count
-            .saturating_add(prefill_token_count);
+            .saturating_add(reserved_load.prefill_token_count);
+        self.queued_cached_prefix_token_count = self
+            .queued_cached_prefix_token_count
+            .saturating_add(reserved_load.cached_prefix_token_count);
         self.queued_remaining_max_output_token_count =
             self.queued_remaining_max_output_token_count.saturating_add(
                 usize::try_from(reserved_load.max_output_token_count).unwrap_or(usize::MAX),
@@ -123,12 +125,14 @@ impl fmt::Display for RoutingCandidateDiagnostics {
             write!(
                 formatter,
                 " operational_epoch={} queued_requests={} active_requests={} \
-                 queued_remaining_prefill_tokens={} queued_remaining_max_output_tokens={} \
-                 active_remaining_prefill_tokens={} active_remaining_max_output_tokens={}",
+                 queued_remaining_prefill_tokens={} queued_cached_prefix_tokens={} \
+                 queued_remaining_max_output_tokens={} active_remaining_prefill_tokens={} \
+                 active_remaining_max_output_tokens={}",
                 state.epoch,
                 state.queued_request_count,
                 state.active_request_count,
                 state.queued_remaining_prefill_token_count,
+                state.queued_cached_prefix_token_count,
                 state.queued_remaining_max_output_token_count,
                 state.active_remaining_prefill_token_count,
                 state.active_remaining_max_output_token_count,
@@ -308,6 +312,15 @@ impl RoutingReservation {
             load: Some(load),
             routing_state,
         }
+    }
+
+    /// Returns the cached-prefix estimate captured from the selected backend's orchestrator-side
+    /// cache snapshot. Cache pages may be evicted before the request starts execution.
+    pub fn estimated_cached_prefix_token_count(&self) -> usize {
+        self.load
+            .as_ref()
+            .expect("released routing reservation has no load")
+            .cached_prefix_token_count
     }
 
     /// Publishes the worker's updated load and removes the corresponding reservation atomically
@@ -664,6 +677,7 @@ mod tests {
                 epoch: 7,
                 queued_request_count: 2,
                 active_request_count: 1,
+                queued_cached_prefix_token_count: 5,
                 ..Default::default()
             }),
             reserved_load: Some(BackendReservedLoad {
@@ -676,6 +690,7 @@ mod tests {
         };
         let log = diagnostics.to_string();
         assert!(log.contains("operational_epoch=7 queued_requests=2 active_requests=1"));
+        assert!(log.contains("queued_cached_prefix_tokens=5"));
         assert!(log.contains("reserved_requests=3 reserved_prefill_tokens=100 reserved_cached_prefix_tokens=40 reserved_max_output_tokens=20"));
     }
 

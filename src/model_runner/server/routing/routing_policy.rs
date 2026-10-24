@@ -228,7 +228,7 @@ impl BackendRoutingPolicy for CacheAwareLeastEstimatedWorkPolicy {
         routing_state: &mut OrchestratorRoutingState,
     ) -> RoutingDecision {
         // This uses the same phase-specific completion-time estimate as least-estimated-work,
-        // but excludes the reusable cached prefix from the incoming request's prefill work.
+        // but excludes reusable cached prefixes from queued and incoming prefill work.
         route_by_score(
             routing_state,
             request.backend_id_override,
@@ -236,7 +236,10 @@ impl BackendRoutingPolicy for CacheAwareLeastEstimatedWorkPolicy {
                 let backend = &self.backend_state_receivers[backend_index];
                 let operational_state = *backend.operational_state_receiver.borrow();
                 diagnostics.operational_state = Some(operational_state);
-                let operational_state = operational_state.with_reserved_load(reserved_load);
+                let mut operational_state = operational_state.with_reserved_load(reserved_load);
+                operational_state.queued_remaining_prefill_token_count = operational_state
+                    .queued_remaining_prefill_token_count
+                    .saturating_sub(operational_state.queued_cached_prefix_token_count);
                 let cache_affinity_state = backend.cache_affinity_state_receiver.borrow();
                 let estimated_cached_prefix_token_count = cache_affinity_state
                     .prefix_cache
@@ -965,6 +968,98 @@ mod tests {
             .iter()
             .all(|candidate| candidate.cache_affinity_state_epoch == Some(0)
                 && candidate.cached_prefix_token_count == Some(0))));
+    }
+
+    #[test]
+    fn queued_cache_credit_changes_capacity_decision_only_for_cache_aware_policy() {
+        // Capacity run 1, request 7: incoming uncached tail is 20 tokens on either backend.
+        // Two queued GPU prompts independently match 496 cached tokens each.
+        let cpu = OperationalState::default();
+        let gpu = OperationalState {
+            queued_request_count: 2,
+            active_request_count: 4,
+            queued_remaining_prefill_token_count: 1032,
+            queued_cached_prefix_token_count: 992,
+            queued_remaining_max_output_token_count: 256,
+            active_remaining_max_output_token_count: 496,
+            ..Default::default()
+        };
+        let backends = || {
+            vec![
+                backend_state_receiver_for_device(InferenceDevice::Cpu, cpu),
+                backend_state_receiver_for_device(InferenceDevice::Gpu, gpu),
+            ]
+        };
+        let profiles = || {
+            vec![throughput_profile(
+                20,
+                128,
+                throughput(73, 45),
+                throughput(2551, 293),
+            )]
+        };
+        let request = RequestRoutingContext {
+            input_token_ids: &[0; 20],
+            input_token_count: 20,
+            max_new_token_count: 128,
+            backend_id_override: None,
+        };
+        let aware = CacheAwareLeastEstimatedWorkPolicy::new(backends(), profiles())
+            .route_request(request, &mut OrchestratorRoutingState::new(2));
+        assert_eq!(aware.backend_id, BackendId::from_index(1));
+        assert_eq!(
+            aware.candidate_diagnostics[0].estimated_duration_ns,
+            Some(3_118_417_046)
+        );
+        assert_eq!(
+            aware.candidate_diagnostics[1].estimated_duration_ns,
+            Some(3_026_933_157)
+        );
+        let raw = LeastEstimatedWorkPolicy::new(backends(), profiles())
+            .route_request(request, &mut OrchestratorRoutingState::new(2));
+        assert_eq!(raw.backend_id, BackendId::from_index(0));
+        assert_eq!(
+            raw.candidate_diagnostics[1].estimated_duration_ns,
+            Some(3_415_800_268)
+        );
+    }
+
+    #[test]
+    fn queued_and_reserved_cache_credits_are_applied_once_each() {
+        let mut routing_state = OrchestratorRoutingState::new(1);
+        routing_state.backends[0].reserved_load = BackendReservedLoad {
+            request_count: 1,
+            prefill_token_count: 10,
+            cached_prefix_token_count: 6,
+            max_output_token_count: 7,
+        };
+        let policy = CacheAwareLeastEstimatedWorkPolicy::new(
+            vec![backend_state_receiver(OperationalState {
+                queued_remaining_prefill_token_count: 10,
+                queued_cached_prefix_token_count: 6,
+                active_remaining_prefill_token_count: 2,
+                ..Default::default()
+            })],
+            default_throughput_profiles(),
+        );
+        let decision = policy.route_request(
+            RequestRoutingContext {
+                input_token_ids: &[1, 2],
+                input_token_count: 2,
+                max_new_token_count: 3,
+                backend_id_override: None,
+            },
+            &mut routing_state,
+        );
+        // Published queue (10-6) + reservation (10-6) + active 2 + incoming 2.
+        assert_eq!(
+            decision.candidate_diagnostics[0].estimated_prefill_token_count,
+            Some(12)
+        );
+        assert_eq!(
+            decision.candidate_diagnostics[0].estimated_decode_token_count,
+            Some(10)
+        );
     }
 
     #[test]

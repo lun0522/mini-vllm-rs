@@ -191,9 +191,18 @@ before those requests reach their workers. Reservations include:
 
 Load-based policies merge reservations into a local copy of the worker's
 operational snapshot as additional queued work. Cache-aware routing subtracts
-the reserved cached-prefix estimate from reserved prefill work; load-only
-policies reserve zero cached-prefix tokens. Round-robin and most-cached-prefix
-record reservations but ignore them when selecting a backend.
+the cached-prefix estimates for queued and reserved requests from their prefill
+work; load-only policies reserve zero cached-prefix tokens. Round-robin and
+most-cached-prefix record reservations but ignore them when selecting a backend.
+
+Each cached-prefix count is an estimate captured from the selected backend's
+orchestrator-side cache-affinity snapshot when the request is routed. The
+estimate follows the reservation into the scheduler's queued-request metadata,
+so later routing decisions can account for expected reuse without querying the
+request manager or cache again. Cache pages may be evicted before the queued
+request starts, so the estimate does not guarantee that those tokens will be
+restored. Once execution starts, the worker reports the request's actual phase
+and remaining work instead of the queued estimate.
 
 The token accompanies the request while dispatch waits for queue space and
 while the request remains in the backend channel. After successfully enqueueing
@@ -213,9 +222,9 @@ queue sends, inference, and routing-log output run outside it. These reservation
 account for pending work, not actual KV-cache capacity. The scheduler separately
 enforces KV-page reservations at admission.
 
-Operational snapshots remain approximate between their sparse publications,
-and cached-prefix estimates can become stale. Reservations close the pending
-dispatch accounting gap without increasing snapshot publication frequency.
+Operational snapshots remain approximate between their sparse publications.
+Reservations close the pending-dispatch accounting gap without increasing
+snapshot publication frequency.
 
 ## Scheduling
 

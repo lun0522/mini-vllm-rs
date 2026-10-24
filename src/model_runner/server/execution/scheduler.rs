@@ -16,6 +16,7 @@ struct RequestSchedulingMetadata {
     request_id: u64,
     max_required_page_count: usize,
     max_new_token_count: usize,
+    estimated_cached_prefix_token_count: usize,
     generated_token_count: usize,
     phase: SchedulingPhase,
     is_blocked: bool,
@@ -46,6 +47,7 @@ pub struct SchedulerLoadSnapshot {
     pub queued_request_count: usize,
     pub active_request_count: usize,
     pub queued_remaining_prefill_token_count: usize,
+    pub queued_cached_prefix_token_count: usize,
     pub queued_remaining_max_output_token_count: usize,
     pub active_remaining_prefill_token_count: usize,
     pub active_remaining_max_output_token_count: usize,
@@ -94,6 +96,7 @@ impl Scheduler {
         request_id: u64,
         input_token_ids: &[u32],
         max_new_token_count: usize,
+        estimated_cached_prefix_token_count: usize,
     ) -> Result<()> {
         let flight_admission = self
             .prefix_cache_flight_coordinator
@@ -112,6 +115,8 @@ impl Scheduler {
                 .kv_cache_geometry
                 .get_required_page_count(max_cached_token_count),
             max_new_token_count,
+            estimated_cached_prefix_token_count: estimated_cached_prefix_token_count
+                .min(input_token_count.saturating_sub(1)),
             generated_token_count: 0,
             phase: SchedulingPhase::Prefill {
                 remaining_token_count: input_token_count,
@@ -181,6 +186,8 @@ impl Scheduler {
         for request in &self.queued_requests {
             snapshot.queued_remaining_prefill_token_count +=
                 Self::remaining_prefill_token_count(request);
+            snapshot.queued_cached_prefix_token_count +=
+                request.estimated_cached_prefix_token_count;
             snapshot.queued_remaining_max_output_token_count +=
                 Self::remaining_max_output_token_count(request);
         }
@@ -497,7 +504,7 @@ mod tests {
     #[test]
     fn reports_remaining_queued_and_active_tokens() -> Result<()> {
         let mut scheduler = scheduler(1, SchedulingPolicy::FirstComeFirstServed);
-        scheduler.enqueue_request(1, &[1, 2, 3, 4], 10)?;
+        scheduler.enqueue_request(1, &[1, 2, 3, 4], 10, 0)?;
 
         assert_eq!(
             scheduler.create_load_snapshot(),
@@ -544,11 +551,40 @@ mod tests {
     }
 
     #[test]
+    fn reports_routing_cache_estimate_only_while_request_is_queued() -> Result<()> {
+        let mut scheduler = scheduler(1, SchedulingPolicy::FirstComeFirstServed);
+        scheduler.enqueue_request(1, &[1, 2, 3, 4], 10, 3)?;
+
+        assert_eq!(
+            scheduler.create_load_snapshot(),
+            SchedulerLoadSnapshot {
+                queued_request_count: 1,
+                queued_remaining_prefill_token_count: 4,
+                queued_cached_prefix_token_count: 3,
+                queued_remaining_max_output_token_count: 10,
+                ..Default::default()
+            }
+        );
+
+        assert_eq!(scheduler.admit_queued_requests(), vec![1]);
+        assert_eq!(
+            scheduler.create_load_snapshot(),
+            SchedulerLoadSnapshot {
+                active_request_count: 1,
+                active_remaining_prefill_token_count: 4,
+                active_remaining_max_output_token_count: 10,
+                ..Default::default()
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
     fn admits_requests_in_arrival_order() {
         let mut scheduler = scheduler(3, SchedulingPolicy::FirstComeFirstServed);
-        scheduler.enqueue_request(1, &[0; 30], 1).unwrap();
-        scheduler.enqueue_request(2, &[0; 10], 1).unwrap();
-        scheduler.enqueue_request(3, &[0; 20], 1).unwrap();
+        scheduler.enqueue_request(1, &[0; 30], 1, 0).unwrap();
+        scheduler.enqueue_request(2, &[0; 10], 1, 0).unwrap();
+        scheduler.enqueue_request(3, &[0; 20], 1, 0).unwrap();
 
         let admitted_request_ids = scheduler.admit_queued_requests();
 
@@ -570,10 +606,10 @@ mod tests {
                 page_token_count: 16,
             },
         );
-        scheduler.enqueue_request(1, &[10, 20], 1)?;
-        scheduler.enqueue_request(2, &[10, 20], 1)?;
-        scheduler.enqueue_request(3, &[30, 40], 1)?;
-        scheduler.enqueue_request(4, &[50, 60], 1)?;
+        scheduler.enqueue_request(1, &[10, 20], 1, 0)?;
+        scheduler.enqueue_request(2, &[10, 20], 1, 0)?;
+        scheduler.enqueue_request(3, &[30, 40], 1, 0)?;
+        scheduler.enqueue_request(4, &[50, 60], 1, 0)?;
         assert_eq!(scheduler.admit_queued_requests(), vec![1, 3]);
         scheduler.update_request_phase(
             1,
@@ -617,8 +653,8 @@ mod tests {
                 page_token_count: 16,
             },
         );
-        scheduler.enqueue_request(1, &[10, 20], 1)?;
-        scheduler.enqueue_request(2, &[10, 20], 1)?;
+        scheduler.enqueue_request(1, &[10, 20], 1, 0)?;
+        scheduler.enqueue_request(2, &[10, 20], 1, 0)?;
         assert_eq!(scheduler.admit_queued_requests(), vec![1]);
 
         assert_eq!(
@@ -655,10 +691,10 @@ mod tests {
     #[test]
     fn admits_shortest_prefills_first_and_preserves_tie_order() {
         let mut scheduler = scheduler(4, SchedulingPolicy::ShortestPrefillFirst);
-        scheduler.enqueue_request(1, &[0; 30], 1).unwrap();
-        scheduler.enqueue_request(2, &[0; 10], 1).unwrap();
-        scheduler.enqueue_request(3, &[0; 20], 1).unwrap();
-        scheduler.enqueue_request(4, &[0; 10], 1).unwrap();
+        scheduler.enqueue_request(1, &[0; 30], 1, 0).unwrap();
+        scheduler.enqueue_request(2, &[0; 10], 1, 0).unwrap();
+        scheduler.enqueue_request(3, &[0; 20], 1, 0).unwrap();
+        scheduler.enqueue_request(4, &[0; 10], 1, 0).unwrap();
 
         let admitted_request_ids = scheduler.admit_queued_requests();
 
@@ -668,9 +704,9 @@ mod tests {
     #[test]
     fn enforces_the_active_request_limit() {
         let mut scheduler = scheduler(2, SchedulingPolicy::FirstComeFirstServed);
-        scheduler.enqueue_request(1, &[0; 10], 1).unwrap();
-        scheduler.enqueue_request(2, &[0; 20], 1).unwrap();
-        scheduler.enqueue_request(3, &[0; 30], 1).unwrap();
+        scheduler.enqueue_request(1, &[0; 10], 1, 0).unwrap();
+        scheduler.enqueue_request(2, &[0; 20], 1, 0).unwrap();
+        scheduler.enqueue_request(3, &[0; 30], 1, 0).unwrap();
 
         let admitted_request_ids = scheduler.admit_queued_requests();
 
@@ -710,7 +746,7 @@ mod tests {
             },
         );
 
-        scheduler.enqueue_request(1, &[0; 3], 2).unwrap();
+        scheduler.enqueue_request(1, &[0; 3], 2, 0).unwrap();
 
         assert_eq!(scheduler.queued_requests[0].max_required_page_count, 4);
     }
@@ -729,9 +765,9 @@ mod tests {
                 page_token_count: 4,
             },
         );
-        scheduler.enqueue_request(1, &[0; 1], 1).unwrap();
-        scheduler.enqueue_request(2, &[0; 4], 1).unwrap();
-        scheduler.enqueue_request(3, &[0; 1], 1).unwrap();
+        scheduler.enqueue_request(1, &[0; 1], 1, 0).unwrap();
+        scheduler.enqueue_request(2, &[0; 4], 1, 0).unwrap();
+        scheduler.enqueue_request(3, &[0; 1], 1, 0).unwrap();
 
         assert_eq!(scheduler.admit_queued_requests(), vec![1, 2]);
 
@@ -745,7 +781,7 @@ mod tests {
             .unwrap();
         assert_eq!(scheduler.admit_queued_requests(), vec![3]);
 
-        scheduler.enqueue_request(4, &[0; 1], 1).unwrap();
+        scheduler.enqueue_request(4, &[0; 1], 1, 0).unwrap();
         assert!(scheduler.admit_queued_requests().is_empty());
         scheduler.remove_active_request(2).unwrap();
         assert_eq!(scheduler.admit_queued_requests(), vec![4]);
@@ -765,10 +801,10 @@ mod tests {
                 page_token_count: 4,
             },
         );
-        scheduler.enqueue_request(1, &[0; 4], 1).unwrap();
+        scheduler.enqueue_request(1, &[0; 4], 1, 0).unwrap();
         assert_eq!(scheduler.admit_queued_requests(), vec![1]);
-        scheduler.enqueue_request(2, &[0; 5], 1).unwrap();
-        scheduler.enqueue_request(3, &[0; 1], 1).unwrap();
+        scheduler.enqueue_request(2, &[0; 5], 1, 0).unwrap();
+        scheduler.enqueue_request(3, &[0; 1], 1, 0).unwrap();
 
         assert!(scheduler.admit_queued_requests().is_empty());
     }
@@ -777,9 +813,9 @@ mod tests {
     fn limits_scheduled_prefill_work_to_the_token_budget() {
         let mut scheduler =
             scheduler_with_token_budget(12, 3, SchedulingPolicy::FirstComeFirstServed);
-        scheduler.enqueue_request(1, &[0; 8], 1).unwrap();
-        scheduler.enqueue_request(2, &[0; 10], 1).unwrap();
-        scheduler.enqueue_request(3, &[0; 4], 1).unwrap();
+        scheduler.enqueue_request(1, &[0; 8], 1, 0).unwrap();
+        scheduler.enqueue_request(2, &[0; 10], 1, 0).unwrap();
+        scheduler.enqueue_request(3, &[0; 4], 1, 0).unwrap();
 
         scheduler.admit_queued_requests();
         let decision = scheduler.create_scheduling_decision();
@@ -805,7 +841,7 @@ mod tests {
     fn chunks_a_prefill_larger_than_the_token_budget() {
         let mut scheduler =
             scheduler_with_token_budget(8, 1, SchedulingPolicy::FirstComeFirstServed);
-        scheduler.enqueue_request(1, &[0; 20], 1).unwrap();
+        scheduler.enqueue_request(1, &[0; 20], 1, 0).unwrap();
 
         scheduler.admit_queued_requests();
         let decision = scheduler.create_scheduling_decision();
@@ -829,9 +865,9 @@ mod tests {
             SchedulingPolicy::RoundRobin,
         ] {
             let mut scheduler = scheduler_with_token_budget(4, 3, scheduling_policy);
-            scheduler.enqueue_request(1, &[0; 10], 1).unwrap();
-            scheduler.enqueue_request(2, &[0; 10], 1).unwrap();
-            scheduler.enqueue_request(3, &[0; 10], 1).unwrap();
+            scheduler.enqueue_request(1, &[0; 10], 1, 0).unwrap();
+            scheduler.enqueue_request(2, &[0; 10], 1, 0).unwrap();
+            scheduler.enqueue_request(3, &[0; 10], 1, 0).unwrap();
             scheduler.admit_queued_requests();
             scheduler
                 .update_request_phase(
@@ -866,9 +902,9 @@ mod tests {
     fn applies_admission_policy_before_creating_a_schedule() {
         let mut scheduler =
             scheduler_with_token_budget(15, 2, SchedulingPolicy::ShortestPrefillFirst);
-        scheduler.enqueue_request(1, &[0; 30], 1).unwrap();
-        scheduler.enqueue_request(2, &[0; 10], 1).unwrap();
-        scheduler.enqueue_request(3, &[0; 20], 1).unwrap();
+        scheduler.enqueue_request(1, &[0; 30], 1, 0).unwrap();
+        scheduler.enqueue_request(2, &[0; 10], 1, 0).unwrap();
+        scheduler.enqueue_request(3, &[0; 20], 1, 0).unwrap();
 
         scheduler.admit_queued_requests();
         let decision = scheduler.create_scheduling_decision();
@@ -894,8 +930,8 @@ mod tests {
     fn schedules_active_prefills_by_remaining_token_count() {
         let mut scheduler =
             scheduler_with_token_budget(10, 2, SchedulingPolicy::ShortestPrefillFirst);
-        scheduler.enqueue_request(1, &[0; 10], 1).unwrap();
-        scheduler.enqueue_request(2, &[0; 20], 1).unwrap();
+        scheduler.enqueue_request(1, &[0; 10], 1, 0).unwrap();
+        scheduler.enqueue_request(2, &[0; 20], 1, 0).unwrap();
         scheduler.admit_queued_requests();
         scheduler
             .update_request_phase(
@@ -936,9 +972,9 @@ mod tests {
     #[test]
     fn rotates_prefill_priority_across_round_robin_decisions() {
         let mut scheduler = scheduler_with_token_budget(5, 3, SchedulingPolicy::RoundRobin);
-        scheduler.enqueue_request(1, &[0; 10], 1).unwrap();
-        scheduler.enqueue_request(2, &[0; 10], 1).unwrap();
-        scheduler.enqueue_request(3, &[0; 10], 1).unwrap();
+        scheduler.enqueue_request(1, &[0; 10], 1, 0).unwrap();
+        scheduler.enqueue_request(2, &[0; 10], 1, 0).unwrap();
+        scheduler.enqueue_request(3, &[0; 10], 1, 0).unwrap();
         scheduler.admit_queued_requests();
         scheduler
             .update_request_phase(
@@ -987,9 +1023,9 @@ mod tests {
     #[test]
     fn round_robin_uses_budget_left_by_a_completed_prefill() {
         let mut scheduler = scheduler_with_token_budget(8, 3, SchedulingPolicy::RoundRobin);
-        scheduler.enqueue_request(1, &[0; 10], 1).unwrap();
-        scheduler.enqueue_request(2, &[0; 2], 1).unwrap();
-        scheduler.enqueue_request(3, &[0; 10], 1).unwrap();
+        scheduler.enqueue_request(1, &[0; 10], 1, 0).unwrap();
+        scheduler.enqueue_request(2, &[0; 2], 1, 0).unwrap();
+        scheduler.enqueue_request(3, &[0; 10], 1, 0).unwrap();
         scheduler.admit_queued_requests();
         scheduler
             .update_request_phase(
@@ -1026,7 +1062,7 @@ mod tests {
     #[test]
     fn rejects_transitioning_from_decode_back_to_prefill() {
         let mut scheduler = scheduler(1, SchedulingPolicy::FirstComeFirstServed);
-        scheduler.enqueue_request(1, &[0; 10], 1).unwrap();
+        scheduler.enqueue_request(1, &[0; 10], 1, 0).unwrap();
         scheduler.admit_queued_requests();
         scheduler
             .update_request_phase(
