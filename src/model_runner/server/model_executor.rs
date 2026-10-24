@@ -362,10 +362,22 @@ impl ModelExecutor {
             InferenceDevice::Cpu => Ok(Device::Cpu),
             InferenceDevice::Gpu => {
                 cfg_if::cfg_if! {
-                    if #[cfg(target_os = "macos")] {
+                    if #[cfg(all(target_os = "macos", feature = "metal"))] {
                         Device::new_metal(0).context("failed to initialize the Metal device")
-                    } else {
+                    } else if #[cfg(all(target_os = "macos", not(feature = "metal")))] {
+                        bail!(
+                            "GPU inference on macOS requires the `metal` Cargo feature; \
+                             rebuild with `--features metal`"
+                        )
+                    } else if #[cfg(all(target_os = "linux", feature = "cuda"))] {
                         Device::new_cuda(0).context("failed to initialize the CUDA device")
+                    } else if #[cfg(all(target_os = "linux", not(feature = "cuda")))] {
+                        bail!(
+                            "GPU inference on Linux requires the `cuda` Cargo feature; \
+                             rebuild with `--features cuda`"
+                        )
+                    } else {
+                        bail!("GPU inference is unsupported on this operating system")
                     }
                 }
             }
@@ -400,6 +412,32 @@ mod tests {
     use crate::models::KvCache;
     use candle_core::DType;
     use candle_core::Tensor;
+
+    #[cfg(all(target_os = "macos", not(feature = "metal")))]
+    #[test]
+    fn gpu_request_explains_missing_metal_feature() {
+        let error = ModelExecutor::get_inference_device(InferenceDevice::Gpu)
+            .expect_err("CPU-only builds must reject GPU inference");
+        assert!(
+            error
+                .to_string()
+                .contains("requires the `metal` Cargo feature"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "cuda")))]
+    #[test]
+    fn gpu_request_explains_missing_cuda_feature() {
+        let error = ModelExecutor::get_inference_device(InferenceDevice::Gpu)
+            .expect_err("CPU-only builds must reject GPU inference");
+        assert!(
+            error
+                .to_string()
+                .contains("requires the `cuda` Cargo feature"),
+            "unexpected error: {error:#}"
+        );
+    }
 
     struct TestModel {
         info: ModelInfo,

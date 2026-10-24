@@ -1,7 +1,9 @@
 use hyper_util::rt::TokioIo;
+use std::fmt;
 use std::path::Path;
 use std::process::Child;
 use std::process::Command;
+use std::str::FromStr;
 use std::time::Duration;
 use tokio::net::UnixStream;
 use tonic::transport::Channel;
@@ -36,10 +38,79 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(600);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TRACE_DIRECTORY_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_TEST_TRACE_DIRECTORY";
+const INFERENCE_DEVICE_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_TEST_INFERENCE_DEVICE";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TestInferenceDevice {
+    Cpu,
+    Gpu,
+    Mixed,
+}
+
+impl TestInferenceDevice {
+    fn from_environment() -> anyhow::Result<Self> {
+        let value = std::env::var(INFERENCE_DEVICE_ENVIRONMENT_VARIABLE)
+            .unwrap_or_else(|_| Self::Cpu.to_string());
+        value.parse()
+    }
+
+    fn validate_compiled_backend(self) -> anyhow::Result<()> {
+        if self == Self::Cpu {
+            return Ok(());
+        }
+
+        #[cfg(target_os = "macos")]
+        anyhow::ensure!(
+            cfg!(feature = "metal"),
+            "{self} E2E testing on macOS requires the `metal` Cargo feature"
+        );
+        #[cfg(target_os = "linux")]
+        anyhow::ensure!(
+            cfg!(feature = "cuda"),
+            "{self} E2E testing on Linux requires the `cuda` Cargo feature"
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        anyhow::bail!("{self} E2E testing is unsupported on this platform");
+
+        Ok(())
+    }
+
+    fn benchmark_backend_ids(self) -> &'static [u64] {
+        match self {
+            Self::Cpu | Self::Gpu => &[1],
+            Self::Mixed => &[1, 2],
+        }
+    }
+}
+
+impl fmt::Display for TestInferenceDevice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+            Self::Mixed => "mixed",
+        })
+    }
+}
+
+impl FromStr for TestInferenceDevice {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "cpu" => Ok(Self::Cpu),
+            "gpu" => Ok(Self::Gpu),
+            "mixed" => Ok(Self::Mixed),
+            _ => anyhow::bail!(
+                "unsupported {INFERENCE_DEVICE_ENVIRONMENT_VARIABLE} value {value:?}; expected cpu, gpu, or mixed"
+            ),
+        }
+    }
+}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "downloads and runs Qwen2.5 0.5B; invoke explicitly in release mode"]
-async fn qwen_cpu_generation_and_shutdown() {
+async fn run_qwen_generation_and_shutdown() {
     let result = run_end_to_end_test().await;
     if let Err(error) = result {
         panic!("Qwen end-to-end test failed: {error:#}");
@@ -47,15 +118,17 @@ async fn qwen_cpu_generation_and_shutdown() {
 }
 
 async fn run_end_to_end_test() -> anyhow::Result<()> {
+    let inference_device = TestInferenceDevice::from_environment()?;
+    inference_device.validate_compiled_backend()?;
     let socket_directory = tempfile::tempdir_in("/tmp")?;
     let request_socket = socket_directory.path().join("request.sock");
     let control_socket = socket_directory.path().join("control.sock");
-    let mut server = spawn_server(&request_socket, &control_socket)?;
+    let mut server = spawn_server(&request_socket, &control_socket, inference_device)?;
 
     let test_result = async {
         let request_channel =
             wait_for_server(&mut server, &request_socket, STARTUP_TIMEOUT).await?;
-        validate_text_generation(request_channel).await
+        validate_text_generation(request_channel, inference_device).await
     }
     .await;
 
@@ -74,13 +147,17 @@ async fn run_end_to_end_test() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn spawn_server(request_socket: &Path, control_socket: &Path) -> anyhow::Result<Child> {
+fn spawn_server(
+    request_socket: &Path,
+    control_socket: &Path,
+    inference_device: TestInferenceDevice,
+) -> anyhow::Result<Child> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mini-vllm-rs"));
     command
         .arg("--model")
         .arg(MODEL)
         .arg("--inference-device")
-        .arg("cpu")
+        .arg(inference_device.to_string())
         .arg("--kv-cache-config")
         .arg(format!("target_kv_cache_size_bytes: {}", 128 * 1024 * 1024))
         .arg("--scheduler-config")
@@ -97,15 +174,35 @@ fn spawn_server(request_socket: &Path, control_socket: &Path) -> anyhow::Result<
     command.spawn().map_err(Into::into)
 }
 
-async fn validate_text_generation(channel: Channel) -> anyhow::Result<()> {
+async fn validate_text_generation(
+    channel: Channel,
+    inference_device: TestInferenceDevice,
+) -> anyhow::Result<()> {
+    for (request_index, backend_id) in inference_device
+        .benchmark_backend_ids()
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        validate_text_generation_on_backend(channel.clone(), request_index as u64, backend_id)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn validate_text_generation_on_backend(
+    channel: Channel,
+    request_id: u64,
+    benchmark_backend_id: u64,
+) -> anyhow::Result<()> {
     use request_handler::generate_text_event::Event;
     use request_handler::request_handler_service_client::RequestHandlerServiceClient;
 
     let mut client = RequestHandlerServiceClient::new(channel);
-    eprintln!("End-to-end test input: {PROMPT:?}");
+    eprintln!("End-to-end test input on backend {benchmark_backend_id}: {PROMPT:?}");
     let mut stream = client
         .generate_text(request_handler::GenerateText {
-            request_id: 0,
+            request_id,
             prompt: PROMPT.to_owned(),
             max_new_tokens: 4,
             temperature: 0.0,
@@ -115,7 +212,7 @@ async fn validate_text_generation(channel: Channel) -> anyhow::Result<()> {
             repeat_last_n: 64,
             stream_output: true,
             ignore_eos_tokens: true,
-            benchmark_backend_id: 0,
+            benchmark_backend_id,
         })
         .await?
         .into_inner();
@@ -137,7 +234,7 @@ async fn validate_text_generation(channel: Channel) -> anyhow::Result<()> {
         }
     }
 
-    eprintln!("End-to-end test output: {generated_text:?}");
+    eprintln!("End-to-end test output from backend {benchmark_backend_id}: {generated_text:?}");
     anyhow::ensure!(!generated_text.is_empty(), "generation returned no text");
     let stats = stats.ok_or_else(|| anyhow::anyhow!("generation returned no statistics"))?;
     anyhow::ensure!(

@@ -3,7 +3,9 @@
 `mini-vllm-rs` is an educational project for building a fast, lightweight LLM
 inference engine in Rust with [Candle](https://github.com/huggingface/candle).
 It favors clear implementations of modern serving techniques over production
-completeness. The project currently supports macOS only.
+completeness. The project is currently exercised on macOS. Linux/NVIDIA
+support is available behind an explicit CUDA build feature and still requires
+validation on a CUDA machine.
 
 Supported features:
 
@@ -82,12 +84,35 @@ order:
 
 ## Run
 
+### Select a backend
+
+The default build is CPU-only. Backend support is selected at compile time:
+
+```shell
+# CPU-only, on any supported host
+cargo build --release --locked --no-default-features
+
+# Metal, on macOS
+cargo build --release --locked --no-default-features --features metal
+
+# CUDA, on Linux with a CUDA toolkit
+cargo build --release --locked --no-default-features --features cuda
+```
+
+The `--inference-device` runtime option must match the compiled backend. Both
+`gpu` and `mixed` require the platform accelerator feature: `metal` on macOS or
+`cuda` on Linux. A GPU-backed request from a CPU-only build reports the feature
+required for that platform.
+
+The repository pins Rust 1.98.0; the preparation environment used
+`libprotoc 36.1`.
+
 ### Start the server
 
 Run the server with the default Qwen2.5 7B Instruct Q4_K_M model on Metal:
 
 ```shell
-cargo run --release
+cargo run --release --locked --no-default-features --features metal
 ```
 
 ### Server CLI arguments
@@ -104,7 +129,8 @@ cargo run --release
   - `accepted_length`: Selects one more than the rounded moving average of
     recently accepted lengths, clamped to its bounds.
 - `--inference-device <device>` selects `gpu`, `cpu`, or `mixed` and defaults to
-  `gpu`. Mixed mode runs one CPU and one GPU backend concurrently.
+  `gpu`. Mixed mode runs one CPU and one GPU backend concurrently, so it also
+  requires the `metal` feature on macOS or the `cuda` feature on Linux.
 - `--activation-dtype <dtype>` selects `f16` or `f32` and defaults to `f16`. On
   macOS, Candle's Metal quantized matmul does not support F16 activations, so
   GPU inference falls back to `f32` with a warning. In mixed mode on macOS, an
@@ -173,7 +199,7 @@ cargo run --release
 Run the default target with a tokenizer-compatible Qwen2.5 0.5B draft model:
 
 ```shell
-cargo run --release -- \
+cargo run --release --locked --no-default-features --features metal -- \
   --model 'model_id: "bartowski/Qwen2.5-7B-Instruct-GGUF" model_filename: "Qwen2.5-7B-Instruct-Q4_K_M.gguf" tokenizer_id: "Qwen/Qwen2.5-7B-Instruct"' \
   --draft-model 'model { model_id: "bartowski/Qwen2.5-0.5B-Instruct-GGUF" model_filename: "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" tokenizer_id: "Qwen/Qwen2.5-7B-Instruct" } token_count_policy { fixed { draft_token_count: 4 } }'
 ```
@@ -182,7 +208,7 @@ Run Llama 3.1 8B with a tokenizer-compatible Llama 3.2 1B draft model, an
 acceptance-rate token-count policy, and 32-token KV-cache pages:
 
 ```shell
-cargo run --release -- \
+cargo run --release --locked --no-default-features --features metal -- \
   --kv-cache-config 'kv_cache_type: KV_CACHE_TYPE_PAGED per_page_token_count: 32' \
   --model 'model_id: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF" model_filename: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"' \
   --draft-model 'model { model_id: "bartowski/Llama-3.2-1B-Instruct-GGUF" model_filename: "Llama-3.2-1B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct" } token_count_policy { acceptance_rate { initial_draft_token_count: 4 decrease_threshold: 0.4 increase_threshold: 0.8 minimum_draft_token_count: 1 maximum_draft_token_count: 8 } }'
@@ -192,7 +218,7 @@ Run Qwen2.5 0.5B on both CPU and Metal, with requests distributed between the
 two inference backends:
 
 ```shell
-cargo run --release -- \
+cargo run --release --locked --no-default-features --features metal -- \
   --inference-device mixed \
   --model 'model_id: "bartowski/Qwen2.5-0.5B-Instruct-GGUF" model_filename: "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" tokenizer_id: "Qwen/Qwen2.5-0.5B-Instruct"'
 ```
@@ -243,7 +269,7 @@ For example:
 ```shell
 MINI_VLLM_ENABLE_CPU_PAGED_ATTENTION=false \
 MINI_VLLM_ENABLE_CPU_GROUPED_QUERY_MATMUL=false \
-cargo run --release -- --inference-device cpu \
+cargo run --release --locked --no-default-features -- --inference-device cpu \
   --kv-cache-config 'kv_cache_type: KV_CACHE_TYPE_PAGED per_page_token_count: 16'
 ```
 
@@ -306,19 +332,39 @@ it down gracefully.
 
 ## End-to-end test
 
-The ignored end-to-end test runs Qwen2.5 0.5B on CPU through the complete
-three-process serving path. It downloads the model on first use and reuses the
-Hugging Face cache afterward:
+The ignored end-to-end test runs Qwen2.5 0.5B through the complete three-process
+serving path. It downloads the model on first use and reuses the Hugging Face
+cache afterward. It defaults to CPU:
 
 ```shell
-cargo test --release --test end_to_end -- --ignored --nocapture
+cargo test --release --locked --no-default-features --test end_to_end -- --ignored --nocapture
 ```
+
+Set `MINI_VLLM_TEST_INFERENCE_DEVICE` to test an accelerator build:
+
+```shell
+# Metal on macOS
+MINI_VLLM_TEST_INFERENCE_DEVICE=gpu \
+cargo test --release --locked --no-default-features --features metal --test end_to_end -- --ignored --nocapture
+
+# Mixed CPU and Metal; the test sends one request to each backend
+MINI_VLLM_TEST_INFERENCE_DEVICE=mixed \
+cargo test --release --locked --no-default-features --features metal --test end_to_end -- --ignored --nocapture
+
+# CUDA on Linux
+MINI_VLLM_TEST_INFERENCE_DEVICE=gpu \
+cargo test --release --locked --no-default-features --features cuda --test end_to_end -- --ignored --nocapture
+```
+
+Accepted values are `cpu`, `gpu`, and `mixed`. Both `gpu` and `mixed` require
+the accelerator feature for the host platform. In mixed mode, backend IDs are
+pinned so both the CPU and GPU inference paths are exercised deterministically.
 
 Set `MINI_VLLM_TEST_TRACE_DIRECTORY` to collect a Chrome trace during the test:
 
 ```shell
 MINI_VLLM_TEST_TRACE_DIRECTORY=/path/to/traces \
-cargo test --release --test end_to_end -- --ignored --nocapture
+cargo test --release --locked --no-default-features --test end_to_end -- --ignored --nocapture
 ```
 
 The test forwards the directory to the server's `--trace-directory` option.

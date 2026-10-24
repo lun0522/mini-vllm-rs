@@ -496,7 +496,7 @@ fn normalize_activation_dtype(
     activation_dtype: ActivationDType,
     inference_device: InferenceDevice,
 ) -> ActivationDType {
-    if cfg!(target_os = "macos")
+    if cfg!(all(target_os = "macos", feature = "metal"))
         && inference_device == InferenceDevice::Gpu
         && activation_dtype == ActivationDType::F16
     {
