@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1000" height="680" viewBox="0 0 1000 680" role="img" aria-labelledby="title description">
-<title id="title">Request orchestration completion time by workload and schedule</title>
+<title id="title">Request routing policy completion time by workload and schedule</title>
 <desc id="description">Estimated-work variants complete all workloads in approximately 15 to 16 seconds. Round robin and least requests vary from 19 to 46 seconds. Most cached prefix takes approximately 22 and 34 seconds for load and 18 seconds for affinity.</desc>
 <style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#24292f}.title{font-size:18px;font-weight:600}.small{font-size:12px;fill:#57606a}.group{font-size:14px;font-weight:600}.value{font-size:12px}.grid{stroke:#d0d7de;stroke-width:1}.error{stroke:#24292f;stroke-width:1.5}</style>
 <rect width="1000" height="680" fill="white"/>

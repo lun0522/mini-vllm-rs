@@ -5,29 +5,36 @@
 <rect width="1000" height="390" fill="white"/>
 <text x="500" y="28" text-anchor="middle" class="title">CPU offload shifts the saturated TTFT distribution lower</text>
 <text x="500" y="49" text-anchor="middle" class="small">Mean of each per-run statistic across 3 runs; boxes span p25–p75</text>
-<line x1="170" y1="76" x2="170" y2="275" class="grid"/><text x="170" y="297" text-anchor="middle" class="small">0</text>
-<line x1="282.3" y1="76" x2="282.3" y2="275" class="grid"/><text x="282.3" y="297" text-anchor="middle" class="small">10</text>
-<line x1="394.6" y1="76" x2="394.6" y2="275" class="grid"/><text x="394.6" y="297" text-anchor="middle" class="small">20</text>
-<line x1="506.9" y1="76" x2="506.9" y2="275" class="grid"/><text x="506.9" y="297" text-anchor="middle" class="small">30</text>
-<line x1="619.2" y1="76" x2="619.2" y2="275" class="grid"/><text x="619.2" y="297" text-anchor="middle" class="small">40</text>
-<line x1="731.5" y1="76" x2="731.5" y2="275" class="grid"/><text x="731.5" y="297" text-anchor="middle" class="small">50</text>
-<line x1="843.8" y1="76" x2="843.8" y2="275" class="grid"/><text x="843.8" y="297" text-anchor="middle" class="small">60</text>
+<line x1="170.0" y1="76" x2="170.0" y2="275" class="grid"/>
+<text x="170.0" y="297" text-anchor="middle" class="small">0</text>
+<line x1="282.9" y1="76" x2="282.9" y2="275" class="grid"/>
+<text x="282.9" y="297" text-anchor="middle" class="small">10</text>
+<line x1="395.8" y1="76" x2="395.8" y2="275" class="grid"/>
+<text x="395.8" y="297" text-anchor="middle" class="small">20</text>
+<line x1="508.7" y1="76" x2="508.7" y2="275" class="grid"/>
+<text x="508.7" y="297" text-anchor="middle" class="small">30</text>
+<line x1="621.6" y1="76" x2="621.6" y2="275" class="grid"/>
+<text x="621.6" y="297" text-anchor="middle" class="small">40</text>
+<line x1="734.5" y1="76" x2="734.5" y2="275" class="grid"/>
+<text x="734.5" y="297" text-anchor="middle" class="small">50</text>
+<line x1="847.4" y1="76" x2="847.4" y2="275" class="grid"/>
+<text x="847.4" y="297" text-anchor="middle" class="small">60</text>
 <text x="150" y="139" text-anchor="end" class="group">Forced GPU</text>
-<line x1="170.4" y1="134" x2="850.2" y2="134" class="range"/>
-<line x1="170.4" y1="125" x2="170.4" y2="143" class="range"/><line x1="850.2" y1="125" x2="850.2" y2="143" class="range"/>
-<rect x="294.8" y="116" width="370.4" height="36" rx="2" fill="#2563eb"/>
-<line x1="510.6" y1="116" x2="510.6" y2="152" class="median"/>
-<line x1="850.1" y1="110" x2="850.1" y2="158" class="p95"/>
-<text x="510.6" y="105" text-anchor="middle" class="value">median 30.325 s</text>
-<text x="850.1" y="174" text-anchor="end" class="value">p95 60.567 s</text>
+<line x1="170.4" y1="134" x2="853.1" y2="134" class="range"/>
+<line x1="170.4" y1="125" x2="170.4" y2="143" class="range"/><line x1="853.1" y1="125" x2="853.1" y2="143" class="range"/>
+<rect x="341.6" y="116" width="341.0" height="36" rx="2" fill="#2563eb"/>
+<line x1="512.2" y1="116" x2="512.2" y2="152" class="median"/>
+<line x1="852.7" y1="110" x2="852.7" y2="158" class="p95"/>
+<text x="512.2" y="105" text-anchor="middle" class="value">median 30.307 s</text>
+<text x="852.7" y="174" text-anchor="end" class="value">p95 60.467 s</text>
 <text x="150" y="233" text-anchor="end" class="group">Mixed routing</text>
-<line x1="170.4" y1="228" x2="794.8" y2="228" class="range"/>
-<line x1="170.4" y1="219" x2="170.4" y2="237" class="range"/><line x1="794.8" y1="219" x2="794.8" y2="237" class="range"/>
-<rect x="235.5" y="210" width="374.7" height="36" rx="2" fill="#16a34a"/>
-<line x1="426.2" y1="210" x2="426.2" y2="246" class="median"/>
-<line x1="774.0" y1="204" x2="774.0" y2="252" class="p95"/>
-<text x="426.2" y="199" text-anchor="middle" class="value">median 22.817 s</text>
-<text x="774.0" y="268" text-anchor="end" class="value">p95 53.775 s</text>
+<line x1="170.4" y1="228" x2="796.8" y2="228" class="range"/>
+<line x1="170.4" y1="219" x2="170.4" y2="237" class="range"/><line x1="796.8" y1="219" x2="796.8" y2="237" class="range"/>
+<rect x="284.2" y="210" width="328.2" height="36" rx="2" fill="#16a34a"/>
+<line x1="428.0" y1="210" x2="428.0" y2="246" class="median"/>
+<line x1="735.7" y1="204" x2="735.7" y2="252" class="p95"/>
+<text x="428.0" y="199" text-anchor="middle" class="value">median 22.853 s</text>
+<text x="735.7" y="268" text-anchor="end" class="value">p95 50.102 s</text>
 <text x="507" y="322" text-anchor="middle" class="small">Time to first token (seconds)</text>
 <line x1="300" y1="350" x2="330" y2="350" class="range"/><text x="340" y="354" class="small">minimum–maximum</text>
 <rect x="495" y="342" width="30" height="16" fill="#6b7280"/><text x="535" y="354" class="small">p25–p75</text>

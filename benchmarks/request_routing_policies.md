@@ -1,9 +1,9 @@
-# Request Orchestration
+# Request Routing Policies
 
-Request orchestration selects which inference backend receives a whole request.
-Each backend has its own scheduler and KV cache, so this decision determines
-both which device performs the work and which cached prefixes the request can
-reuse. This is separate from [scheduling](scheduling_policies.md), which orders
+Request routing selects which inference backend receives a whole request. Each
+backend has its own scheduler and KV cache, so this decision determines both
+which device performs the work and which cached prefixes the request can reuse.
+This is separate from [scheduling](scheduling_policies.md), which orders
 requests after they have been assigned to one backend.
 
 This benchmark compares five routing policies across one CPU and one Metal GPU
@@ -45,7 +45,7 @@ CPU becomes useful alongside the faster GPU.
 | Operating system | macOS 27.0.1 |
 | Model | Qwen2.5 0.5B Instruct Q4_K_M, without a draft model |
 | Revisions | [`mini-vllm-rs` `09be6b2`](https://github.com/lun0522/mini-vllm-rs/commit/09be6b2e18494830f5f621a0868fe09c50027cad) and [`mini-vllm-eval` `9909da9`](https://github.com/lun0522/mini-vllm-eval/commit/9909da9f795f2f7751e3618f3d3067823308e44b) |
-| Procedure | Follow the `request-orchestration-benchmark` skill in the `mini-vllm-eval` repository and run `request_orchestration` |
+| Procedure | At the recorded revision, follow the then-named `request-orchestration-benchmark` skill in the `mini-vllm-eval` repository and run `request_orchestration` |
 | Configuration | Mixed CPU/Metal GPU inference with F32 activations; separate 256 MiB paged prefix caches with 16 tokens per page; a maximum batched token count of 2,048; a maximum of 4 active requests per backend; default first-come-first-served scheduling; completion-time prefix publication; independent prefix-cache coordination; one input-preprocessing thread |
 | Workloads | `Load` and `Affinity` scenarios with 12 requests submitted 50 ms apart under 2 fixed schedules; responses were consumed concurrently and EOS was ignored |
 | Throughput profiles | The complete measured 12-point [profile matrix](backend_throughput_profiles.textproto), or the fallback profile: CPU prefill/decode 75/48 tok/s and GPU prefill/decode 12,086/396 tok/s |
@@ -127,7 +127,7 @@ Backend placement separated the policies into three patterns:
   `Affinity` requests to the CPU and 5 to the GPU after placing the seed on the
   CPU.
 
-![CPU and GPU request assignment by routing policy](assets/request_orchestration/backend_selection.svg)
+![CPU and GPU request assignment by routing policy](assets/request_routing_policies/backend_selection.svg)
 
 CPU/GPU request counts were identical in schedules A and B, although the
 individual requests assigned to each backend could differ.
@@ -147,7 +147,7 @@ completion time depended on which work landed on the CPU. Relative to **Round
 robin**, estimated-work routing reduced wall time by **15.4–65.4%** across the
 four workloads and schedules.
 
-![Completion time by routing policy, workload, and schedule](assets/request_orchestration/completion_time.svg)
+![Completion time by routing policy, workload, and schedule](assets/request_routing_policies/completion_time.svg)
 
 The estimated-work bars show the range of means across the four policy/profile
 configurations. The [complete completion-time measurements](#completion-time)
@@ -167,7 +167,7 @@ order, its approximate input/output lengths, and whether it shares the `Affinity
 seed. Colors identify the selected backend. **Round robin** and **Least
 requests** made the same placements shown here.
 
-![Request placement in schedules A and B for round robin and least requests](assets/request_orchestration/schedule_placement.svg)
+![Request placement in schedules A and B for round robin and least requests](assets/request_routing_policies/schedule_placement.svg)
 
 **Round robin**'s `Affinity` wall time more than doubled from **19.00 seconds in
 schedule B to 46.00 seconds in schedule A**, even though both schedules sent six
@@ -197,7 +197,7 @@ Estimated-work configurations also achieved substantial reuse because they
 routed almost all requests to the GPU, where their seed was cached, even without
 affinity scoring.
 
-![Restored input tokens by routing policy in Affinity schedules A and B](assets/request_orchestration/cache_reuse.svg)
+![Restored input tokens by routing policy in Affinity schedules A and B](assets/request_routing_policies/cache_reuse.svg)
 
 **Most cached prefix** also avoided placing the unique long-input requests on
 the CPU. Compared with **Round robin**, it reduced `Affinity` wall time from
@@ -238,7 +238,7 @@ reservations; yellow shows the new request. These are estimated costs, not
 measured latency. The incoming request's nearest workload profile prices both
 portions.
 
-![Pending-work and new-request cost estimates using identical snapshots with fallback and detailed profiles](assets/request_orchestration/profile_cost_breakdown.svg)
+![Pending-work and new-request cost estimates using identical snapshots with fallback and detailed profiles](assets/request_routing_policies/profile_cost_breakdown.svg)
 
 - **`cedar`:** GPU already has 1,024 pending decode tokens. Detailed profiles
   reduce its backlog estimate, but the idle CPU remains cheaper overall.
@@ -257,7 +257,7 @@ backend for any of these requests.
 The four workload/schedule cases show that the TTFT tradeoff depended on the
 arrival order and workload:
 
-![Median and p95 time to first token for Round robin and estimated-work variants across all workload schedules](assets/request_orchestration/ttft_tradeoff.svg)
+![Median and p95 time to first token for Round robin and estimated-work variants across all workload schedules](assets/request_routing_policies/ttft_tradeoff.svg)
 
 The estimated-work bars show the range of means across four configurations.
 With only 12 requests, p95 is the group maximum rather than a stable

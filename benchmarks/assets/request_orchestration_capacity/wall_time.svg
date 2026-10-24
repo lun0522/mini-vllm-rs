@@ -1,37 +1,43 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1000" height="470" viewBox="0 0 1000 470" role="img" aria-labelledby="title description">
 <title id="title">Wall time as hot-prefix request count increases</title>
-<desc id="description">Forced-GPU and mixed routing take approximately the same time for four requests. Mixed routing reduces wall time from 10.242 to 9.055 seconds for seven requests and from 68.486 to 61.863 seconds for forty-eight requests.</desc>
+<desc id="description">Forced-GPU and mixed routing take approximately the same time for four requests. Mixed routing reduces wall time from 11.474 to 10.348 seconds for eight requests and from 68.426 to 60.883 seconds for forty-eight requests.</desc>
 <style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#24292f}.title{font-size:18px;font-weight:600}.small{font-size:12px;fill:#57606a}.group{font-size:14px;font-weight:600}.value{font-size:12px}.grid{stroke:#d0d7de;stroke-width:1}.error{stroke:#24292f;stroke-width:1.5}</style>
 <rect width="1000" height="470" fill="white"/>
 <text x="500" y="28" text-anchor="middle" class="title">CPU offload helps once GPU work begins to accumulate</text>
 <text x="500" y="49" text-anchor="middle" class="small">Lower is better; mean of 3 runs; whiskers show sample standard deviation</text>
-<line x1="190" y1="72" x2="190" y2="360" class="grid"/><text x="190" y="382" text-anchor="middle" class="small">0</text>
-<line x1="330" y1="72" x2="330" y2="360" class="grid"/><text x="330" y="382" text-anchor="middle" class="small">15</text>
-<line x1="470" y1="72" x2="470" y2="360" class="grid"/><text x="470" y="382" text-anchor="middle" class="small">30</text>
-<line x1="610" y1="72" x2="610" y2="360" class="grid"/><text x="610" y="382" text-anchor="middle" class="small">45</text>
-<line x1="750" y1="72" x2="750" y2="360" class="grid"/><text x="750" y="382" text-anchor="middle" class="small">60</text>
-<line x1="890" y1="72" x2="890" y2="360" class="grid"/><text x="890" y="382" text-anchor="middle" class="small">75</text>
+<line x1="190.0" y1="72" x2="190.0" y2="360" class="grid"/>
+<text x="190.0" y="382" text-anchor="middle" class="small">0</text>
+<line x1="330.0" y1="72" x2="330.0" y2="360" class="grid"/>
+<text x="330.0" y="382" text-anchor="middle" class="small">15</text>
+<line x1="470.0" y1="72" x2="470.0" y2="360" class="grid"/>
+<text x="470.0" y="382" text-anchor="middle" class="small">30</text>
+<line x1="610.0" y1="72" x2="610.0" y2="360" class="grid"/>
+<text x="610.0" y="382" text-anchor="middle" class="small">45</text>
+<line x1="750.0" y1="72" x2="750.0" y2="360" class="grid"/>
+<text x="750.0" y="382" text-anchor="middle" class="small">60</text>
+<line x1="890.0" y1="72" x2="890.0" y2="360" class="grid"/>
+<text x="890.0" y="382" text-anchor="middle" class="small">75</text>
 <text x="170" y="125" text-anchor="end" class="group">4 requests</text>
-<rect x="190" y="91" width="54.31" height="20" fill="#2563eb"/>
-<path d="M243.94,101 H244.68 M243.94,96 V106 M244.68,96 V106" class="error" fill="none"/>
-<text x="254" y="106" class="value">5.819 s</text>
-<rect x="190" y="119" width="54.38" height="20" fill="#16a34a"/>
-<path d="M243.82,129 H244.94 M243.82,124 V134 M244.94,124 V134" class="error" fill="none"/>
-<text x="254" y="134" class="value">5.826 s</text>
-<text x="170" y="229" text-anchor="end" class="group">7 requests</text>
-<rect x="190" y="195" width="95.59" height="20" fill="#2563eb"/>
-<path d="M284.18,205 H287.00 M284.18,200 V210 M287.00,200 V210" class="error" fill="none"/>
-<text x="295" y="210" class="value">10.242 s</text>
-<rect x="190" y="223" width="84.51" height="20" fill="#16a34a"/>
-<path d="M274.11,233 H274.91 M274.11,228 V238 M274.91,228 V238" class="error" fill="none"/>
-<text x="285" y="238" class="value">9.055 s (−11.6%)</text>
+<rect x="190" y="91" width="54.22" height="20" fill="#2563eb"/>
+<path d="M243.80,101 H244.65 M243.80,96 V106 M244.65,96 V106" class="error" fill="none"/>
+<text x="254.22" y="106" class="value">5.809 s</text>
+<rect x="190" y="119" width="54.65" height="20" fill="#16a34a"/>
+<path d="M243.95,129 H245.36 M243.95,124 V134 M245.36,124 V134" class="error" fill="none"/>
+<text x="254.65" y="134" class="value">5.856 s</text>
+<text x="170" y="229" text-anchor="end" class="group">8 requests</text>
+<rect x="190" y="195" width="107.09" height="20" fill="#2563eb"/>
+<path d="M296.99,205 H297.19 M296.99,200 V210 M297.19,200 V210" class="error" fill="none"/>
+<text x="307.09" y="210" class="value">11.474 s</text>
+<rect x="190" y="223" width="96.59" height="20" fill="#16a34a"/>
+<path d="M286.49,233 H286.69 M286.49,228 V238 M286.69,228 V238" class="error" fill="none"/>
+<text x="296.59" y="238" class="value">10.348 s (−9.8%)</text>
 <text x="170" y="333" text-anchor="end" class="group">48 requests</text>
-<rect x="190" y="299" width="639.20" height="20" fill="#2563eb"/>
-<path d="M826.05,309 H832.35 M826.05,304 V314 M832.35,304 V314" class="error" fill="none"/>
-<text x="839" y="314" class="value">68.486 s</text>
-<rect x="190" y="327" width="577.39" height="20" fill="#16a34a"/>
-<path d="M764.04,337 H770.74 M764.04,332 V342 M770.74,332 V342" class="error" fill="none"/>
-<text x="778" y="342" class="value">61.863 s (−9.7%)</text>
+<rect x="190" y="299" width="638.65" height="20" fill="#2563eb"/>
+<path d="M827.98,309 H829.32 M827.98,304 V314 M829.32,304 V314" class="error" fill="none"/>
+<text x="838.65" y="314" class="value">68.426 s</text>
+<rect x="190" y="327" width="568.24" height="20" fill="#16a34a"/>
+<path d="M757.63,337 H758.85 M757.63,332 V342 M758.85,332 V342" class="error" fill="none"/>
+<text x="768.24" y="342" class="value">60.883 s (−11.0%)</text>
 <text x="540" y="405" text-anchor="middle" class="small">Wall time (seconds)</text>
 <rect x="325" y="428" width="13" height="10" fill="#2563eb"/><text x="345" y="438" class="small">Forced GPU</text>
 <rect x="515" y="428" width="13" height="10" fill="#16a34a"/><text x="535" y="438" class="small">Cache-aware mixed routing</text>
