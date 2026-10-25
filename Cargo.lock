@@ -2008,6 +2008,7 @@ dependencies = [
  "env_logger",
  "hf-hub",
  "hyper-util",
+ "libc",
  "log",
  "prost",
  "prost-reflect",

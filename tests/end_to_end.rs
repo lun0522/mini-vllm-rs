@@ -1,8 +1,13 @@
 use hyper_util::rt::TokioIo;
 use std::fmt;
+use std::fs;
+use std::fs::File;
+use std::io;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Child;
 use std::process::Command;
+use std::process::Stdio;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::net::UnixStream;
@@ -35,6 +40,7 @@ const MODEL: &str = concat!(
 );
 const PROMPT: &str = "Reply with a short greeting.";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(600);
+const GENERATION_TIMEOUT: Duration = Duration::from_secs(120);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TRACE_DIRECTORY_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_TEST_TRACE_DIRECTORY";
@@ -123,43 +129,85 @@ async fn run_end_to_end_test() -> anyhow::Result<()> {
     let socket_directory = tempfile::tempdir_in("/tmp")?;
     let request_socket = socket_directory.path().join("request.sock");
     let control_socket = socket_directory.path().join("control.sock");
-    let mut server = spawn_server(&request_socket, &control_socket, inference_device)?;
+    let log_path = socket_directory.path().join("server.log");
+    let mut server = spawn_server(
+        &request_socket,
+        &control_socket,
+        &log_path,
+        inference_device,
+    )?;
 
     let test_result = async {
         let request_channel =
             wait_for_server(&mut server, &request_socket, STARTUP_TIMEOUT).await?;
-        validate_text_generation(request_channel, inference_device).await
+        tokio::time::timeout(
+            GENERATION_TIMEOUT,
+            validate_text_generation(request_channel, inference_device),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("generation did not complete within {GENERATION_TIMEOUT:?}"))?
     }
     .await;
 
-    let shutdown_result = shutdown_and_wait(&mut server, &control_socket).await;
-    test_result?;
-    shutdown_result?;
+    if let Err(error) = test_result {
+        let cleanup_result = terminate_and_reap(&mut server).await;
+        return Err(with_server_diagnostics(
+            error.context("end-to-end request failed"),
+            &log_path,
+            cleanup_result.err(),
+        ));
+    }
 
-    anyhow::ensure!(
-        !request_socket.exists(),
-        "request-handler socket remained after shutdown"
-    );
-    anyhow::ensure!(
-        !control_socket.exists(),
-        "control socket remained after shutdown"
-    );
+    if let Err(error) = shutdown_and_wait(&mut server, &control_socket).await {
+        let cleanup_result = terminate_and_reap(&mut server).await;
+        return Err(with_server_diagnostics(
+            error,
+            &log_path,
+            cleanup_result.err(),
+        ));
+    }
+
+    let socket_cleanup_result = (|| {
+        anyhow::ensure!(
+            !request_socket.exists(),
+            "request-handler socket remained after shutdown"
+        );
+        anyhow::ensure!(
+            !control_socket.exists(),
+            "control socket remained after shutdown"
+        );
+        anyhow::Ok(())
+    })();
+    if let Err(error) = socket_cleanup_result {
+        return Err(with_server_diagnostics(error, &log_path, None));
+    }
     Ok(())
 }
 
 fn spawn_server(
     request_socket: &Path,
     control_socket: &Path,
+    log_path: &Path,
     inference_device: TestInferenceDevice,
 ) -> anyhow::Result<Child> {
+    let stdout = File::create(log_path)?;
+    let stderr = stdout.try_clone()?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_mini-vllm-rs"));
     command
+        .process_group(0)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
         .arg("--model")
         .arg(MODEL)
         .arg("--inference-device")
         .arg(inference_device.to_string())
+        .arg("--activation-dtype")
+        .arg("f16")
         .arg("--kv-cache-config")
-        .arg(format!("target_kv_cache_size_bytes: {}", 128 * 1024 * 1024))
+        .arg(format!(
+            "kv_cache_type: KV_CACHE_TYPE_CONTIGUOUS target_kv_cache_size_bytes: {}",
+            128 * 1024 * 1024
+        ))
         .arg("--scheduler-config")
         .arg("max_batched_token_count: 64 max_active_request_count: 1")
         .arg("--request-orchestrator-config")
@@ -305,8 +353,6 @@ async fn shutdown_and_wait(server: &mut Child, control_socket: &Path) -> anyhow:
         }
         .await;
         if let Err(error) = shutdown_result {
-            server.kill()?;
-            server.wait()?;
             return Err(error.context("failed to shut down the server through its control RPC"));
         }
     }
@@ -318,12 +364,66 @@ async fn shutdown_and_wait(server: &mut Child, control_socket: &Path) -> anyhow:
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            server.kill()?;
-            server.wait()?;
             anyhow::bail!("server did not exit within {SHUTDOWN_TIMEOUT:?}");
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+async fn terminate_and_reap(server: &mut Child) -> anyhow::Result<()> {
+    if server.try_wait()?.is_some() {
+        return Ok(());
+    }
+
+    signal_process_group(server.id(), libc::SIGTERM)?;
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
+    loop {
+        if server.try_wait()?.is_some() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            signal_process_group(server.id(), libc::SIGKILL)?;
+            server.wait()?;
+            return Ok(());
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+fn signal_process_group(process_id: u32, signal: i32) -> anyhow::Result<()> {
+    let process_group = i32::try_from(process_id)
+        .map_err(|_| anyhow::anyhow!("process ID {process_id} does not fit in i32"))?;
+    // The server is started as its own process-group leader. Its model-runner and
+    // request-handler children inherit that group, so one signal reaches the complete tree.
+    let result = unsafe { libc::kill(-process_group, signal) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error.into())
+    }
+}
+
+fn with_server_diagnostics(
+    error: anyhow::Error,
+    log_path: &Path,
+    cleanup_error: Option<anyhow::Error>,
+) -> anyhow::Error {
+    let logs = fs::read_to_string(log_path)
+        .unwrap_or_else(|log_error| format!("<failed to read server log: {log_error}>"));
+    let cleanup = cleanup_error
+        .map(|cleanup_error| format!("\nprocess cleanup also failed: {cleanup_error:#}"))
+        .unwrap_or_default();
+    anyhow::anyhow!(
+        "{error:#}{cleanup}\nrequested test backend: {}\nserver log ({}):\n{}",
+        std::env::var(INFERENCE_DEVICE_ENVIRONMENT_VARIABLE)
+            .unwrap_or_else(|_| TestInferenceDevice::Cpu.to_string()),
+        log_path.display(),
+        logs
+    )
 }
 
 async fn wait_for_server(
