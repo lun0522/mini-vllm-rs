@@ -148,7 +148,16 @@ pub(super) fn dequantize_to_activation_dtype(
 ) -> Result<Tensor> {
     match activation_dtype {
         ActivationDType::F32 => tensor.dequantize(device),
-        ActivationDType::F16 => tensor.dequantize_f16(device),
+        ActivationDType::F16 => {
+            // Candle (v0.11.0) uses a specialized CUDA kernel for `dequantize_f16()` that doesn't
+            // support F32 tensors. Use the generic dequantize-then-cast path instead, matching
+            // Candle's non-CUDA implementation.
+            if tensor.dtype() == candle_core::quantized::GgmlDType::F32 {
+                tensor.dequantize(device)?.to_dtype(candle_core::DType::F16)
+            } else {
+                tensor.dequantize_f16(device)
+            }
+        }
     }
 }
 
