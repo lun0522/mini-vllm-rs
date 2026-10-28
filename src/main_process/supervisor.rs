@@ -29,7 +29,7 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
     let MainProcessArgs {
         model,
         draft_model,
-        inference_device,
+        inference_devices,
         activation_dtype,
         kv_cache_config,
         scheduler_config,
@@ -56,7 +56,7 @@ pub(crate) async fn run(args: MainProcessArgs) -> Result<()> {
         &model_artifacts,
         runtime_directory.path().join("model-runner.sock"),
         ModelRunnerProcessConfig {
-            inference_device,
+            inference_devices,
             activation_dtype,
             kv_cache_config,
             draft_model_runner_config,

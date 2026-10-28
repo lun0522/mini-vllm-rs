@@ -19,10 +19,10 @@ flowchart LR
     Worker --> Models["Target + optional draft model<br/>Independent KV caches"]
 ```
 
-CPU-only and GPU-only modes create one backend. Mixed mode creates both and
-routes whole requests between their bounded queues. Each backend has its own
-inference thread, scheduler, loaded models, and KV caches; a request is never
-split across devices.
+The server creates one backend for each selected device and routes whole
+requests between their bounded queues. Each backend has its own inference
+thread, scheduler, loaded models, and KV caches; a request is never split across
+devices. For example, selecting CPU and GPU creates one backend for each.
 
 The server binds its Unix socket only after every configured backend has loaded
 its models, making the socket a readiness signal. After startup, inference

@@ -23,14 +23,13 @@ client -> request handler -> model runner
    tokenization, detokenization, and response streaming. A preprocessing thread
    pool prevents CPU-side prompt preparation from blocking other requests.
 3. The **model-runner process** owns the model weights, schedulers, request
-   generation state, KV caches, and device execution. It contains one inference
-   backend in CPU-only or GPU-only mode. Mixed mode creates two independent
-   backends on separate threads, one for CPU and one for GPU. Each backend has
-   its own scheduler, loaded target and optional draft model, and KV caches.
-   A request orchestrator assigns whole requests to backends according to the
-   configured routing policy. The initial policy is round-robin. Requests are
-   continuously batched within their assigned backend and are not divided
-   across devices.
+   generation state, KV caches, and device execution. It creates one inference
+   backend for each selected device. Each backend runs on its own thread and
+   has its own scheduler, loaded target and optional draft model, and KV caches.
+   For example, selecting CPU and GPU creates one backend for each. A request
+   orchestrator assigns whole requests to backends according to the configured
+   routing policy. The initial policy is round-robin. Requests are continuously
+   batched within their assigned backend and are not divided across devices.
 
 The serving processes exchange requests, token IDs, and statistics (rather than
 model tensors) using Protocol Buffers over local Unix sockets. The model runner
@@ -120,10 +119,11 @@ Those boundaries let vLLM scale HTTP/input processing, scheduling, and model
 execution independently and map workers cleanly onto accelerator ranks.
 `mini-vllm-rs` has no distributed ranks to coordinate, so each of its inference
 backends combines the *engine-core* and *device-worker* roles in one thread.
-Mixed mode runs its CPU and GPU backends on different threads within the same
-model-runner process. The project is not intended to scale beyond these two
-concurrent local backends, so separate backend processes would add RPC overhead
-without providing a needed distributed-execution boundary.
+Each selected device gets a backend on its own thread within the same
+model-runner process. This keeps local execution within one process while
+allowing the configured devices to run concurrently; separate backend processes
+would add RPC overhead without providing a needed distributed-execution
+boundary.
 
 ### SGLang
 
@@ -144,7 +144,7 @@ and detokenization in one request-handler process and combines scheduling with
 device execution in one model-runner process.
 
 For local execution, these three total processes retain the useful ownership
-boundaries; mixed mode adds a second heterogeneous worker inside the
+boundaries; selecting CPU and GPU adds a second heterogeneous worker inside the
 model-runner process without importing distributed-worker coordination. Unlike
 the Python control paths in vLLM and SGLang, request routing and scheduling
 remain in native Rust and avoid Python interpreter overhead.

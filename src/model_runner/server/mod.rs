@@ -130,12 +130,12 @@ pub(crate) async fn run(args: ModelRunnerProcessArgs) -> Result<()> {
 
 async fn run_server(args: ModelRunnerProcessArgs) -> Result<()> {
     args.request_orchestrator_config.validate()?;
-    let inference_devices = match args.inference_device {
-        InferenceDevice::Mixed => vec![InferenceDevice::Cpu, InferenceDevice::Gpu],
-        specific_device => vec![specific_device],
-    };
+    anyhow::ensure!(
+        !args.inference_devices.is_empty(),
+        "at least one inference device must be selected"
+    );
     let inference_backends: InferenceBackends =
-        create_inference_backends(&args, &inference_devices)?;
+        create_inference_backends(&args, &args.inference_devices)?;
 
     // Bind only after model initialization succeeds so the socket itself is a
     // readiness signal for the parent process.
@@ -317,12 +317,20 @@ fn create_inference_backends(
     let mut maybe_metadata: Option<ModelExecutorMetadata> = None;
     let mut threads = Vec::with_capacity(inference_devices.len());
     let mut channels = Vec::with_capacity(inference_devices.len());
+    let mut next_gpu_device_index = 0;
     for (index, device) in inference_devices.iter().enumerate() {
         let backend_id = BackendId::from_index(index);
+        let gpu_device_index = if *device == InferenceDevice::Gpu {
+            let gpu_device_index = next_gpu_device_index;
+            next_gpu_device_index += 1;
+            gpu_device_index
+        } else {
+            0
+        };
         let inference_backend: InferenceBackend =
-            create_inference_backend(backend_id, args, *device)?;
+            create_inference_backend(backend_id, args, *device, gpu_device_index)?;
         if let Some(metadata) = maybe_metadata.as_mut() {
-            // TODO: Track capacity per inference backend so mixed mode can use the CPU backend's
+            // TODO: Track capacity per inference backend so multi-device mode can use the CPU backend's
             // additional F16 cache capacity instead of advertising only the shared minimum.
             metadata.kv_cache_token_capacity = metadata
                 .kv_cache_token_capacity
@@ -345,6 +353,7 @@ fn create_inference_backend(
     backend_id: BackendId,
     args: &ModelRunnerProcessArgs,
     inference_device: InferenceDevice,
+    gpu_device_index: usize,
 ) -> Result<InferenceBackend> {
     let activation_dtype = normalize_activation_dtype(args.activation_dtype, inference_device);
     let draft_model_config = args
@@ -357,6 +366,7 @@ fn create_inference_backend(
         &args.model_path,
         draft_model_config,
         inference_device,
+        gpu_device_index,
         activation_dtype,
         KvCacheConfig::from(args.kv_cache_config),
     )?;

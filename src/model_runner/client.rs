@@ -36,7 +36,7 @@ pub(crate) struct ModelRunnerProcess {
 }
 
 pub(crate) struct ModelRunnerProcessConfig {
-    pub(crate) inference_device: InferenceDevice,
+    pub(crate) inference_devices: Vec<InferenceDevice>,
     pub(crate) activation_dtype: ActivationDType,
     pub(crate) kv_cache_config: KvCacheConfig,
     pub(crate) draft_model_runner_config: Option<DraftModelRunnerConfig>,
@@ -119,8 +119,6 @@ fn spawn(
         .env(server::PROCESS_ENVIRONMENT_VARIABLE, "1")
         .arg("--model-path")
         .arg(&model_artifacts.gguf)
-        .arg("--inference-device")
-        .arg(config.inference_device.cli_value())
         .arg("--activation-dtype")
         .arg(config.activation_dtype.cli_value())
         .arg("--kv-cache-config")
@@ -147,6 +145,9 @@ fn spawn(
             )
             .map_err(anyhow::Error::msg)?,
         );
+    for device in &config.inference_devices {
+        command.arg("--inference-device").arg(device.cli_value());
+    }
     if let Some(trace_directory) = &config.trace_directory {
         command.arg("--trace-directory").arg(trace_directory);
     }

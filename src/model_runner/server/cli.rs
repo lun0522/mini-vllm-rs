@@ -16,9 +16,9 @@ pub(crate) struct ModelRunnerProcessArgs {
     /// textproto draft model runner configuration
     #[argh(option)]
     pub(super) draft_model_runner_config: Option<DraftModelRunnerConfig>,
-    /// device used for model inference
-    #[argh(option)]
-    pub(super) inference_device: InferenceDevice,
+    /// device used for model inference; may be supplied multiple times
+    #[argh(option, long = "inference-device")]
+    pub(super) inference_devices: Vec<InferenceDevice>,
     /// data type used for model activations and KV caches
     #[argh(option)]
     pub(super) activation_dtype: ActivationDType,

@@ -45,7 +45,7 @@ const DEFAULT_PREFIX_CACHE_PUBLICATION_POLICY: PrefixCachePublicationPolicyProto
 pub(crate) struct MainProcessArgs {
     pub(crate) model: ModelConfig,
     pub(crate) draft_model: Option<DraftModelConfig>,
-    pub(crate) inference_device: InferenceDevice,
+    pub(crate) inference_devices: Vec<InferenceDevice>,
     pub(crate) activation_dtype: ActivationDType,
     pub(crate) kv_cache_config: KvCacheConfigProto,
     pub(crate) scheduler_config: SchedulerConfigProto,
@@ -82,9 +82,13 @@ struct RawMainProcessArgs {
     /// textproto configuration for the speculative-decoding draft model and token-count policy
     #[argh(option)]
     draft_model: Option<DraftModelConfig>,
-    /// device used for model inference
-    #[argh(option, default = "InferenceDevice::Gpu")]
-    inference_device: InferenceDevice,
+    /// device used for model inference; may be supplied multiple times
+    #[argh(
+        option,
+        long = "inference-device",
+        default = "default_inference_devices()"
+    )]
+    inference_devices: Vec<InferenceDevice>,
     /// data type used for model activations and KV caches
     #[argh(option, default = "ActivationDType::F16")]
     activation_dtype: ActivationDType,
@@ -123,7 +127,7 @@ impl RawMainProcessArgs {
         Ok(MainProcessArgs {
             model: self.model,
             draft_model: self.draft_model,
-            inference_device: self.inference_device,
+            inference_devices: self.inference_devices,
             activation_dtype: self.activation_dtype,
             kv_cache_config: self.kv_cache_config,
             scheduler_config: self.scheduler_config,
@@ -185,7 +189,15 @@ impl fmt::Display for MainProcessArgs {
         } else {
             writeln!(formatter, "Draft model: disabled")?;
         }
-        writeln!(formatter, "Inference device: {}", self.inference_device)?;
+        writeln!(
+            formatter,
+            "Inference devices: {}",
+            self.inference_devices
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )?;
         writeln!(formatter, "Activation dtype: {}", self.activation_dtype)?;
         write!(formatter, "{}", self.kv_cache_config)?;
         write!(formatter, "{}", self.scheduler_config)?;
@@ -219,6 +231,10 @@ pub(crate) fn parse() -> MainProcessArgs {
 
 impl MainProcessArgs {
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.inference_devices.is_empty(),
+            "at least one inference device must be selected"
+        );
         self.model.validate()?;
         if let Some(draft_model) = &self.draft_model {
             draft_model.validate()?;
@@ -234,6 +250,10 @@ impl MainProcessArgs {
             .validate(self.kv_cache_config.kv_cache_type())?;
         Ok(())
     }
+}
+
+fn default_inference_devices() -> Vec<InferenceDevice> {
+    vec![InferenceDevice::Gpu]
 }
 
 fn default_model_config() -> ModelConfig {
@@ -423,7 +443,7 @@ mod tests {
         let args = MainProcessArgs::from_args(&["mini-vllm-rs"], &[])
             .expect("default arguments should parse");
 
-        assert_eq!(args.inference_device, InferenceDevice::Gpu);
+        assert_eq!(args.inference_devices, vec![InferenceDevice::Gpu]);
     }
 
     #[test]
@@ -431,7 +451,7 @@ mod tests {
         let args = MainProcessArgs::from_args(&["mini-vllm-rs"], &["--inference-device", "cpu"])
             .expect("CPU arguments should parse");
 
-        assert_eq!(args.inference_device, InferenceDevice::Cpu);
+        assert_eq!(args.inference_devices, vec![InferenceDevice::Cpu]);
     }
 
     #[test]

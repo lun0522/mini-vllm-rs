@@ -49,8 +49,9 @@ sequenceDiagram
 ```
 
 The runner starts first because the handler connects to it during
-initialization. A child's socket signals readiness; in mixed mode, the runner
-binds its socket only after both CPU and GPU backends are loaded.
+initialization. A child's socket signals readiness; when multiple devices are
+selected, the runner binds its socket only after every configured backend has
+loaded.
 
 Shutdown uses the reverse dependency order:
 

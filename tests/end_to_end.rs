@@ -50,7 +50,7 @@ const INFERENCE_DEVICE_ENVIRONMENT_VARIABLE: &str = "MINI_VLLM_TEST_INFERENCE_DE
 enum TestInferenceDevice {
     Cpu,
     Gpu,
-    Mixed,
+    CpuAndGpu,
 }
 
 impl TestInferenceDevice {
@@ -84,7 +84,7 @@ impl TestInferenceDevice {
     fn benchmark_backend_ids(self) -> &'static [u64] {
         match self {
             Self::Cpu | Self::Gpu => &[1],
-            Self::Mixed => &[1, 2],
+            Self::CpuAndGpu => &[1, 2],
         }
     }
 }
@@ -94,7 +94,7 @@ impl fmt::Display for TestInferenceDevice {
         formatter.write_str(match self {
             Self::Cpu => "cpu",
             Self::Gpu => "gpu",
-            Self::Mixed => "mixed",
+            Self::CpuAndGpu => "cpu,gpu",
         })
     }
 }
@@ -106,9 +106,9 @@ impl FromStr for TestInferenceDevice {
         match value {
             "cpu" => Ok(Self::Cpu),
             "gpu" => Ok(Self::Gpu),
-            "mixed" => Ok(Self::Mixed),
+            "cpu,gpu" => Ok(Self::CpuAndGpu),
             _ => anyhow::bail!(
-                "unsupported {INFERENCE_DEVICE_ENVIRONMENT_VARIABLE} value {value:?}; expected cpu, gpu, or mixed"
+                "unsupported {INFERENCE_DEVICE_ENVIRONMENT_VARIABLE} value {value:?}; expected cpu, gpu, or cpu,gpu"
             ),
         }
     }
@@ -199,8 +199,6 @@ fn spawn_server(
         .stderr(Stdio::from(stderr))
         .arg("--model")
         .arg(MODEL)
-        .arg("--inference-device")
-        .arg(inference_device.to_string())
         .arg("--activation-dtype")
         .arg("f16")
         .arg("--kv-cache-config")
@@ -216,6 +214,17 @@ fn spawn_server(
         .arg(request_socket)
         .arg("--control-socket")
         .arg(control_socket);
+    match inference_device {
+        TestInferenceDevice::Cpu => {
+            command.args(["--inference-device", "cpu"]);
+        }
+        TestInferenceDevice::Gpu => {
+            command.args(["--inference-device", "gpu"]);
+        }
+        TestInferenceDevice::CpuAndGpu => {
+            command.args(["--inference-device", "cpu", "--inference-device", "gpu"]);
+        }
+    }
     if let Some(trace_directory) = std::env::var_os(TRACE_DIRECTORY_ENVIRONMENT_VARIABLE) {
         command.arg("--trace-directory").arg(trace_directory);
     }

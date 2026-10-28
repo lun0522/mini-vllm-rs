@@ -7,6 +7,7 @@ use crate::models::ModelInfo;
 use crate::models::ModelRole;
 use crate::proto::model_runner::GenerateTextRequest;
 use crate::proto::model_runner::GetModelMetadataResponse;
+#[allow(unused_imports)]
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Error;
@@ -66,11 +67,12 @@ impl ModelExecutor {
         model_path: &Path,
         draft_model_config: Option<DraftModelConfig>,
         inference_device: InferenceDevice,
+        gpu_device_index: usize,
         activation_dtype: ActivationDType,
         kv_cache_config: KvCacheConfig,
     ) -> Result<Self> {
         let prefix_cache_publication_policy = kv_cache_config.prefix_cache_publication_policy;
-        let device = Self::get_inference_device(inference_device)?;
+        let device = Self::get_inference_device(inference_device, gpu_device_index)?;
         let loaded_model = LoadedModel::new(model_path, device, activation_dtype)?;
         let loaded_draft_model = draft_model_config
             .map(|config| {
@@ -357,20 +359,27 @@ impl ModelExecutor {
         })
     }
 
-    fn get_inference_device(inference_device: InferenceDevice) -> Result<Device> {
+    fn get_inference_device(
+        inference_device: InferenceDevice,
+        #[allow(unused_variables)] gpu_device_index: usize,
+    ) -> Result<Device> {
         match inference_device {
             InferenceDevice::Cpu => Ok(Device::Cpu),
             InferenceDevice::Gpu => {
                 cfg_if::cfg_if! {
                     if #[cfg(all(target_os = "macos", feature = "metal"))] {
-                        Device::new_metal(0).context("failed to initialize the Metal device")
+                        Device::new_metal(gpu_device_index).with_context(|| {
+                            format!("failed to initialize Metal device {gpu_device_index}")
+                        })
                     } else if #[cfg(all(target_os = "macos", not(feature = "metal")))] {
                         bail!(
                             "GPU inference on macOS requires the `metal` Cargo feature; \
                              rebuild with `--features metal`"
                         )
                     } else if #[cfg(all(target_os = "linux", feature = "cuda"))] {
-                        Device::new_cuda(0).context("failed to initialize the CUDA device")
+                        Device::new_cuda(gpu_device_index).with_context(|| {
+                            format!("failed to initialize CUDA device {gpu_device_index}")
+                        })
                     } else if #[cfg(all(target_os = "linux", not(feature = "cuda")))] {
                         bail!(
                             "GPU inference on Linux requires the `cuda` Cargo feature; \
@@ -381,7 +390,6 @@ impl ModelExecutor {
                     }
                 }
             }
-            InferenceDevice::Mixed => bail!("expecting a specific device type"),
         }
     }
 }
@@ -416,7 +424,7 @@ mod tests {
     #[cfg(all(target_os = "macos", not(feature = "metal")))]
     #[test]
     fn gpu_request_explains_missing_metal_feature() {
-        let error = ModelExecutor::get_inference_device(InferenceDevice::Gpu)
+        let error = ModelExecutor::get_inference_device(InferenceDevice::Gpu, 0)
             .expect_err("CPU-only builds must reject GPU inference");
         assert!(
             error
@@ -429,7 +437,7 @@ mod tests {
     #[cfg(all(target_os = "linux", not(feature = "cuda")))]
     #[test]
     fn gpu_request_explains_missing_cuda_feature() {
-        let error = ModelExecutor::get_inference_device(InferenceDevice::Gpu)
+        let error = ModelExecutor::get_inference_device(InferenceDevice::Gpu, 0)
             .expect_err("CPU-only builds must reject GPU inference");
         assert!(
             error

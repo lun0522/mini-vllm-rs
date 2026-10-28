@@ -368,7 +368,6 @@ impl BackendThroughputProfiles {
         match device {
             InferenceDevice::Cpu => profile.cpu,
             InferenceDevice::Gpu => profile.gpu,
-            InferenceDevice::Mixed => unreachable!("an inference backend has one concrete device"),
         }
     }
 }

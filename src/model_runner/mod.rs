@@ -532,19 +532,17 @@ impl fmt::Display for PrefixCacheCoordinationPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum InferenceDevice {
     Cpu,
     Gpu,
-    Mixed,
 }
 
 impl InferenceDevice {
-    fn cli_value(self) -> &'static str {
+    pub fn cli_value(self) -> &'static str {
         match self {
             Self::Cpu => "cpu",
             Self::Gpu => "gpu",
-            Self::Mixed => "mixed",
         }
     }
 }
@@ -554,7 +552,6 @@ impl fmt::Display for InferenceDevice {
         match self {
             Self::Cpu => formatter.write_str("CPU"),
             Self::Gpu => formatter.write_str("GPU"),
-            Self::Mixed => formatter.write_str("Mixed"),
         }
     }
 }
@@ -566,7 +563,6 @@ impl FromStr for InferenceDevice {
         match value {
             "cpu" => Ok(Self::Cpu),
             "gpu" => Ok(Self::Gpu),
-            "mixed" => Ok(Self::Mixed),
             unsupported => Err(format!("unsupported inference device: {unsupported}")),
         }
     }
@@ -655,11 +651,10 @@ mod tests {
     fn parses_inference_devices() {
         assert_eq!("cpu".parse(), Ok(InferenceDevice::Cpu));
         assert_eq!("gpu".parse(), Ok(InferenceDevice::Gpu));
-        assert_eq!("mixed".parse(), Ok(InferenceDevice::Mixed));
+        assert!("mixed".parse::<InferenceDevice>().is_err());
         assert!("tpu".parse::<InferenceDevice>().is_err());
         assert_eq!(InferenceDevice::Cpu.to_string(), "CPU");
         assert_eq!(InferenceDevice::Gpu.to_string(), "GPU");
-        assert_eq!(InferenceDevice::Mixed.to_string(), "Mixed");
     }
 
     #[test]

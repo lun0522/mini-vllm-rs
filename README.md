@@ -118,10 +118,10 @@ cargo build --release --locked --no-default-features --features metal
 cargo build --release --locked --no-default-features --features cuda
 ```
 
-The `--inference-device` runtime option must match the compiled backend. Both
-`gpu` and `mixed` require the platform accelerator feature: `metal` on macOS or
-`cuda` on Linux. A GPU-backed request from a CPU-only build reports the feature
-required for that platform.
+The `--inference-device` runtime option must match the compiled backend. A `gpu`
+device requires the platform accelerator feature: `metal` on macOS or `cuda` on
+Linux. A GPU-backed request from a CPU-only build reports the feature required
+for that platform.
 
 The repository pins Rust 1.98.0; the preparation environment used
 `libprotoc 36.1`.
@@ -147,15 +147,17 @@ cargo run --release --locked --no-default-features --features metal
     the acceptance rate crosses its thresholds, clamped to its bounds.
   - `accepted_length`: Selects one more than the rounded moving average of
     recently accepted lengths, clamped to its bounds.
-- `--inference-device <device>` selects `gpu`, `cpu`, or `mixed` and defaults to
-  `gpu`. Mixed mode runs one CPU and one GPU backend concurrently, so it also
-  requires the `metal` feature on macOS or the `cuda` feature on Linux.
+- `--inference-device <device>` selects a backend and defaults to `gpu`. Supply
+  the option more than once to run multiple backends, such as
+  `--inference-device cpu --inference-device gpu` for one CPU and one GPU
+  backend concurrently. Each `gpu` entry selects the next accelerator index, so
+  two GPU entries use devices 0 and 1, and three use devices 0, 1, and 2.
 - `--activation-dtype <dtype>` selects `f16` or `f32` and defaults to `f16`. On
   macOS, Candle's Metal quantized matmul does not support F16 activations. On
   Linux with the `cuda` feature, F16 activations produced incorrect output in
   CUDA quantized-model tests. In both cases, GPU inference changes an `f16`
-  request to `f32` with a warning. In mixed mode, an `f16` request uses `f16`
-  on the CPU backend and `f32` on the GPU backend.
+  request to `f32` with a warning. With CPU and GPU backends, an `f16` request
+  uses `f16` on the CPU backend and `f32` on the GPU backend.
 - `--kv-cache-config '<textproto>'` configures KV-cache storage and allocation:
   - `kv_cache_type`: Accepts `KV_CACHE_TYPE_CONTIGUOUS`,
     `KV_CACHE_TYPE_PAGED`, or `KV_CACHE_TYPE_PAGED_PREFIX`, and defaults to the
@@ -240,7 +242,7 @@ two inference backends:
 
 ```shell
 cargo run --release --locked --no-default-features --features metal -- \
-  --inference-device mixed \
+  --inference-device cpu --inference-device gpu \
   --model 'model_id: "bartowski/Qwen2.5-0.5B-Instruct-GGUF" model_filename: "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" tokenizer_id: "Qwen/Qwen2.5-0.5B-Instruct"'
 ```
 
@@ -368,8 +370,8 @@ Set `MINI_VLLM_TEST_INFERENCE_DEVICE` to test an accelerator build:
 MINI_VLLM_TEST_INFERENCE_DEVICE=gpu \
 cargo test --release --locked --no-default-features --features metal --test end_to_end -- --ignored --nocapture
 
-# Mixed CPU and Metal; the test sends one request to each backend
-MINI_VLLM_TEST_INFERENCE_DEVICE=mixed \
+# CPU and Metal; the test sends one request to each backend
+MINI_VLLM_TEST_INFERENCE_DEVICE=cpu,gpu \
 cargo test --release --locked --no-default-features --features metal --test end_to_end -- --ignored --nocapture
 
 # CUDA on Linux
@@ -377,9 +379,11 @@ MINI_VLLM_TEST_INFERENCE_DEVICE=gpu \
 cargo test --release --locked --no-default-features --features cuda --test end_to_end -- --ignored --nocapture
 ```
 
-Accepted values are `cpu`, `gpu`, and `mixed`. Both `gpu` and `mixed` require
-the accelerator feature for the host platform. In mixed mode, backend IDs are
-pinned so both the CPU and GPU inference paths are exercised deterministically.
+Accepted values are `cpu`, `gpu`, and `cpu,gpu` to run both backends. GPU
+requires the accelerator feature for the host platform. When both devices are
+selected, backend IDs are pinned so both inference paths are exercised
+deterministically. The end-to-end test converts `cpu,gpu` into two
+`--inference-device` arguments for the server.
 
 Set `MINI_VLLM_TEST_TRACE_DIRECTORY` to collect a Chrome trace during the test:
 
