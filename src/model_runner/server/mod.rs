@@ -496,13 +496,23 @@ fn normalize_activation_dtype(
     activation_dtype: ActivationDType,
     inference_device: InferenceDevice,
 ) -> ActivationDType {
-    if cfg!(all(target_os = "macos", feature = "metal"))
+    let is_metal = cfg!(all(target_os = "macos", feature = "metal"));
+    let is_cuda = cfg!(all(target_os = "linux", feature = "cuda"));
+    if (is_metal || is_cuda)
         && inference_device == InferenceDevice::Gpu
         && activation_dtype == ActivationDType::F16
     {
-        warn!(
-            "Candle's Metal quantized matmul does not support F16 activations; using F32 instead"
-        );
+        if is_metal {
+            warn!(
+                "Candle's Metal quantized matmul does not support F16 activations; \
+                 using F32 instead"
+            );
+        } else if is_cuda {
+            warn!(
+                "F16 activations produced incorrect output in CUDA quantized-model \
+                 tests; temporarily using F32 instead"
+            );
+        }
         ActivationDType::F32
     } else {
         activation_dtype

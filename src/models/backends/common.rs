@@ -411,12 +411,14 @@ impl TransformerBlock {
             );
         }
 
+        let enable_group_query_heads =
+            request_q.device().is_cpu() && *ENABLE_CPU_GROUPED_QUERY_MATMUL;
         forward_contiguous_attention(
             request_q,
             request_full_k,
             request_full_v,
             dimensions,
-            *ENABLE_CPU_GROUPED_QUERY_MATMUL,
+            enable_group_query_heads,
             &self.neg_inf,
         )
     }

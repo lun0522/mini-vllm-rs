@@ -3,9 +3,9 @@
 `mini-vllm-rs` is an educational project for building a fast, lightweight LLM
 inference engine in Rust with [Candle](https://github.com/huggingface/candle).
 It favors clear implementations of modern serving techniques over production
-completeness. The project is currently exercised on macOS. Linux/NVIDIA
-support is available behind an explicit CUDA build feature and still requires
-validation on a CUDA machine.
+completeness. Development is centered on macOS, while Linux/NVIDIA support is
+available behind an explicit CUDA build feature and validated on NVIDIA
+hardware.
 
 Supported features:
 
@@ -22,14 +22,30 @@ Supported features:
 - **Heterogeneous CPU/Metal inference** with concurrent backend execution and
   load- and cache-aware request routing.
 
+NVIDIA GPUs are supported through Candle's CUDA backend. Validated on a Tesla T4
+with the Qwen and Llama quantized models used in this project, including
+speculative decoding. CUDA GPU inference currently uses F32 activations. F16 is
+temporarily disabled on CUDA because testing revealed incorrect generation with
+F16 activations in the tested quantized models; the root cause remains under
+investigation.
+
 If you are interested in the project's design, see the
 [architecture and process model](ARCHITECTURE.md). It explains the three-process
 design, CPU and GPU inference backends, and how the project differs from
 mistral.rs, vLLM, and SGLang.
 
-I also wrote a retrospective blog post on what I learned while building this
-project:
+## Articles
+
+I wrote a retrospective blog post on what I learned while building this project:
 [Building an LLM Inference Engine with AI: The Code Was the Easy Part](https://lun0522.github.io/building-an-llm-inference-engine/).
+
+I also wrote a few shorter posts about specific challenges and design choices:
+
+1. [From a Rust Inference Engine to Heterogeneous Serving](https://dev.to/lun0522/from-a-rust-inference-engine-to-heterogeneous-serving-gj1)
+2. [Why Continuous Batching Made My LLM Inference Engine Slower](https://dev.to/lun0522/why-continuous-batching-made-my-llm-inference-engine-slower-3pjb)
+3. [Why My Prefix Cache Missed Identical Requests](https://dev.to/lun0522/why-my-prefix-cache-missed-identical-requests-4imn)
+4. [When LLM Inference on CPU Beats Waiting for the GPU](https://dev.to/lun0522/when-llm-inference-on-cpu-beats-waiting-for-the-gpu-22ff)
+5. [What I Gave Up to Make Speculative Decoding Faster](https://dev.to/lun0522/what-i-gave-up-to-make-speculative-decoding-faster-1h87)
 
 ## Benchmarks
 
@@ -135,9 +151,11 @@ cargo run --release --locked --no-default-features --features metal
   `gpu`. Mixed mode runs one CPU and one GPU backend concurrently, so it also
   requires the `metal` feature on macOS or the `cuda` feature on Linux.
 - `--activation-dtype <dtype>` selects `f16` or `f32` and defaults to `f16`. On
-  macOS, Candle's Metal quantized matmul does not support F16 activations, so
-  GPU inference falls back to `f32` with a warning. In mixed mode on macOS, an
-  `f16` request uses `f16` on the CPU backend and `f32` on the Metal backend.
+  macOS, Candle's Metal quantized matmul does not support F16 activations. On
+  Linux with the `cuda` feature, F16 activations produced incorrect output in
+  CUDA quantized-model tests. In both cases, GPU inference changes an `f16`
+  request to `f32` with a warning. In mixed mode, an `f16` request uses `f16`
+  on the CPU backend and `f32` on the GPU backend.
 - `--kv-cache-config '<textproto>'` configures KV-cache storage and allocation:
   - `kv_cache_type`: Accepts `KV_CACHE_TYPE_CONTIGUOUS`,
     `KV_CACHE_TYPE_PAGED`, or `KV_CACHE_TYPE_PAGED_PREFIX`, and defaults to the
