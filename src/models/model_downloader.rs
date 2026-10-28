@@ -2,7 +2,7 @@ use crate::models::ModelRole;
 use crate::proto::inference_config::ModelConfig;
 use anyhow::Context;
 use anyhow::Result;
-use hf_hub::api::sync::Api;
+use hf_hub::api::sync::ApiBuilder;
 use hf_hub::api::sync::ApiRepo;
 use hf_hub::Repo;
 use hf_hub::RepoType;
@@ -28,7 +28,9 @@ impl ModelDownloader {
         let started = Instant::now();
         // hf-hub stores downloads in its standard local cache, so subsequent runs
         // reuse these files rather than downloading the model again.
-        let api = Api::new().context("failed to create the Hugging Face Hub client")?;
+        let api = ApiBuilder::from_env()
+            .build()
+            .context("failed to create the Hugging Face Hub client")?;
         let repo = api.repo(Repo::with_revision(
             self.model.model_id.to_owned(),
             RepoType::Model,
