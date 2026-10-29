@@ -248,34 +248,48 @@ cargo run --release --locked --no-default-features --features metal -- \
 
 ### Performance tracing
 
+#### Chrome trace
+
 `--trace-directory` enables Chrome trace export for the model-runner process
-and writes `model-runner-<timestamp>.json` in the specified directory. For example,
-when running a benchmark from `mini-vllm-eval`:
+and writes `model-runner-<timestamp>.json` in the specified directory. After
+building the binary (see [Select a backend](#select-a-backend)), start the
+server directly:
 
 ```shell
-python3 main.py --benchmark simple_generation \
-  --trace-directory /tmp/mini-vllm-traces
+./target/release/mini-vllm-rs --trace-directory /tmp/mini-vllm-traces
 ```
 
-Open the generated JSON file in [Perfetto](https://ui.perfetto.dev).
+While it is running, send an inference request using the
+[client example](#send-a-client-request) to capture model work.
+
+Open the generated JSON file in [Perfetto](https://ui.perfetto.dev):
+
+![Chrome trace example](assets/chrome_trace.png)
+
+Chrome tracing is mainly useful for CPU-side work. For CUDA operations it
+shows the host-side trace scopes, but provides limited GPU detail and does not
+show the CUDA kernel timeline; use Nsight Systems with NVTX for that.
+
+#### CUDA trace
 
 For a CUDA build, `MINI_VLLM_ENABLE_NVTX=true` emits NVTX ranges from the same
 model, layer, attention, and MLP trace scopes. This works with or without
 `--trace-directory`; when that option is omitted, no Chrome trace file is
-created. Nsight Systems controls its report output directory with `-o`:
+created. Nsight Systems controls its report output directory with `--output`:
 
 ```shell
 MINI_VLLM_ENABLE_NVTX=true nsys profile \
   --trace=cuda,nvtx \
   --cuda-trace-scope=process-tree \
-  -o /tmp/mini-vllm \
+  --output=/tmp/mini-vllm-rs \
   ./target/release/mini-vllm-rs <usual arguments>
 ```
 
 `--cuda-trace-scope=process-tree` includes CUDA activity from the profiled
 process and its child processes. `mini-vllm-rs` runs the model runner as a
-child, so this includes the process that launches the model's CUDA work;
-`system-wide` would include CUDA activity from all processes instead.
+child, so this includes the process that launches the model's CUDA work.
+
+![CUDA trace example](assets/cuda_trace.png)
 
 ### Server environment variables
 
