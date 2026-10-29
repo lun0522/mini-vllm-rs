@@ -89,7 +89,7 @@ impl QMatMul {
             return Ok(None);
         }
 
-        let _enter = trace::qmatmul(self.operation, "cpu-f16-via-f32");
+        let _trace_guard = trace::qmatmul(self.operation, "cpu-f16-via-f32");
         let input = input.to_dtype(DType::F32)?;
         let output = self.inner.forward(&input)?;
         Ok(Some(output.to_dtype(DType::F16)?))
@@ -116,7 +116,7 @@ impl QMatMul {
             return Ok(None);
         }
 
-        let _enter = trace::qmatmul(self.operation, "metal-rowwise-gemv");
+        let _trace_guard = trace::qmatmul(self.operation, "metal-rowwise-gemv");
         let mut outputs = Vec::with_capacity(row_count);
         for row_index in 0..row_count {
             let row = input.narrow(row_dim, row_index, /* len */ 1)?;
@@ -136,7 +136,7 @@ impl Module for QMatMul {
             return Ok(output);
         }
 
-        let _enter = trace::qmatmul(self.operation, "quantized-matmul");
+        let _trace_guard = trace::qmatmul(self.operation, "quantized-matmul");
         self.inner.forward(input)
     }
 }
@@ -240,7 +240,7 @@ impl TransformerBlock {
         layer_index: usize,
         cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
-        let _enter = trace::layer(layer_index);
+        let _trace_guard = trace::layer(layer_index);
         let residual = x;
         let x = self.attn_norm.forward(x)?;
         let x = self.forward_attention(&x, contexts, layer_index, cache)?;
@@ -263,7 +263,7 @@ impl TransformerBlock {
         layer_index: usize,
         cache: &mut dyn KvCache,
     ) -> Result<Tensor> {
-        let _enter = trace::attention();
+        let _trace_guard = trace::attention();
 
         // packed_x: [1, packed_q_len, embedding_len].
         // packed_q: [1, num_q_heads, packed_q_len, head_dim].
@@ -307,7 +307,7 @@ impl TransformerBlock {
             let request_k = self.forward_rope(&request_k, start_pos, "key")?;
 
             {
-                let _enter = trace::attention_cache_append();
+                let _trace_guard = trace::attention_cache_append();
                 cache
                     .append_new_key_value(
                         request_id,
@@ -334,7 +334,7 @@ impl TransformerBlock {
     }
 
     fn forward_mlp(&self, x: &Tensor) -> Result<Tensor> {
-        let _enter = trace::mlp();
+        let _trace_guard = trace::mlp();
         let residual = x;
         let x = self.mlp_norm.forward(x)?;
         let x = self.mlp.forward(&x)?;
@@ -348,7 +348,7 @@ impl TransformerBlock {
         tensor_name: &'static str,
     ) -> Result<Tensor> {
         let context = &self.rope_context;
-        let _enter = trace::rope(tensor_name);
+        let _trace_guard = trace::rope(tensor_name);
         let (_, _, query_len, _) = x.dims4()?;
         let cos = context.cos.narrow(/* dim */ 0, index_pos, query_len)?;
         let sin = context.sin.narrow(/* dim */ 0, index_pos, query_len)?;
@@ -383,7 +383,7 @@ impl TransformerBlock {
             key: request_full_k,
             value: request_full_v,
         } = {
-            let _enter = trace::attention_cache_access("contiguous");
+            let _trace_guard = trace::attention_cache_access("contiguous");
             cache
                 .get_contiguous_cache_tensors(context.request_id, layer_index)
                 .map_err(candle_core::Error::wrap)?
@@ -399,7 +399,7 @@ impl TransformerBlock {
 
         // Metal SDPA handles GQA or MQA without explicitly repeating K and V.
         if request_q.device().is_metal() && dimensions.q_len == 1 {
-            let _enter = trace::attention_sdpa("metal");
+            let _trace_guard = trace::attention_sdpa("metal");
             return candle_nn::ops::sdpa(
                 request_q,
                 &request_full_k,
@@ -436,7 +436,7 @@ impl TransformerBlock {
         }
 
         let Some(paged_cache_layout) = ({
-            let _enter = trace::attention_cache_access("paged");
+            let _trace_guard = trace::attention_cache_access("paged");
             cache
                 .get_paged_cache_layout(context.request_id, layer_index)
                 .map_err(candle_core::Error::wrap)?
@@ -506,7 +506,7 @@ impl TransformerModelWeights {
         verification_inputs: &[ForwardInput],
         kv_cache: &mut dyn KvCache,
     ) -> Result<ForwardOutput> {
-        let _enter_model = trace::model();
+        let _model_trace_guard = trace::model();
 
         let combined_inputs = generation_inputs
             .iter()
@@ -527,7 +527,7 @@ impl TransformerModelWeights {
                 layer.forward(&packed_hidden_states, &contexts, layer_index, kv_cache)?;
         }
 
-        let _enter_output = trace::output();
+        let _output_trace_guard = trace::output();
         let packed_hidden_states = self.output_norm.forward(&packed_hidden_states)?;
 
         let (generation_contexts, verification_contexts) =
@@ -718,7 +718,7 @@ fn forward_contiguous_attention(
         enable_group_query_heads,
     )? / (dimensions.head_dim as f64).sqrt())?;
     let request_attn_weights = {
-        let _enter = trace::attention_mask_softmax();
+        let _trace_guard = trace::attention_mask_softmax();
         let request_attn_scores = apply_causal_attention_mask(
             request_attn_scores,
             dimensions.q_len,
@@ -784,7 +784,7 @@ fn forward_paged_attention(
     let request_attn_scores = (Tensor::cat(&request_attn_score_slices, /* dim */ 3)?
         / (dimensions.head_dim as f64).sqrt())?;
     let request_attn_weights = {
-        let _enter = trace::attention_mask_softmax();
+        let _trace_guard = trace::attention_mask_softmax();
         let request_attn_scores = apply_causal_attention_mask(
             request_attn_scores,
             dimensions.q_len,
@@ -795,7 +795,7 @@ fn forward_paged_attention(
     };
 
     if enable_pagewise_value_matmul {
-        let _enter = trace::attention_paged_value("pagewise");
+        let _trace_guard = trace::attention_paged_value("pagewise");
         matmul_paged_attention_value(
             request_attn_weights,
             request_v_slices,
@@ -803,7 +803,7 @@ fn forward_paged_attention(
             enable_group_query_heads,
         )
     } else {
-        let _enter = trace::attention_paged_value("concatenated");
+        let _trace_guard = trace::attention_paged_value("concatenated");
         // request_full_v: [1, num_kv_heads, kv_len, head_dim].
         let request_full_v = Tensor::cat(&request_v_slices, /* dim */ 2)?.contiguous()?;
         matmul_attention_value(
@@ -836,14 +836,14 @@ fn matmul_query_key(
     if !enable_group_query_heads || repetition_count == 1 {
         // request_repeated_k: [1, num_q_heads, kv_len, head_dim].
         let request_repeated_k = {
-            let _enter = trace::attention_repeat_kv("key");
+            let _trace_guard = trace::attention_repeat_kv("key");
             repeat_kv(request_k, repetition_count)?
         };
-        let _enter = trace::attention_query_key("repeated-kv");
+        let _trace_guard = trace::attention_query_key("repeated-kv");
         return request_q.matmul(&request_repeated_k.t()?);
     }
 
-    let _enter = trace::attention_query_key("grouped");
+    let _trace_guard = trace::attention_query_key("grouped");
     // grouped_q: [num_kv_heads, repetition_count * q_len, head_dim].
     let grouped_q = request_q.squeeze(0)?.reshape((
         dimensions.num_kv_heads,
@@ -878,14 +878,14 @@ fn matmul_attention_value(
     if !enable_group_query_heads || repetition_count == 1 {
         // request_repeated_v: [1, num_q_heads, kv_len, head_dim].
         let request_repeated_v = {
-            let _enter = trace::attention_repeat_kv("value");
+            let _trace_guard = trace::attention_repeat_kv("value");
             repeat_kv(request_v, repetition_count)?
         };
-        let _enter = trace::attention_value("repeated-kv");
+        let _trace_guard = trace::attention_value("repeated-kv");
         return request_attn_weights.matmul(&request_repeated_v.contiguous()?);
     }
 
-    let _enter = trace::attention_value("grouped");
+    let _trace_guard = trace::attention_value("grouped");
     // grouped_weights: [num_kv_heads, repetition_count * q_len, kv_len].
     let grouped_weights = request_attn_weights.reshape((
         dimensions.num_kv_heads,

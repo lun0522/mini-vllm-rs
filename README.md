@@ -259,14 +259,36 @@ python3 main.py --benchmark simple_generation \
 
 Open the generated JSON file in [Perfetto](https://ui.perfetto.dev).
 
+For a CUDA build, `MINI_VLLM_ENABLE_NVTX=true` emits NVTX ranges from the same
+model, layer, attention, and MLP trace scopes. This works with or without
+`--trace-directory`; when that option is omitted, no Chrome trace file is
+created. Nsight Systems controls its report output directory with `-o`:
+
+```shell
+MINI_VLLM_ENABLE_NVTX=true nsys profile \
+  --trace=cuda,nvtx \
+  --cuda-trace-scope=process-tree \
+  -o /tmp/mini-vllm \
+  ./target/release/mini-vllm-rs <usual arguments>
+```
+
+`--cuda-trace-scope=process-tree` includes CUDA activity from the profiled
+process and its child processes. `mini-vllm-rs` runs the model runner as a
+child, so this includes the process that launches the model's CUDA work;
+`system-wide` would include CUDA activity from all processes instead.
+
 ### Server environment variables
 
-All the following environment variables are read once when the process starts,
-so changing them does not rebuild the binary.
+These environment variables are read at runtime, so changing them does not
+require rebuilding the binary. Values cached by a subsystem remain fixed for
+that process.
 
 - `RUST_LOG` controls log filtering, for example `RUST_LOG=warn`.
 - `CANDLE_NUM_THREADS` controls Candle's CPU worker pool, including quantized
   matrix multiplication.
+- `MINI_VLLM_ENABLE_NVTX` accepts `true` or `false` and defaults to `false`;
+  `true` enables NVTX range emission in CUDA builds. Nsight Systems must also
+  collect NVTX with `--trace=cuda,nvtx`.
 - `RAYON_NUM_THREADS` controls Rayon-based CPU operations.
 
 On Apple Silicon, Candle defaults to the number of performance-core logical
