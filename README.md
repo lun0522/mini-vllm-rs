@@ -9,18 +9,19 @@ hardware.
 
 Supported features:
 
-- **Native Rust GGUF inference** for quantized Qwen2 and Llama models on CPU
-  and Metal, with streaming or buffered output and generation statistics.
+- **Native Rust GGUF inference** for quantized Qwen2 and Llama models on CPU,
+  Metal, and CUDA, with streaming or buffered output and generation statistics.
 - **Continuous batching** with dynamic admission, cancellation, chunked prefill,
   and batched prefill, decode, and speculative verification.
 - **Speculative decoding** with a tokenizer-compatible draft model, batched
   target verification, lossless or total-variation-budgeted mentored sampling,
   and cache commit or rollback.
-- **Paged KV-cache management** and **prefix caching** on both CPU and Metal.
-  **Paged attention** is currently CPU-only; Metal reconstructs contiguous
-  tensors before attention.
-- **Heterogeneous CPU/Metal inference** with concurrent backend execution and
-  load- and cache-aware request routing.
+- **Paged KV-cache management** and **prefix caching** on CPU, Metal, and CUDA.
+  Page-wise attention is currently CPU-only; Metal and CUDA reconstruct
+  contiguous tensors before attention.
+- **Heterogeneous CPU/GPU inference** with concurrent backend execution and
+  load- and cache-aware request routing. GPU backends use Metal on macOS and
+  CUDA on Linux.
 
 NVIDIA GPUs are supported through Candle's CUDA backend. Validated on a Tesla T4
 with the Qwen and Llama quantized models used in this project, including
@@ -46,6 +47,7 @@ I also wrote a few shorter posts about specific challenges and design choices:
 3. [Why My Prefix Cache Missed Identical Requests](https://dev.to/lun0522/why-my-prefix-cache-missed-identical-requests-4imn)
 4. [When LLM Inference on CPU Beats Waiting for the GPU](https://dev.to/lun0522/when-llm-inference-on-cpu-beats-waiting-for-the-gpu-22ff)
 5. [What I Gave Up to Make Speculative Decoding Faster](https://dev.to/lun0522/what-i-gave-up-to-make-speculative-decoding-faster-1h87)
+6. [When Just Enabling the CUDA Feature Meant Two Free GPUs](https://dev.to/lun0522/when-just-enable-the-cuda-feature-met-two-free-gpus-35l9)
 
 ## Benchmarks
 
@@ -134,6 +136,12 @@ Run the server with the default Qwen2.5 7B Instruct Q4_K_M model on Metal:
 cargo run --release --locked --no-default-features --features metal
 ```
 
+On Linux with CUDA, use the CUDA feature instead:
+
+```shell
+cargo run --release --locked --no-default-features --features cuda
+```
+
 ### Server CLI arguments
 
 - `--model '<textproto>'` selects the target model. Set `model_id`,
@@ -219,6 +227,9 @@ cargo run --release --locked --no-default-features --features metal
 
 #### Examples
 
+The commands below use the Metal feature; on Linux, replace
+`--features metal` with `--features cuda`.
+
 Run the default target with a tokenizer-compatible Qwen2.5 0.5B draft model:
 
 ```shell
@@ -237,8 +248,8 @@ cargo run --release --locked --no-default-features --features metal -- \
   --draft-model 'model { model_id: "bartowski/Llama-3.2-1B-Instruct-GGUF" model_filename: "Llama-3.2-1B-Instruct-Q4_K_M.gguf" tokenizer_id: "meta-llama/Meta-Llama-3.1-8B-Instruct" } token_count_policy { acceptance_rate { initial_draft_token_count: 4 decrease_threshold: 0.4 increase_threshold: 0.8 minimum_draft_token_count: 1 maximum_draft_token_count: 8 } }'
 ```
 
-Run Qwen2.5 0.5B on both CPU and Metal, with requests distributed between the
-two inference backends:
+Run Qwen2.5 0.5B on both CPU and the platform GPU backend (Metal on macOS,
+CUDA on Linux), with requests distributed between the two inference backends:
 
 ```shell
 cargo run --release --locked --no-default-features --features metal -- \
